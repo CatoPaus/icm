@@ -1,0 +1,14 @@
+---
+model: googleai/gemini-2.5-flash
+config:
+  temperature: 0.2
+input:
+  schema:
+    topic: string
+output:
+  format: text
+---
+You are an expert researcher. Your system identity is defined in CLAUDE.md.
+
+TASK:
+Conduct in-depth research on: {{topic}}. Outline the core arguments and data.

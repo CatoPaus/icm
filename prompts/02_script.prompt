@@ -1,0 +1,28 @@
+---
+model: googleai/gemini-2.5-flash
+config:
+  temperature: 0.3
+input:
+  schema:
+    researchFile: string
+    toneRules: string
+output:
+  format: json
+  schema:
+    title: string
+    scriptBody: string
+    estimatedDuration: integer
+---
+You are an expert scriptwriter. Your system identity is defined in CLAUDE.md.
+
+TASK:
+Transform the provided research text into a highly engaging, structured script.
+
+STYLE CONSTRAINTS:
+Adhere to these tone requirements:
+{{toneRules}}
+
+SOURCE RESEARCH:
+{{researchFile}}
+
+Generate the final output matching the JSON output schema.

@@ -1,0 +1,15 @@
+# Dependency directories
+node_modules/
+
+# Local configuration and secret files
+.env.local
+.env.*.local
+
+# Genkit telemetry and local sessions
+.sessions/
+.genkit/
+
+# Build targets
+dist/
+build/
+*.tsbuildinfo

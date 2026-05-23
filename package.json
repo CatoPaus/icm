@@ -1,0 +1,20 @@
+{
+  "name": "genkit-icm-environment",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "genkit:dev": "node --env-file=.env.local node_modules/.bin/genkit start -- npx tsx --watch src/index.ts",
+    "clean": "node scripts/cleanup.js"
+  },
+  "dependencies": {
+    "@genkit-ai/google-genai": "latest",
+    "@genkit-ai/middleware": "latest",
+    "genkit": "latest"
+  },
+  "devDependencies": {
+    "genkit-cli": "latest",
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}
