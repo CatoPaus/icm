@@ -109,6 +109,10 @@ All legacy models (`gemini-2.5-*`, `gemini-3.5-*`, etc.) and deprecated sampling
    * **DOM Reconciliation (`reconcilePreviewHtml`):** `public/app.js` diffs child nodes in place during 3-second live polling so headings, links, and scroll position never flash.
    * **Windows 11 File Explorer (`POST /api/run/:runId/open`):** Launches Explorer on the interactive desktop via `WScript.Shell` (`Win+E`), navigates in-place via `Shell.Application.Navigate2`, and nudges `WM_SIZE` to force Windows 11's `DesktopChildSiteBridge` XAML islands to paint immediately.
    * **Live Terminal Mirror (`.genkit/terminal.log`):** `src/server.ts` automatically tees `stdout` and `stderr` (stripped of ANSI codes) to `.genkit/terminal.log` for instant inspection.
+5. **Built-In Antigravity 2.0 ICM Co-Architect (`GEMINI.md` & `.agents/`)**
+   * **Root `GEMINI.md`:** Configures the main Antigravity 2.0 agent as an interactive **ICM Co-Architect** that guides project customization one question and one stage at a time (avoiding brittle multi-step upfront plans), inspects traces via `genkit-mcp-server` (`get_trace`), and checks `.genkit/terminal.log`.
+   * **Lifecycle Hooks (`.agents/hooks.json` & `.agents/scripts/icm-hooks.mjs`):** Automatically injects the latest run and trace ID at `SessionStart` and enforces a `PreToolUse` guardrail blocking legacy models or deprecated sampling parameters (`temperature`, `topP`, `topK`).
+   * **Interactive Playbook Skill (`.agents/skills/icm-co-architect/SKILL.md`):** Step-by-step runbook for specializing Layer 0/1, testing Stage 1 before designing Stage 2, and expanding the pipeline.
 
 ---
 
@@ -118,6 +122,14 @@ The workspace layout maps abstract context layers directly to disk directories:
 
 ```
 .
+├── GEMINI.md                    # Antigravity 2.0 Main Agent Rules (ICM Co-Architect)
+├── .agents/                     # Antigravity 2.0 Workspace Customizations
+│   ├── hooks.json               # SessionStart context injector & PreToolUse Argon guardrail
+│   ├── scripts/
+│   │   └── icm-hooks.mjs        # Cross-platform Node.js hook handler
+│   └── skills/
+│       └── icm-co-architect/
+│           └── SKILL.md         # Interactive one-stage-at-a-time specialization playbook
 ├── package.json
 ├── tsconfig.json
 ├── src/

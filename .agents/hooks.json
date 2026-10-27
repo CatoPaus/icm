@@ -1,0 +1,27 @@
+{
+  "icm-session-start": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node scripts/icm-hooks.mjs session-start",
+        "timeout": 10
+      }
+    ]
+  },
+  "icm-argon-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "edit_file|write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/icm-hooks.mjs pre-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
