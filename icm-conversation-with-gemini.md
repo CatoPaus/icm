@@ -87,7 +87,7 @@ genkit-icm-environment/
 │   ├── 01_research.prompt       # Stage 1 Contract File
 │   └── 02_script.prompt         # Stage 2 Contract File
 └── workspace/                   # Scoped Workspace Area 
-    ├── CLAUDE.md                # Layer 0: Global Identity Guide
+    ├── GEMINI.md                # Layer 0: Global Identity Guide
     ├── CONTEXT.md               # Layer 1: Workspace Route Context
     ├── _config/                 # Layer 3: Global Reference Materials
     │   └── voice_guide.md       # Global brand tone
@@ -109,7 +109,7 @@ Create `prompts/01_research.prompt` in your project to serve as the Stage 1 Cont
 YAML
 ```yaml
 ---
-model: googleai/gemini-2.5-flash
+model: googleai/gemini-4-argon
 config:
   temperature: 0.2
 input:
@@ -118,7 +118,7 @@ input:
 output:
   format: text
 ---
-You are an expert researcher. Your system identity is defined in CLAUDE.md.
+You are an expert researcher. Your system identity is defined in GEMINI.md.
 
 TASK:
 Conduct in-depth research on: {{topic}}. Outline the core arguments and data.
@@ -129,7 +129,7 @@ Create `prompts/02_script.prompt` in your project to serve as the Stage 2 Contra
 YAML
 ```yaml
 ---
-model: googleai/gemini-2.5-flash
+model: googleai/gemini-4-argon
 config:
   temperature: 0.3
 input:
@@ -143,7 +143,7 @@ output:
     scriptBody: string
     estimatedDuration: integer
 ---
-You are an expert scriptwriter. Your system identity is defined in CLAUDE.md.
+You are an expert scriptwriter. Your system identity is defined in GEMINI.md.
 
 TASK:
 Transform the provided research text into a highly engaging, structured script.
@@ -219,7 +219,7 @@ export const icmOrchestratorFlow = ai.defineFlow(
         // Resilience optimization 
         retry({ maxRetries: 3 }),
         fallback({
-          models: [googleAI.model('gemini-2.5-pro')],
+          models: [googleAI.model('gemini-4-argon')],
           statuses: ['FAILED', 'TIMEOUT'],
         })
       ],
@@ -378,7 +378,7 @@ async function handleInteractiveDeployment(sessionId: string, promptText: string
   const session = await ai.loadSession(sessionId, { store });
   
   let response = await ai.generate({
-    model: googleAI.model('gemini-2.5-flash'),
+    model: googleAI.model('gemini-4-argon'),
     prompt: promptText,
     tools: [deployScriptDraftTool],
   });
@@ -414,7 +414,7 @@ async function approveAndResume(sessionId: string, interruptObj: any) {
 
   // Resume processing, injecting conversation history and approval variables 
   const response = await ai.generate({
-    model: googleAI.model('gemini-2.5-flash'),
+    model: googleAI.model('gemini-4-argon'),
     tools: [deployScriptDraftTool],
     messages: messages, // Carry over conversational turn context 
     resume: {

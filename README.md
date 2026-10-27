@@ -1,12 +1,118 @@
-# Interpretable Context Methodology (ICM) with Firebase Genkit
+# Interpretable Context Methodology (ICM) with Firebase Genkit & Gemini 4 Argon
 
-This repository contains a reference implementation of the **Interpretable Context Methodology (ICM)** built with Firebase Genkit and TypeScript. 
+This repository contains a reference implementation of the **Interpretable Context Methodology (ICM)** built with Firebase Genkit (`v1.43.0`) and TypeScript, powered exclusively by **Gemini 4 Argon (`googleai/gemini-4-argon`)**.
 
 ICM is a declarative, filesystem-centric context management architecture that replaces programmatic agent-orchestration layers with numbered stage directories, markdown-based stage contracts, and explicit sandboxing boundaries.
 
 ---
 
-## 🏗️ Directory Architecture
+## Core Philosophy & Vision
+
+This setup is a **filesystem-first, human-in-the-loop intelligence and production workbench** built on the **Interpretable Context Methodology (ICM)** rather than a black-box multi-agent loop:
+
+### 1. The Filesystem *Is* the State Machine (ICM Layers 0–4)
+Instead of trapping intermediate agent state inside opaque in-memory chat histories where context bloats and hallucinates across turns, every boundary in the pipeline is a **numbered folder and an inspectable file on disk** under `workspace/runs/<runId>/`:
+* **Layer 0 & 1 (`workspace/GEMINI.md` + `workspace/CONTEXT.md`):** Global epistemic rules (strict fact-grounding, automatic Norwegian/English language matching) and pipeline awareness injected into every stage.
+* **Layer 2 (`prompts/01_research.prompt`, `prompts/02_script.prompt`):** Strict stage contracts and schemas.
+* **Layer 3 (`workspace/_config/voice_guide.md`):** Reusable domain/style rules decoupled from the prompt logic.
+* **Layer 4 (`research_summary.md`, `script_draft.json`):** Concrete artifacts that act as the *only* handoff between stages.
+
+### 2. Asymmetric Cognitive Allocation on a Single Frontier Model (`gemini-4-argon`)
+By locking the entire runtime to **Gemini 4 Argon** (`src/index.ts`) and tuning `thinkingLevel` + capabilities per stage, you get deep reasoning where needed and strict determinism downstream:
+* **Stage 1 (`01_research` — `HIGH` thinking + Google Search + `65,536` output budget):** Does the heavy lifting—multi-query live web research, deep strategic synthesis, and byte-accurate inline citation weaving (`cleanGroundingLinks`).
+* **Stage 2 (`02_script` — `MEDIUM` thinking + zero web access):** Operates in a sealed sandbox using *only* the verified Stage 1 artifact and Layer 3 guide—so downstream deliverables can never introduce unverified claims.
+
+### 3. Frictionless Human-in-the-Loop Iteration
+Because every run lives on disk and is surfaced in both the **Web Dashboard** (`src/server.ts`) and **Windows File Explorer** (`Open Folder`), you can:
+1. Run deep research once (watching it stream live via `research_stream.md`).
+2. Inspect, curate, or edit `research_summary.md` (or tweak `voice_guide.md`) either in the browser UI or directly in your local editor via the run folder.
+3. Re-run Stage 2 (or future downstream stages) standalone in seconds without re-running or paying for Stage 1 research again.
+
+### 4. Extensible N-Stage Pipeline Roadmap
+`01_research` → `02_script` is the blueprint for a **plug-and-play N-stage pipeline**:
+* **Fan-out / Downstream Stages (`03_...`, `04_...`):** From a single verified `01_research` artifact, you can branch into multiple specialized outputs (e.g., executive strategy decks, competitor matrices, SEO/content briefs, audio/TTS generation via Gemini TTS, or visual storyboards) simply by adding a numbered stage folder and a `.prompt` file.
+* **1M-Token Deep Context Ingestion:** Drop large local reference corpora (PDFs, competitor dumps, financial reports, or prior run outputs) into a stage's `_config/` or `input/` folder so Argon can synthesize live Google Search grounding *with* hundreds of thousands of tokens of proprietary context.
+
+---
+
+## Using as an Upstream Base / Template Repository
+
+This repository is designed to serve as an **untouched upstream base template** for specialized downstream projects (e.g., `icm-podcast-studio`, `icm-market-strategy`, `icm-legal-review`). Runtime outputs (`workspace/runs/`, `.genkit/`, `.sessions/`) are excluded via `.gitignore` so the base repository remains clean.
+
+Because the **ICM Engine** (`src/index.ts`, `prompts/`, `workspace/`) is completely decoupled from the **Presentation / Server Layer** (`src/server.ts`, `public/`), downstream projects can freely customize stages, prompts, or even swap the Express SPA for a full framework like **Next.js** while keeping the core Genkit + Gemini 4 Argon engine intact.
+
+### Starting a New Specialized Project
+```bash
+# 1. Clone this base repository into a new project directory
+git clone <base-repo-url> icm-podcast-studio
+cd icm-podcast-studio
+
+# 2. Keep this base repository registered as 'upstream'
+git remote rename origin upstream
+
+# 3. Point 'origin' to your new specialized project's repository
+git remote add origin <new-specialized-repo-url>
+git push -u origin main
+```
+
+### Pulling Future Engine Upgrades into Specialized Projects
+* **If the specialized project still uses the default Express server/UI:**
+  ```bash
+  git fetch upstream
+  git merge upstream/main
+  ```
+* **If the specialized project replaced the server/UI (e.g., migrated to Next.js) or heavily customized prompts:**
+  Pull *only* the core engine updates (such as `src/index.ts`) without touching your Next.js app or custom prompts:
+  ```bash
+  git fetch upstream
+  git checkout upstream/main -- src/index.ts
+  ```
+
+---
+
+## Model & Thinking Level Architecture (`gemini-4-argon`)
+
+All legacy models (`gemini-2.5-*`, `gemini-3.5-*`, etc.) and deprecated sampling parameters (`temperature`, `topP`, `topK`) have been purged. Only **`googleai/gemini-4-argon`** is registered in the Genkit runtime and Developer UI, configured with stage-appropriate `thinkingConfig.thinkingLevel` (`LOW`, `MEDIUM`, `HIGH`):
+
+| Pipeline Stage / Flow | Thinking Level | `maxOutputTokens` | Context Window | Rationale |
+| :--- | :--- | :--- | :--- | :--- |
+| **Stage 1: In-Depth Research** (`prompts/01_research.prompt`) | **`HIGH`** (fallback: `MEDIUM`) | `65536` *(max streaming)* | `1,048,576` | Maximizes reasoning depth for multi-source synthesis and Google Search grounding with verbatim citations. |
+| **Stage 2: Scriptwriting** (`prompts/02_script.prompt`) | **`MEDIUM`** (default) | `32768` | `1,048,576` | Balanced reasoning effort, latency, and token usage for structured JSON generation adhering to voice/pacing constraints. |
+| **Interactive Deployment Gate** (`handleInteractiveDeployment`, `approveAndResume`, `rejectAndResume`) | **`LOW`** | `32768` | `1,048,576` | Minimizes latency and token usage for fast tool routing and human-in-the-loop interrupt/resume turns. |
+
+### Token Limits & 1M Context Window Reference (`gemini-4-argon`)
+* **Unified 1M Context Window (`1,048,576` tokens):** Shared across **Input + Thinking + Output**. Any stage can ingest up to ~1M tokens of source documents, transcripts, or prior-stage artifacts without code changes.
+* **Standard / Streaming Output Ceiling (`65,536` tokens):** When using standard synchronous or SSE streaming requests (`background: false`, used by Genkit's `createInteractionStream`), `maxOutputTokens` caps combined thinking + output at **`65,536` tokens (64K)** per turn (setting `> 65536` without background mode returns HTTP `400`).
+  * *Stage 1* is configured at the full **`65,536`** limit (a typical `HIGH`-thinking grounded research run uses ~`1K` input + ~`9K` thinking + ~`24K` output = ~`34K` total tokens).
+  * *Stage 2* and the interactive deployment tools are currently set to **`32,768`** tokens and can be raised to `65,536` in `prompts/02_script.prompt` and `src/index.ts` whenever needed.
+* **Future Option — Long Decode (`> 65,536` up to `1,048,576` output tokens):** If a single turn ever needs to generate more than 64K output tokens in one response, Gemini 4 Argon supports **Long Decode** on the Interactions API by enabling `background: true` and setting `maxOutputTokens` between `262,144` and `1,048,576 - inputTokens`.
+
+---
+
+## Key Architectural & Reliability Features
+
+1. **Full 5-Layer ICM Context Injection (`loadWorkspaceLayers`)**
+   * **Layer 0 (`workspace/GEMINI.md`):** Global identity, epistemic rigor, automatic language alignment, and Markdown citation rules.
+   * **Layer 1 (`workspace/CONTEXT.md`):** Workspace pipeline routing and stage boundary awareness.
+   * **Layer 2 (`prompts/01_research.prompt` & `prompts/02_script.prompt`):** Dotprompt stage contracts.
+   * **Layer 3 (`workspace/_config/voice_guide.md`):** Global voice and pacing rules.
+   * **Layer 4 (`workspace/runs/<runId>/stages/...`):** Immutable prior-stage filesystem artifacts passed between stages.
+2. **SSE Streaming & Timeout-Proof Research (`onChunk`)**
+   * Both Stage 1 and Stage 2 execute over SSE streaming (`stream: true` on `/v1beta/interactions`), preventing Node/Undici's 300-second `headersTimeout` (`TypeError: fetch failed`) during deep `HIGH`-thinking + Google Search turns.
+   * Live reasoning steps and partial output stream directly to `stages/01_research/output/research_stream.md` so the Web Dashboard displays real-time progress.
+   * Transport/stream errors are normalized into `GenkitError({ status: 'UNAVAILABLE' })` so Genkit's `retry` and `fallback` (`HIGH` -> `MEDIUM`) middleware trigger reliably.
+3. **Sub-Second Grounding Citation Resolution (`resolveRedirect` & `cleanGroundingLinks`)**
+   * Resolves `vertexaisearch.cloud.google.com/grounding-api-redirect/...` URLs using `redirect: 'manual'` first to read Google's `302 Location` header directly (~0.5s total for 100+ links) without timing out on unreachable third-party servers.
+   * Weaves Interactions API `url_citation` annotations inline at exact UTF-8 byte offsets and deduplicates references in the **Sources & Citations** section.
+4. **Zero-Flicker Web Dashboard & Native Windows 11 File Explorer Integration**
+   * **SSR State Hydration (`window.__INITIAL_STATE__`):** `src/server.ts` embeds the initial runs and active run detail directly into `index.html` on `GET /`, eliminating initial page-load layout shift and flicker.
+   * **DOM Reconciliation (`reconcilePreviewHtml`):** `public/app.js` diffs child nodes in place during 3-second live polling so headings, links, and scroll position never flash.
+   * **Windows 11 File Explorer (`POST /api/run/:runId/open`):** Launches Explorer on the interactive desktop via `WScript.Shell` (`Win+E`), navigates in-place via `Shell.Application.Navigate2`, and nudges `WM_SIZE` to force Windows 11's `DesktopChildSiteBridge` XAML islands to paint immediately.
+   * **Live Terminal Mirror (`.genkit/terminal.log`):** `src/server.ts` automatically tees `stdout` and `stderr` (stripped of ANSI codes) to `.genkit/terminal.log` for instant inspection.
+
+---
+
+## Directory Architecture
 
 The workspace layout maps abstract context layers directly to disk directories:
 
@@ -15,27 +121,26 @@ The workspace layout maps abstract context layers directly to disk directories:
 ├── package.json
 ├── tsconfig.json
 ├── src/
-│   └── index.ts                 # Main Orchestrator Flow & Resumable Interrupts
+│   ├── index.ts                 # Main Orchestrator Flow, Gemini 4 Argon Plugin & Resumable Interrupts
+│   └── server.ts                # Express API, SSR Hydration, Explorer Launcher & Terminal Mirror
+├── public/                      # Web Dashboard SPA
+│   ├── index.html               # Dashboard layout & SSR state mount
+│   ├── style.css                # Design system & responsive workspace styling
+│   └── app.js                   # Client controller & DOM-reconciled live preview
 ├── prompts/                     # Layer 2: Stage Contracts (Dotprompt templates)
-│   ├── 01_research.prompt       # Stage 1 contract
-│   └── 02_script.prompt         # Stage 2 contract
+│   ├── 01_research.prompt       # Stage 1 contract (gemini-4-argon, thinkingLevel: HIGH)
+│   └── 02_script.prompt         # Stage 2 contract (gemini-4-argon, thinkingLevel: MEDIUM)
 └── workspace/                   # Scoped Workspace Sandbox
-    ├── CLAUDE.md                # Layer 0: Global Identity Guide
+    ├── GEMINI.md                # Layer 0: Global Identity Guide
     ├── CONTEXT.md               # Layer 1: Workspace Route Context
     ├── _config/                 # Layer 3: Global Reference Materials
     │   └── voice_guide.md       # Global brand voice tone
-    └── stages/                  # Live execution directories
-        ├── 01_research/
-        │   ├── references/      # Stage 1 reference docs
-        │   └── output/          # Stage 1 working artifacts (Layer 4)
-        └── 02_script/
-            ├── references/      # Stage 2 reference docs
-            └── output/          # Stage 2 working artifacts (Layer 4)
+    └── runs/                    # Per-run isolated stage execution directories
 ```
 
 ---
 
-## 🚀 Setup & Installation
+## Setup & Installation
 
 ### 1. Prerequisites
 Ensure you have **Node.js v20.6.0+** installed (native support for loading `.env` configuration files).
@@ -54,109 +159,70 @@ GEMINI_API_KEY="your-gemini-api-key"
 
 ---
 
-## 💻 Running the Developer environment
+## Running the Developer Environment
 
-Start the Genkit CLI runner and local Developer UI:
+Start the Web Dashboard and Genkit Developer UI concurrently:
 ```bash
 npm run genkit:dev
 ```
-Once started, the CLI will output:
-* **Telemetry API:** `http://localhost:4033`
+*(Or run `npm run server` to start only the Web Dashboard on port 3000 without the Genkit Developer UI.)*
+Once started:
+* **ICM Web Dashboard:** [http://localhost:3000](http://localhost:3000)
 * **Genkit Developer UI:** [http://localhost:4000](http://localhost:4000)
 
-Open the Developer UI in your browser to inspect, trigger, and debug traces of flows and prompts.
-
 ---
 
-## 🧪 Testing Use Case: Video Script Creator
-
-This testing scenario demonstrates a 2-stage pipeline: researching a topic, allowing human-in-the-loop editing, and writing a structured script conforming to specific brand rules.
-
-### 📋 Scenario Goal
-Create an engaging 2-minute video script about **"How Quantum Computing Works"** matching the brand's voice guide rules.
-
----
+## Testing Use Case: Video Script Creator
 
 ### Step-by-Step Test Walkthrough
 
 #### Step 1: Trigger the Orchestration Flow
-1. Open the Genkit Developer UI at `http://localhost:4000`.
-2. Under the **Flows** section on the left sidebar, click `icmOrchestratorFlow`.
-3. Provide the input arguments in the JSON editor:
+1. Open the ICM Web Dashboard at `http://localhost:3000` (or Genkit Developer UI at `http://localhost:4000`).
+2. Select your desired Thinking Levels (`HIGH` for Stage 1 Research, `MEDIUM` for Stage 2 Scriptwriting) or use the defaults:
    ```json
    {
      "workspaceRoot": "./workspace",
-     "topic": "Quantum Computing Superposition and Entanglement"
+     "runId": "quantum-computing-demo",
+     "topic": "Quantum Computing Superposition and Entanglement",
+     "researchThinkingLevel": "HIGH",
+     "scriptThinkingLevel": "MEDIUM"
    }
    ```
-4. Click **Run**.
+3. Click **Run Full Pipeline**.
 
 #### Step 2: Audit Stage 1 (Research) Outputs
-1. Observe the console logs or trace spans in the Dev UI.
-2. Open the file system and locate:
-   📂 `workspace/stages/01_research/output/research_summary.md`
-3. Verify that the model has successfully generated a comprehensive text summary outlines.
+1. Inspect `workspace/runs/<runId>/stages/01_research/output/research_summary.md`.
+2. Verify that Gemini 4 Argon (`HIGH` thinking) has generated a comprehensive research summary with resolved source citations.
 
 #### Step 3: Human-in-the-Loop Intermission (Simulating Manual Editing)
-One of the core tenets of ICM is that all stages handoff plain files.
-1. Open `workspace/stages/01_research/output/research_summary.md` in your text editor.
-2. Modify or add a custom sentence (e.g., *“Note: Einstein famously called entanglement 'spooky action at a distance'.”*).
-3. Save the file.
-
-#### Step 4: Execute Stage 2 (Scriptwriting)
-The orchestrator now runs Stage 2. It will automatically:
-1. Ingest the edited `research_summary.md` from Stage 1.
-2. Ingest the brand guidelines from `workspace/_config/voice_guide.md`.
-3. Call the `02_script` contract.
-4. Output a structured JSON file at:
-   📂 `workspace/stages/02_script/output/script_draft.json`
-5. Verify the JSON matches the schema with keys `title`, `scriptBody`, and `estimatedDuration`.
+1. Edit `research_summary.md` in the dashboard or your text editor and save to disk.
+2. Click **Regenerate Script** to re-run Stage 2 (`MEDIUM` thinking) with your edited research notes.
 
 ---
 
-### ⏳ Testing Stateful Resumable Interrupts (Stateless API Handoffs)
+### Testing Stateful Resumable Interrupts (Stateless API Handoffs)
 
-For server-based, interactive applications where human gating is required before execution completes, you can test the **Restartable Tool Interrupt** loop:
-
-#### 1. Start the Interactive Run
-In your code/tests (or by instantiating the CLI handlers), invoke `handleInteractiveDeployment` with a session identifier and deployment prompt:
 ```typescript
-// Initial call (returns status AWAITING_APPROVAL)
+// Initial call (uses Gemini 4 Argon with thinkingLevel: 'LOW', returns status AWAITING_APPROVAL)
 const runState = await handleInteractiveDeployment(
   "session-abc-123",
-  "Deploy script draft to media systems"
+  "Deploy script draft to media systems",
+  "LOW"
 );
-```
-At this point, the flow encounters the sensitive `deployScriptDraftTool` tool call. Since it has not been approved, it halts and returns:
-```json
-{
-  "status": "AWAITING_APPROVAL",
-  "sessionId": "session-abc-123",
-  "interrupt": { ... }
-}
-```
 
-#### 2. Resume & Approve the Action
-Simulate the human approval turn by passing the session ID and the saved `interrupt` metadata object to the approval function:
-```typescript
 // Approval call (resumes execution, registers approval, and completes)
 const finalizedRun = await approveAndResume(
   "session-abc-123",
-  runState.interrupt
+  runState.interrupt,
+  "LOW"
 );
 ```
-Verify the output status resolves to `COMPLETED` and the terminal logs confirm the deployment successfully executed:
-```
-Successfully deployed script [scriptId]
-```
-All interactive steps will be saved in the persistent session directory under `.sessions/session-abc-123.json`.
 
 ---
 
-## 🧹 Cleaning Up the Workspace
+## Cleaning Up the Workspace
 
 To clean up and reset the workspace (deleting all active stages outputs, cached telemetry files, and session states), run:
 ```bash
 npm run clean
 ```
-This script removes the `.sessions/`, `.genkit/`, and stage output directories.

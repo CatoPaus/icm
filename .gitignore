@@ -2,14 +2,28 @@
 node_modules/
 
 # Local configuration and secret files
+.env
 .env.local
 .env.*.local
+*.key
+*.pem
 
-# Genkit telemetry and local sessions
+# Genkit telemetry, snapshots, and local sessions
 .sessions/
+.snapshots/
 .genkit/
 
-# Build targets
+# User-generated workspace runs and stage outputs (private research & scripts)
+workspace/runs/
+workspace/stages/
+
+# Build targets & logs
 dist/
 build/
 *.tsbuildinfo
+*.log
+npm-debug.log*
+
+# OS / Editor metadata
+.DS_Store
+Thumbs.db

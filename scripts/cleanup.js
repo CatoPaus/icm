@@ -3,7 +3,9 @@ import * as path from 'path';
 
 const dirsToRemove = [
   path.resolve('.sessions'),
+  path.resolve('.snapshots'),
   path.resolve('.genkit'),
+  path.resolve('workspace/runs'),
   path.resolve('workspace/stages/01_research/output'),
   path.resolve('workspace/stages/02_script/output')
 ];
