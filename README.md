@@ -172,6 +172,42 @@ Once started:
 
 ---
 
+## Headless Execution (Linux Terminal / SSH / Docker / Cron Without Web App)
+
+Because the ICM state lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/`) and `src/index.ts` uses pure cross-platform Node.js with zero browser or OS-specific dependencies, you can run the entire pipeline headlessly from any Linux terminal, SSH session, Docker container, or cron job.
+
+### Option 1: Direct CLI Runner (`npm run cli`)
+1. **Run the full pipeline (Stage 1 + Stage 2) from the terminal:**
+   ```bash
+   npm run cli -- "Cloud Native Architecture in 2026"
+   ```
+2. **Inspect or edit the Stage 1 research artifact in `nano` or `vim`:**
+   ```bash
+   nano workspace/runs/<runId>/stages/01_research/output/research_summary.md
+   ```
+3. **Re-run Stage 2 standalone after editing:**
+   ```bash
+   npm run cli:stage2 -- <runId>
+   ```
+4. **Read the final Stage 2 output:**
+   ```bash
+   cat workspace/runs/<runId>/stages/02_script/output/script_draft.json
+   ```
+
+### Option 2: Genkit CLI Flow Runner (`genkit flow:run`)
+You can also invoke individual Genkit flows with explicit JSON parameters (including custom `researchThinkingLevel` and `scriptThinkingLevel`):
+```bash
+# Run the full pipeline (Stage 1 + Stage 2)
+node --env-file=.env.local ./node_modules/genkit-cli/dist/bin/genkit.js flow:run icmOrchestratorFlow \
+  '{"workspaceRoot":"./workspace","runId":"linux-test-01","topic":"Cloud Native Architecture","researchThinkingLevel":"HIGH","scriptThinkingLevel":"MEDIUM"}' -- npx tsx src/index.ts
+
+# Re-run Stage 2 standalone
+node --env-file=.env.local ./node_modules/genkit-cli/dist/bin/genkit.js flow:run runStage2Flow \
+  '{"workspaceRoot":"./workspace","runId":"linux-test-01","thinkingLevel":"MEDIUM"}' -- npx tsx src/index.ts
+```
+
+---
+
 ## Testing Use Case: Video Script Creator
 
 ### Step-by-Step Test Walkthrough

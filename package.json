@@ -6,6 +6,8 @@
     "genkit:dev": "node --env-file=.env.local node_modules/genkit-cli/dist/bin/genkit.js start -- npx tsx --watch-path=src --watch-path=prompts src/server.ts",
     "dev:all": "npm run genkit:dev",
     "server": "npx tsx --env-file=.env.local src/server.ts",
+    "cli": "npx tsx --env-file=.env.local src/index.ts --cli",
+    "cli:stage2": "npx tsx --env-file=.env.local src/index.ts --stage2",
     "clean": "node scripts/cleanup.js"
   },
   "dependencies": {

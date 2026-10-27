@@ -761,3 +761,77 @@ export async function rejectAndResume(
 
   return { status: 'COMPLETED', text: response.text, thinkingLevel: resolvedThinkingLevel };
 }
+
+// Headless CLI Entrypoint (for Linux / SSH / Cron / Terminal execution without the Web UI)
+if (process.argv.includes('--cli') || process.argv.includes('--stage2')) {
+  (async () => {
+    const isStage2Only = process.argv.includes('--stage2');
+    const flagIndex = process.argv.indexOf(isStage2Only ? '--stage2' : '--cli');
+    const argValue = process.argv.slice(flagIndex + 1).join(' ').trim();
+
+    if (!argValue) {
+      console.error(
+        isStage2Only
+          ? 'Usage: npm run cli:stage2 -- <runId>'
+          : 'Usage: npm run cli -- "<Research Topic>"'
+      );
+      process.exit(1);
+    }
+
+    if (isStage2Only) {
+      const result = await runStage2Flow({
+        workspaceRoot: './workspace',
+        runId: argValue,
+        thinkingLevel: 'MEDIUM',
+      });
+      console.log('Stage 2 CLI Run Complete:', result);
+    } else {
+      const slug = argValue
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 32);
+      const runId = `${slug || 'run'}-${Date.now()}`;
+      const runDir = path.resolve('./workspace/runs', runId);
+      fs.mkdirSync(runDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(runDir, 'meta.json'),
+        JSON.stringify(
+          {
+            runId,
+            topic: argValue,
+            model: GEMINI_4_ARGON_MODEL,
+            researchThinkingLevel: 'HIGH',
+            scriptThinkingLevel: 'MEDIUM',
+            createdAt: new Date().toISOString(),
+            status: 'running',
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
+
+      console.log(`Starting headless ICM run: ${runId}`);
+      const result = await icmOrchestratorFlow({
+        workspaceRoot: './workspace',
+        runId,
+        topic: argValue,
+        researchThinkingLevel: 'HIGH',
+        scriptThinkingLevel: 'MEDIUM',
+      });
+      const metaPath = path.join(runDir, 'meta.json');
+      if (fs.existsSync(metaPath)) {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        meta.status = 'completed';
+        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      }
+      console.log(`Headless ICM Run Complete (${runId}):`, result);
+    }
+  })().catch((err) => {
+    console.error('Headless CLI execution failed:', err);
+    process.exit(1);
+  });
+}
