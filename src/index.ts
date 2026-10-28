@@ -296,26 +296,32 @@ function loadWorkspaceLayers(workspacePath: string) {
   };
 }
 
-// 2. Define the Central Orchestration Flow (Layer 1 Task Router)
-export const icmOrchestratorFlow = ai.defineFlow(
+// 2. Define Standalone Stage 1 Research Flow (Stops at the Human-in-the-Loop Intermission Gate)
+export const runStage1Flow = ai.defineFlow(
   {
-    name: 'icmOrchestratorFlow',
-    inputSchema: ICMWorkflowSchema,
+    name: 'runStage1Flow',
+    inputSchema: z.object({
+      workspaceRoot: z.string().describe('Path to the target workspace folder'),
+      runId: z.string().describe('The unique identifier for this run'),
+      topic: z.string().describe('The research topic or question'),
+      thinkingLevel: ThinkingLevelSchema.optional().describe(
+        'Gemini 4 Argon thinking level for Stage 1 Research (LOW | MEDIUM | HIGH, defaults to HIGH)'
+      ),
+    }),
     outputSchema: z.object({
-      status: z.string(),
+      success: z.boolean(),
+      runId: z.string(),
       outputPath: z.string(),
     }),
   },
   async (input) => {
     const workspacePath = path.resolve(input.workspaceRoot);
     const runDir = path.join(workspacePath, 'runs', input.runId);
-    const { globalIdentity, workspaceContext, toneGuide } = loadWorkspaceLayers(workspacePath);
-    const stage1ThinkingLevel = normalizeThinkingLevel(input.researchThinkingLevel, 'HIGH');
+    const { globalIdentity, workspaceContext } = loadWorkspaceLayers(workspacePath);
+    const stage1ThinkingLevel = normalizeThinkingLevel(input.thinkingLevel, 'HIGH');
     const stage1FallbackThinkingLevel: ThinkingLevel =
       stage1ThinkingLevel === 'HIGH' ? 'MEDIUM' : 'LOW';
-    const stage2ThinkingLevel = normalizeThinkingLevel(input.scriptThinkingLevel, 'MEDIUM');
 
-    // --- STAGE 1: RESEARCH (Gemini 4 Argon — Default Thinking Level: HIGH) ---
     console.log(
       `--- Executing Stage 1: Research [model: ${GEMINI_4_ARGON_MODEL}, thinkingLevel: ${stage1ThinkingLevel}] ---`
     );
@@ -325,6 +331,7 @@ export const icmOrchestratorFlow = ai.defineFlow(
     fs.mkdirSync(path.dirname(researchFileTarget), { recursive: true });
 
     let stage1ThoughtSummaries: string[] = [];
+    const startTimeMs = Date.now();
 
     // Load the Layer 2 Stage Contract dynamically from prompts/01_research.prompt
     // Note: Passing `onChunk` enables SSE streaming (`stream: true`) on `/v1beta/interactions`,
@@ -348,7 +355,8 @@ export const icmOrchestratorFlow = ai.defineFlow(
             stage1ThoughtSummaries.length > 0
               ? `> **Gemini 4 Argon Thinking (${stage1ThoughtSummaries.length} steps):**\n> ${stage1ThoughtSummaries[stage1ThoughtSummaries.length - 1].replace(/\n/g, '\n> ')}\n\n---\n\n`
               : `> **Gemini 4 Argon is researching and verifying sources via Google Search...**\n\n---\n\n`;
-          const liveBody = chunk.accumulatedText || '_Synthesizing findings from grounded search results..._';
+          const liveBody =
+            chunk.accumulatedText || '_Synthesizing findings from grounded search results..._';
           try {
             fs.writeFileSync(researchStreamTarget, `${latestThought}${liveBody}`, 'utf-8');
           } catch {
@@ -379,7 +387,13 @@ export const icmOrchestratorFlow = ai.defineFlow(
                 tools: [{ googleSearch: {} }],
               }),
             ],
-            statuses: ['UNAVAILABLE', 'DEADLINE_EXCEEDED', 'RESOURCE_EXHAUSTED', 'ABORTED', 'INTERNAL'],
+            statuses: [
+              'UNAVAILABLE',
+              'DEADLINE_EXCEEDED',
+              'RESOURCE_EXHAUSTED',
+              'ABORTED',
+              'INTERNAL',
+            ],
           }),
           retry({ maxRetries: 1 }),
           async (req: any, next: any) => {
@@ -399,14 +413,12 @@ export const icmOrchestratorFlow = ai.defineFlow(
       }
     );
 
-    // Check if the generated research text is empty or just newlines
     if (!stage1Response.text || stage1Response.text.trim() === '') {
       throw new Error(
         'Research summary output was empty. This is typically caused by safety/privacy filters blocking search queries about private individuals, or Google Grounding returning no results.'
       );
     }
 
-    // Resolve any Vertex search grounding redirect URLs to their raw destination URLs
     const cleanedText = await cleanGroundingLinks(
       stage1Response.text,
       stage1Response.message?.content
@@ -419,61 +431,37 @@ export const icmOrchestratorFlow = ai.defineFlow(
         // Ignore cleanup errors
       }
     }
+
+    const usage = stage1Response.usage || {};
+    const durationMs = Date.now() - startTimeMs;
+    console.log(
+      `[Stage 1 Telemetry]: input=${usage.inputTokens ?? 0}, thoughts=${usage.thoughtsTokens ?? 0}, output=${usage.outputTokens ?? 0}, total=${usage.totalTokens ?? 0} tokens (${(durationMs / 1000).toFixed(1)}s)`
+    );
     console.log(`Stage 1 complete. Output written to: ${researchFileTarget}`);
 
-    // --- INTERMISSION: HUMAN-IN-THE-LOOP INTERRUPT GATE ---
-    // At this boundary, the developer or reviewer can pause the script, inspect
-    // workspace/stages/01_research/output/research_summary.md, edit it in a standard editor,
-    // and let the next stage ingest the edited content.
-
-    // --- STAGE 2: SCRIPTWRITING (Gemini 4 Argon — Default Thinking Level: MEDIUM) ---
-    console.log(
-      `--- Executing Stage 2: Scriptwriting [model: ${GEMINI_4_ARGON_MODEL}, thinkingLevel: ${stage2ThinkingLevel}] ---`
-    );
-    const stage2Dir = path.join(runDir, 'stages/02_script');
-    const scriptOutputTarget = path.join(stage2Dir, 'output/script_draft.json');
-    fs.mkdirSync(path.dirname(scriptOutputTarget), { recursive: true });
-
-    // Ingest Layer 4 output from prior stage
-    const activeResearchData = fs.readFileSync(researchFileTarget, 'utf-8');
-
-    // Retrieve the compiled stage contract prompt
-    const scriptPrompt = ai.prompt('02_script');
-
-    const stage2Response = await scriptPrompt(
-      {
-        researchFile: activeResearchData,
-        toneRules: toneGuide,
-        globalIdentity,
-        workspaceContext,
-      },
-      {
-        onChunk: (chunk) => {
-          if (chunk.reasoning && chunk.reasoning.trim()) {
-            const previewSnippet = chunk.reasoning.trim().replace(/\s+/g, ' ').slice(0, 120);
-            console.log(`[Stage 2 Thought]: ${previewSnippet}...`);
-          }
-        },
-        config: {
-          maxOutputTokens: 32768,
-          thinkingConfig: {
-            thinkingLevel: stage2ThinkingLevel,
-            includeThoughts: true,
-          },
-        },
-        use: [retry({ maxRetries: 2 })],
+    const metaPath = path.join(runDir, 'meta.json');
+    if (fs.existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        meta.stage1Telemetry = {
+          thinkingLevel: stage1ThinkingLevel,
+          thoughtSteps: stage1ThoughtSummaries.length,
+          inputTokens: usage.inputTokens ?? 0,
+          thoughtsTokens: usage.thoughtsTokens ?? 0,
+          outputTokens: usage.outputTokens ?? 0,
+          totalTokens: usage.totalTokens ?? 0,
+          durationMs,
+        };
+        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      } catch {
+        // Ignore metadata update errors
       }
-    );
-
-    // Destructure the structured JSON output requested by the Stage Contract
-    const scriptJson = stage2Response.output;
-    fs.writeFileSync(scriptOutputTarget, JSON.stringify(scriptJson, null, 2));
-
-    console.log(`Stage 2 complete. Output written to: ${scriptOutputTarget}`);
+    }
 
     return {
-      status: 'Pipeline executed successfully',
-      outputPath: scriptOutputTarget,
+      success: true,
+      runId: input.runId,
+      outputPath: researchFileTarget,
     };
   }
 );
@@ -510,12 +498,11 @@ export const runStage2Flow = ai.defineFlow(
     fs.mkdirSync(path.dirname(scriptOutputTarget), { recursive: true });
 
     console.log(
-      `--- Executing Stage 2 Standalone Scriptwriting for Run: ${input.runId} [model: ${GEMINI_4_ARGON_MODEL}, thinkingLevel: ${stage2ThinkingLevel}] ---`
+      `--- Executing Stage 2: Scriptwriting for Run: ${input.runId} [model: ${GEMINI_4_ARGON_MODEL}, thinkingLevel: ${stage2ThinkingLevel}] ---`
     );
 
-    // Ingest edited research data
+    const startTimeMs = Date.now();
     const activeResearchData = fs.readFileSync(researchFileTarget, 'utf-8');
-
     const scriptPrompt = ai.prompt('02_script');
 
     const stage2Response = await scriptPrompt(
@@ -529,7 +516,7 @@ export const runStage2Flow = ai.defineFlow(
         onChunk: (chunk) => {
           if (chunk.reasoning && chunk.reasoning.trim()) {
             const previewSnippet = chunk.reasoning.trim().replace(/\s+/g, ' ').slice(0, 120);
-            console.log(`[Stage 2 Standalone Thought]: ${previewSnippet}...`);
+            console.log(`[Stage 2 Thought]: ${previewSnippet}...`);
           }
         },
         config: {
@@ -546,11 +533,69 @@ export const runStage2Flow = ai.defineFlow(
     const scriptJson = stage2Response.output;
     fs.writeFileSync(scriptOutputTarget, JSON.stringify(scriptJson, null, 2));
 
-    console.log(`Stage 2 standalone complete. Output written to: ${scriptOutputTarget}`);
+    const usage = stage2Response.usage || {};
+    const durationMs = Date.now() - startTimeMs;
+    console.log(
+      `[Stage 2 Telemetry]: input=${usage.inputTokens ?? 0}, thoughts=${usage.thoughtsTokens ?? 0}, output=${usage.outputTokens ?? 0}, total=${usage.totalTokens ?? 0} tokens (${(durationMs / 1000).toFixed(1)}s)`
+    );
+    console.log(`Stage 2 complete. Output written to: ${scriptOutputTarget}`);
+
+    const metaPath = path.join(runDir, 'meta.json');
+    if (fs.existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        meta.stage2Telemetry = {
+          thinkingLevel: stage2ThinkingLevel,
+          inputTokens: usage.inputTokens ?? 0,
+          thoughtsTokens: usage.thoughtsTokens ?? 0,
+          outputTokens: usage.outputTokens ?? 0,
+          totalTokens: usage.totalTokens ?? 0,
+          durationMs,
+        };
+        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      } catch {
+        // Ignore metadata update errors
+      }
+    }
 
     return {
       success: true,
       outputPath: scriptOutputTarget,
+    };
+  }
+);
+
+// 4. Define the Central Orchestration Flow (Layer 1 Task Router: Stage 1 -> Stage 2)
+export const icmOrchestratorFlow = ai.defineFlow(
+  {
+    name: 'icmOrchestratorFlow',
+    inputSchema: ICMWorkflowSchema,
+    outputSchema: z.object({
+      status: z.string(),
+      outputPath: z.string(),
+    }),
+  },
+  async (input) => {
+    await runStage1Flow({
+      workspaceRoot: input.workspaceRoot,
+      runId: input.runId,
+      topic: input.topic,
+      thinkingLevel: input.researchThinkingLevel,
+    });
+
+    // --- INTERMISSION: HUMAN-IN-THE-LOOP INTERRUPT GATE ---
+    // Between Stage 1 and Stage 2, the reviewer can inspect/edit `research_summary.md`
+    // and re-run Stage 2 standalone at any time via `runStage2Flow`.
+
+    const stage2Result = await runStage2Flow({
+      workspaceRoot: input.workspaceRoot,
+      runId: input.runId,
+      thinkingLevel: input.scriptThinkingLevel,
+    });
+
+    return {
+      status: 'Pipeline executed successfully',
+      outputPath: stage2Result.outputPath,
     };
   }
 );
@@ -763,27 +808,42 @@ export async function rejectAndResume(
 }
 
 // Headless CLI Entrypoint (for Linux / SSH / Cron / Terminal execution without the Web UI)
-if (process.argv.includes('--cli') || process.argv.includes('--stage2')) {
+if (
+  process.argv.includes('--cli') ||
+  process.argv.includes('--stage1') ||
+  process.argv.includes('--stage2')
+) {
   (async () => {
+    const isStage1Only = process.argv.includes('--stage1');
     const isStage2Only = process.argv.includes('--stage2');
-    const flagIndex = process.argv.indexOf(isStage2Only ? '--stage2' : '--cli');
+    const flag = isStage2Only ? '--stage2' : isStage1Only ? '--stage1' : '--cli';
+    const flagIndex = process.argv.indexOf(flag);
     const argValue = process.argv.slice(flagIndex + 1).join(' ').trim();
 
     if (!argValue) {
       console.error(
         isStage2Only
           ? 'Usage: npm run cli:stage2 -- <runId>'
-          : 'Usage: npm run cli -- "<Research Topic>"'
+          : isStage1Only
+            ? 'Usage: npm run cli:stage1 -- "<Research Topic>"'
+            : 'Usage: npm run cli -- "<Research Topic>"'
       );
       process.exit(1);
     }
 
     if (isStage2Only) {
+      const runDir = path.resolve('./workspace/runs', argValue);
       const result = await runStage2Flow({
         workspaceRoot: './workspace',
         runId: argValue,
         thinkingLevel: 'MEDIUM',
       });
+      const metaPath = path.join(runDir, 'meta.json');
+      if (fs.existsSync(metaPath)) {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        meta.status = 'completed';
+        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      }
       console.log('Stage 2 CLI Run Complete:', result);
     } else {
       const slug = argValue
@@ -814,21 +874,41 @@ if (process.argv.includes('--cli') || process.argv.includes('--stage2')) {
         'utf-8'
       );
 
-      console.log(`Starting headless ICM run: ${runId}`);
-      const result = await icmOrchestratorFlow({
-        workspaceRoot: './workspace',
-        runId,
-        topic: argValue,
-        researchThinkingLevel: 'HIGH',
-        scriptThinkingLevel: 'MEDIUM',
-      });
-      const metaPath = path.join(runDir, 'meta.json');
-      if (fs.existsSync(metaPath)) {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        meta.status = 'completed';
-        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      if (isStage1Only) {
+        console.log(`Starting headless Stage 1-only ICM run: ${runId}`);
+        const result = await runStage1Flow({
+          workspaceRoot: './workspace',
+          runId,
+          topic: argValue,
+          thinkingLevel: 'HIGH',
+        });
+        const metaPath = path.join(runDir, 'meta.json');
+        if (fs.existsSync(metaPath)) {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+          meta.status = 'stage1_completed';
+          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+        }
+        console.log(
+          `Stage 1 CLI Run Complete (${runId}). Paused at Human-in-the-Loop Intermission Gate:`,
+          result
+        );
+      } else {
+        console.log(`Starting headless full ICM run: ${runId}`);
+        const result = await icmOrchestratorFlow({
+          workspaceRoot: './workspace',
+          runId,
+          topic: argValue,
+          researchThinkingLevel: 'HIGH',
+          scriptThinkingLevel: 'MEDIUM',
+        });
+        const metaPath = path.join(runDir, 'meta.json');
+        if (fs.existsSync(metaPath)) {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+          meta.status = 'completed';
+          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+        }
+        console.log(`Headless ICM Run Complete (${runId}):`, result);
       }
-      console.log(`Headless ICM Run Complete (${runId}):`, result);
     }
   })().catch((err) => {
     console.error('Headless CLI execution failed:', err);

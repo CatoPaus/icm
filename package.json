@@ -7,6 +7,7 @@
     "dev:all": "npm run genkit:dev",
     "server": "npx tsx --env-file=.env.local src/server.ts",
     "cli": "npx tsx --env-file=.env.local src/index.ts --cli",
+    "cli:stage1": "npx tsx --env-file=.env.local src/index.ts --stage1",
     "cli:stage2": "npx tsx --env-file=.env.local src/index.ts --stage2",
     "clean": "node scripts/cleanup.js"
   },

@@ -188,34 +188,43 @@ Once started:
 
 Because the ICM state lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/`) and `src/index.ts` uses pure cross-platform Node.js with zero browser or OS-specific dependencies, you can run the entire pipeline headlessly from any Linux terminal, SSH session, Docker container, or cron job.
 
-### Option 1: Direct CLI Runner (`npm run cli`)
-1. **Run the full pipeline (Stage 1 + Stage 2) from the terminal:**
+### Option 1: Direct CLI Runner (`npm run cli:stage1`, `npm run cli:stage2`, `npm run cli`)
+1. **Run Stage 1 only (recommended when testing/tuning `01_research.prompt` before Stage 2):**
    ```bash
-   npm run cli -- "Cloud Native Architecture in 2026"
+   npm run cli:stage1 -- "Cloud Native Architecture in 2026"
    ```
+   *(Stops at the Human-in-the-Loop Intermission gate after writing `research_summary.md` and logging token telemetry to `meta.json`.)*
 2. **Inspect or edit the Stage 1 research artifact in `nano` or `vim`:**
    ```bash
    nano workspace/runs/<runId>/stages/01_research/output/research_summary.md
    ```
-3. **Re-run Stage 2 standalone after editing:**
+3. **Run or re-run Stage 2 standalone after reviewing/editing Stage 1:**
    ```bash
    npm run cli:stage2 -- <runId>
    ```
-4. **Read the final Stage 2 output:**
+4. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
+   ```bash
+   npm run cli -- "Cloud Native Architecture in 2026"
+   ```
+5. **Read the final Stage 2 output:**
    ```bash
    cat workspace/runs/<runId>/stages/02_script/output/script_draft.json
    ```
 
 ### Option 2: Genkit CLI Flow Runner (`genkit flow:run`)
-You can also invoke individual Genkit flows with explicit JSON parameters (including custom `researchThinkingLevel` and `scriptThinkingLevel`):
+You can also invoke individual Genkit flows with explicit JSON parameters (including custom `thinkingLevel` parameters):
 ```bash
+# Run Stage 1 standalone
+node --env-file=.env.local ./node_modules/genkit-cli/dist/bin/genkit.js flow:run runStage1Flow \
+  '{"workspaceRoot":"./workspace","runId":"linux-test-01","topic":"Cloud Native Architecture","thinkingLevel":"HIGH"}' -- npx tsx src/index.ts
+
+# Run Stage 2 standalone
+node --env-file=.env.local ./node_modules/genkit-cli/dist/bin/genkit.js flow:run runStage2Flow \
+  '{"workspaceRoot":"./workspace","runId":"linux-test-01","thinkingLevel":"MEDIUM"}' -- npx tsx src/index.ts
+
 # Run the full pipeline (Stage 1 + Stage 2)
 node --env-file=.env.local ./node_modules/genkit-cli/dist/bin/genkit.js flow:run icmOrchestratorFlow \
   '{"workspaceRoot":"./workspace","runId":"linux-test-01","topic":"Cloud Native Architecture","researchThinkingLevel":"HIGH","scriptThinkingLevel":"MEDIUM"}' -- npx tsx src/index.ts
-
-# Re-run Stage 2 standalone
-node --env-file=.env.local ./node_modules/genkit-cli/dist/bin/genkit.js flow:run runStage2Flow \
-  '{"workspaceRoot":"./workspace","runId":"linux-test-01","thinkingLevel":"MEDIUM"}' -- npx tsx src/index.ts
 ```
 
 ---

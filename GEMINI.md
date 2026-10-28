@@ -17,20 +17,33 @@ Instead, always operate in this tight, single-step feedback loop:
 2. **Modify Only the Current Layer or Stage:**
    - **Step A — Identity & Routing (`workspace/GEMINI.md` & `workspace/CONTEXT.md`):** Align Layer 0 (Global Identity) and Layer 1 (Workspace Route Context) with the project's domain first.
    - **Step B — Stage 1 Contract (`prompts/01_research.prompt`):** Rewrite Stage 1's prompt and stop. Do **not** touch Stage 2 yet.
-3. **Pause for Live Test & Trace Inspection:**
-   - Ask the user to run a test (via the Web Dashboard at `http://localhost:3000`, `npm run cli -- "<topic>"`, or the `genkit-mcp-server` `run_flow` tool).
-   - After the test runs, automatically inspect:
-     - **Genkit Traces via MCP (`genkit-mcp-server`):** Find the latest trace ID in `.genkit/traces/` (or returned by `run_flow`) and call `get_trace` (`{ projectRoot, traceId }`) to verify token usage, `thinkingLevel`, search queries, and latency.
-     - **Terminal Log (`.genkit/terminal.log`):** Read `.genkit/terminal.log` directly whenever you need to check runtime logs, grounding citation resolution, or errors (the server automatically mirrors `stdout` and `stderr` to this file).
-     - **Stage 1 Artifact (`workspace/runs/<runId>/stages/01_research/output/research_summary.md`):** Verify the actual Markdown output on disk.
-4. **Advance to the Next Stage Only After Verification:**
-   - Once the user is happy with Stage 1's real output artifact, ask the next question to tailor Layer 3 (`workspace/_config/voice_guide.md`) and Stage 2 (`prompts/02_script.prompt`), then test Stage 2 standalone (`Regenerate Script` in UI or `npm run cli:stage2 -- <runId>`).
+3. **Test Stage 1 Standalone (`npm run cli:stage1`) & Audit Telemetry:**
+   - **CRITICAL:** When testing Stage 1 before Stage 2 is customized, run **Stage 1 standalone** via `npm run cli:stage1 -- "<topic>"` (or `runStage1Flow` via `genkit-mcp-server` `run_flow`). Do **not** run `npm run cli` during Stage 1 testing, because `npm run cli` also runs Stage 2 on the old uncustomized prompt and wastes tokens.
+   - After the Stage 1 test finishes, inspect:
+     - **Run Metadata & Token Telemetry (`workspace/runs/<runId>/meta.json`):** Contains `stage1Telemetry` (`inputTokens`, `thoughtsTokens`, `outputTokens`, `totalTokens`, `durationMs`, `thoughtSteps`), also logged to stdout as `[Stage 1 Telemetry]`.
+     - **Genkit Traces via MCP (`genkit-mcp-server`):** When running under `npm run dev:all` (`genkit start`) or via `genkit-mcp-server` `run_flow`, traces are written to `.genkit/traces/` and can be inspected with `get_trace` (`{ projectRoot, traceId }`). *(Note: Headless `npm run cli*` without `genkit start` logs telemetry to stdout and `meta.json` rather than `.genkit/traces/`, and `.genkit/terminal.log` is only created once `src/server.ts` starts.)*
+     - **Stage 1 Artifact (`workspace/runs/<runId>/stages/01_research/output/research_summary.md`):** Verify the actual Markdown output and resolved grounding citations on disk.
+4. **Apply the ICM Edit-Source Principle ("Configure the Factory, Not the Product"):**
+   - If the user wants a change to Stage 1's output, ask whether it is a **one-off edit** for this run (edit `research_summary.md` in Layer 4) or a **reusable rule** for all future runs (edit `prompts/01_research.prompt` in Layer 2 or `workspace/_config/` in Layer 3).
+5. **Advance to Stage 2 Only After Stage 1 Verification:**
+   - Once the user locks in Stage 1's real output artifact, ask the next question to tailor Layer 3 (`workspace/_config/voice_guide.md`) and Stage 2 (`prompts/02_script.prompt`), then test Stage 2 standalone (`npm run cli:stage2 -- <runId>` or `Regenerate Script` in the Web Dashboard) at zero Stage 1 cost.
 
 Activate the **`icm-co-architect`** skill (`.agents/skills/icm-co-architect/SKILL.md`) whenever the user wants to specialize this repository for a new project, rewrite prompts, or add new stages/layers.
 
 ---
 
-## 2. Hard Model & Architecture Constraints (`gemini-4-argon`)
+## 2. Codebase Map & Editing Discipline
+
+- **Exact File Locations (Do Not Guess Paths):**
+  - `src/index.ts`: All Genkit flows (`runStage1Flow`, `runStage2Flow`, `icmOrchestratorFlow`), `loadWorkspaceLayers()`, `cleanGroundingLinks()`, interactive interrupt handlers, and the headless CLI entrypoint (`--cli`, `--stage1`, `--stage2`). *(There is no `src/cli.ts`.)*
+  - `src/server.ts`: Express server (`http://localhost:3000`), SSR `window.__INITIAL_STATE__` hydration, Windows 11 File Explorer launcher, and `.genkit/terminal.log` mirror.
+  - `public/index.html`, `public/app.js`, `public/style.css`: Web Dashboard SPA.
+- **Targeted Edits Over Full-File Overwrites:**
+  - When modifying large files (`src/index.ts`, `src/server.ts`, `public/app.js`, `public/index.html`), use `edit_file` sequentially rather than firing parallel overlapping `edit_file` calls on the same file or rewriting the entire file with `write_file`.
+
+---
+
+## 3. Hard Model & Architecture Constraints (`gemini-4-argon`)
 
 1. **Exclusive Model (`googleai/gemini-4-argon`):**
    - Never use or reintroduce legacy models (`gemini-2.5-*`, `gemini-3.5-*`, `gemini-1.5-*`, `gemini-pro`, etc.).
@@ -39,10 +52,10 @@ Activate the **`icm-co-architect`** skill (`.agents/skills/icm-co-architect/SKIL
    - Never add `temperature`, `topP`, or `topK` to any `.prompt` file or `ai.generate` config.
    - Control reasoning depth strictly via `thinkingConfig.thinkingLevel`:
      - **`HIGH`**: Deep multi-source research & Google Search grounding (Stage 1 default, `maxOutputTokens: 65536`).
-     - **`MEDIUM`**: Structured synthesis & scriptwriting from verified Stage 1 artifacts (Stage 2 default, `maxOutputTokens: 32768`).
+     - **`MEDIUM`**: Structured synthesis & scriptwriting from verified upstream artifacts (Stage 2+ default, `maxOutputTokens: 32768`).
      - **`LOW`**: Fast tool routing & human-in-the-loop interrupt/resume gates (`maxOutputTokens: 32768`).
 3. **Token Ceiling Awareness:**
    - Gemini 4 Argon has a `1,048,576`-token unified context window.
    - Standard/SSE streaming requests (`background: false`) support `maxOutputTokens` up to **`65,536`**. Generating `> 65,536` output tokens in a single turn requires Interactions API Long Decode (`background: true` with `maxOutputTokens >= 262,144`).
 4. **Decoupled Engine vs. Presentation Layer:**
-   - Keep `src/index.ts` pure cross-platform Node.js + Genkit so it always runs headlessly on Linux/macOS/Windows (`npm run cli`) or behind any UI framework (Express in `src/server.ts`, Next.js, etc.).
+   - Keep `src/index.ts` pure cross-platform Node.js + Genkit so it always runs headlessly on Linux/macOS/Windows (`npm run cli:stage1`, `npm run cli:stage2`, `npm run cli`) or behind any UI framework.
