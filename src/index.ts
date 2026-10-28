@@ -796,6 +796,56 @@ function writeStageAssembledInput(
     '',
   ].join('\n');
   fs.writeFileSync(inputFile, `${header}${assembledPrompt}\n`, 'utf-8');
+  return inputFile;
+}
+
+function printDryRunPreview(
+  stage: string,
+  assembledInputPath: string,
+  assembledPrompt: string,
+  options: {
+    thinkingLevel: ThinkingLevel;
+    maxOutputTokens: number;
+    includeThoughts: boolean;
+    useGoogleSearch: boolean;
+    outputFormat: 'text' | 'json';
+    outputJsonSchema?: Record<string, any>;
+  }
+) {
+  const approxTokens = Math.ceil(assembledPrompt.length / 4);
+  const previewBody: Record<string, any> = {
+    model: GEMINI_4_ARGON_MODEL,
+    ...(options.useGoogleSearch ? { tools: [{ type: 'google_search' }] } : {}),
+    generation_config: {
+      max_output_tokens: options.maxOutputTokens,
+      thinking_level: options.thinkingLevel.toLowerCase(),
+      thinking_summaries: options.includeThoughts ? 'auto' : 'none',
+    },
+    ...(options.outputFormat === 'json'
+      ? {
+          response_format: {
+            type: 'text',
+            mime_type: 'application/json',
+            ...(options.outputJsonSchema ? { schema: options.outputJsonSchema } : {}),
+          },
+        }
+      : {}),
+    stream: true,
+    store: false,
+    input: `[1 user_input step (${assembledPrompt.length} chars, ~${approxTokens} tokens) -> ${assembledInputPath}]`,
+  };
+
+  console.log(`[DRY-RUN] Stage: ${stage}`);
+  console.log(
+    `[DRY-RUN] Assembled 5-Layer ICM Input written to: ${assembledInputPath} (${assembledPrompt.length} chars, ~${approxTokens} est. input tokens)`
+  );
+  console.log(`[DRY-RUN] Would send: POST ${INTERACTIONS_API_URL}`);
+  console.log(`[DRY-RUN] Headers:`);
+  console.log(`    Content-Type: application/json`);
+  console.log(`    Api-Revision: ${INTERACTIONS_API_REVISION}`);
+  console.log(`    x-goog-api-key: <REDACTED>`);
+  console.log(`[DRY-RUN] Body:\n${JSON.stringify(previewBody, null, 2)}`);
+  console.log(`[DRY-RUN] Network call skipped. Zero tokens spent.`);
 }
 
 function writeStageThinkingTrace(
@@ -854,10 +904,12 @@ export async function runStage1Flow(input: {
   runId: string;
   topic: string;
   thinkingLevel?: ThinkingLevel | string;
+  dryRun?: boolean;
 }): Promise<{
   success: boolean;
   runId: string;
   outputPath: string;
+  dryRun?: boolean;
 }> {
   const workspacePath = path.resolve(input.workspaceRoot);
   const runDir = path.join(workspacePath, 'runs', input.runId);
@@ -869,7 +921,7 @@ export async function runStage1Flow(input: {
     stage1ThinkingLevel === 'HIGH' ? 'MEDIUM' : 'LOW';
 
   console.log(
-    `--- Executing Stage 1: Research [model: ${GEMINI_4_ARGON_MODEL}, thinkingLevel: ${stage1ThinkingLevel}] ---`
+    `--- Executing Stage 1: Research [model: ${GEMINI_4_ARGON_MODEL}, thinkingLevel: ${stage1ThinkingLevel}${input.dryRun ? ', DRY-RUN' : ''}] ---`
   );
 
   const stage1Dir = path.join(runDir, 'stages/01_research');
@@ -884,7 +936,7 @@ export async function runStage1Flow(input: {
     workspaceContext,
   });
 
-  writeStageAssembledInput(
+  const assembledInputPath = writeStageAssembledInput(
     stage1Dir,
     {
       stage: '01_research',
@@ -896,6 +948,22 @@ export async function runStage1Flow(input: {
     },
     assembledPrompt
   );
+
+  if (input.dryRun) {
+    printDryRunPreview('01_research', assembledInputPath, assembledPrompt, {
+      thinkingLevel: stage1ThinkingLevel,
+      maxOutputTokens: contract.maxOutputTokens,
+      includeThoughts: contract.includeThoughts,
+      useGoogleSearch: contract.useGoogleSearch,
+      outputFormat: contract.outputFormat,
+    });
+    return {
+      success: true,
+      runId: input.runId,
+      outputPath: assembledInputPath,
+      dryRun: true,
+    };
+  }
 
   const startTimeMs = Date.now();
   let latestStreamedText = '';
@@ -1003,9 +1071,11 @@ export async function runStage2Flow(input: {
   workspaceRoot: string;
   runId: string;
   thinkingLevel?: ThinkingLevel | string;
+  dryRun?: boolean;
 }): Promise<{
   success: boolean;
   outputPath: string;
+  dryRun?: boolean;
 }> {
   const workspacePath = path.resolve(input.workspaceRoot);
   const runDir = path.join(workspacePath, 'runs', input.runId);
@@ -1024,7 +1094,7 @@ export async function runStage2Flow(input: {
   fs.mkdirSync(path.dirname(scriptOutputTarget), { recursive: true });
 
   console.log(
-    `--- Executing Stage 2: Scriptwriting for Run: ${input.runId} [model: ${GEMINI_4_ARGON_MODEL}, thinkingLevel: ${stage2ThinkingLevel}] ---`
+    `--- Executing Stage 2: Scriptwriting for Run: ${input.runId} [model: ${GEMINI_4_ARGON_MODEL}, thinkingLevel: ${stage2ThinkingLevel}${input.dryRun ? ', DRY-RUN' : ''}] ---`
   );
 
   const startTimeMs = Date.now();
@@ -1038,7 +1108,7 @@ export async function runStage2Flow(input: {
     workspaceContext,
   });
 
-  writeStageAssembledInput(
+  const assembledInputPath = writeStageAssembledInput(
     stage2Dir,
     {
       stage: '02_script',
@@ -1050,6 +1120,22 @@ export async function runStage2Flow(input: {
     },
     assembledPrompt
   );
+
+  if (input.dryRun) {
+    printDryRunPreview('02_script', assembledInputPath, assembledPrompt, {
+      thinkingLevel: stage2ThinkingLevel,
+      maxOutputTokens: contract.maxOutputTokens,
+      includeThoughts: contract.includeThoughts,
+      useGoogleSearch: contract.useGoogleSearch,
+      outputFormat: contract.outputFormat,
+      outputJsonSchema: contract.outputJsonSchema,
+    });
+    return {
+      success: true,
+      outputPath: assembledInputPath,
+      dryRun: true,
+    };
+  }
 
   const { result: stage2Response, usedThinkingLevel } = await executeWithRetryAndFallback(
     {
@@ -1329,17 +1415,22 @@ if (
   (async () => {
     const isStage1Only = process.argv.includes('--stage1');
     const isStage2Only = process.argv.includes('--stage2');
+    const isDryRun = process.argv.includes('--dry-run');
     const flag = isStage2Only ? '--stage2' : isStage1Only ? '--stage1' : '--cli';
     const flagIndex = process.argv.indexOf(flag);
-    const argValue = process.argv.slice(flagIndex + 1).join(' ').trim();
+    const argValue = process.argv
+      .slice(flagIndex + 1)
+      .filter((a) => a !== '--dry-run')
+      .join(' ')
+      .trim();
 
     if (!argValue) {
       console.error(
         isStage2Only
-          ? 'Usage: npm run cli:stage2 -- <runId>'
+          ? 'Usage: npm run cli:stage2 -- [--dry-run] <runId>'
           : isStage1Only
-            ? 'Usage: npm run cli:stage1 -- "<Research Topic>"'
-            : 'Usage: npm run cli -- "<Research Topic>"'
+            ? 'Usage: npm run cli:stage1 -- [--dry-run] "<Research Topic>"'
+            : 'Usage: npm run cli -- [--dry-run] "<Research Topic>"'
       );
       process.exit(1);
     }
@@ -1350,12 +1441,15 @@ if (
         workspaceRoot: './workspace',
         runId: argValue,
         thinkingLevel: 'MEDIUM',
+        dryRun: isDryRun,
       });
-      const metaPath = path.join(runDir, 'meta.json');
-      if (fs.existsSync(metaPath)) {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        meta.status = 'completed';
-        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      if (!isDryRun) {
+        const metaPath = path.join(runDir, 'meta.json');
+        if (fs.existsSync(metaPath)) {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+          meta.status = 'completed';
+          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+        }
       }
       console.log('Stage 2 CLI Run Complete:', result);
     } else {
@@ -1366,43 +1460,50 @@ if (
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-+|-+$/g, '')
         .slice(0, 32);
-      const runId = `${slug || 'run'}-${Date.now()}`;
+      const runId = isDryRun ? '_dry_run' : `${slug || 'run'}-${Date.now()}`;
       const runDir = path.resolve('./workspace/runs', runId);
       fs.mkdirSync(runDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(runDir, 'meta.json'),
-        JSON.stringify(
-          {
-            runId,
-            topic: argValue,
-            model: GEMINI_4_ARGON_MODEL,
-            researchThinkingLevel: 'HIGH',
-            scriptThinkingLevel: 'MEDIUM',
-            createdAt: new Date().toISOString(),
-            status: 'running',
-          },
-          null,
-          2
-        ),
-        'utf-8'
-      );
+      if (!isDryRun) {
+        fs.writeFileSync(
+          path.join(runDir, 'meta.json'),
+          JSON.stringify(
+            {
+              runId,
+              topic: argValue,
+              model: GEMINI_4_ARGON_MODEL,
+              researchThinkingLevel: 'HIGH',
+              scriptThinkingLevel: 'MEDIUM',
+              createdAt: new Date().toISOString(),
+              status: 'running',
+            },
+            null,
+            2
+          ),
+          'utf-8'
+        );
+      }
 
-      if (isStage1Only) {
-        console.log(`Starting headless Stage 1-only ICM run: ${runId}`);
+      if (isStage1Only || isDryRun) {
+        console.log(
+          `Starting headless ${isDryRun ? 'DRY-RUN ' : ''}Stage 1 ICM run: ${runId}`
+        );
         const result = await runStage1Flow({
           workspaceRoot: './workspace',
           runId,
           topic: argValue,
           thinkingLevel: 'HIGH',
+          dryRun: isDryRun,
         });
-        const metaPath = path.join(runDir, 'meta.json');
-        if (fs.existsSync(metaPath)) {
-          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-          meta.status = 'stage1_completed';
-          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+        if (!isDryRun) {
+          const metaPath = path.join(runDir, 'meta.json');
+          if (fs.existsSync(metaPath)) {
+            const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+            meta.status = 'stage1_completed';
+            fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+          }
         }
         console.log(
-          `Stage 1 CLI Run Complete (${runId}). Paused at Human-in-the-Loop Intermission Gate:`,
+          `Stage 1 CLI ${isDryRun ? 'Dry-Run ' : 'Run '}Complete (${runId}):`,
           result
         );
       } else {

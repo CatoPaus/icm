@@ -263,6 +263,7 @@ function listRunsFromDisk() {
   const folders = fs.readdirSync(runsDir);
   return folders
     .map((folder) => {
+      if (folder.startsWith('_')) return null;
       const folderPath = path.join(runsDir, folder);
       const stats = fs.statSync(folderPath);
       if (!stats.isDirectory()) return null;

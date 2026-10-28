@@ -48,7 +48,11 @@ In ICM, Stage 2 (`prompts/02_script.md`) consumes the physical file produced by 
    - Keep `model: gemini-4-argon`, `maxOutputTokens: 65536`, and `{{#if globalIdentity}}` / `{{#if workspaceContext}}` blocks intact.
 3. **Run & Audit Stage 1 Standalone (Do NOT Run Stage 2 Yet):**
    - **Important:** Do **not** run `npm run cli -- "<topic>"` here, because `npm run cli` also runs Stage 2 with the old uncustomized prompt and wastes tokens.
-   - Instead, run **Stage 1 only** via:
+   - First, run a **zero-token `--dry-run`** to verify how `Layer 0 + Layer 1 + Layer 2` assembled in `workspace/runs/_dry_run/stages/01_research/input/prompt_assembled.md`:
+     ```bash
+     npm run cli:stage1 -- --dry-run "<topic>"
+     ```
+   - Next, run **Stage 1 standalone** via:
      ```bash
      npm run cli:stage1 -- "<topic>"
      ```
@@ -87,5 +91,11 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
   1. Create `prompts/03_<name>.md` using `model: gemini-4-argon`.
   2. Add `runStage3Flow` and `--stage3` in [`src/index.ts`](../../src/index.ts) + `"cli:stage3"` in [`package.json`](../../package.json), and chain `runStage3Flow` inside `icmOrchestratorFlow`.
   3. **Test Stage 3 standalone first** (`npm run cli:stage3 -- <runId>`) and verify `stages/03_<name>/input/prompt_assembled.md`, `output/thinking_trace.md`, and the output artifact on disk *before* wiring the new tab into [`src/server.ts`](../../src/server.ts), [`public/index.html`](../../public/index.html), and [`public/app.js`](../../public/app.js).
+- **Adding Multimodal Stages (`03_visuals`, `03_audio`, `03_video`, Document Analysis) via `gemini-api` CLI:**
+  - The official Google AI Studio `gemini-api` CLI (`google-gemini/gemini-api-cli`) is installed on the host and pairs naturally with ICM's filesystem-first stage directories:
+    - **Image Generation (`gemini-nano-banana-2.1`):** `gemini-api image "<prompt>" --out workspace/runs/<runId>/stages/03_visuals/output/slide_01.png`
+    - **Speech / Voiceover (`gemini-3.8-flash-tts`):** `gemini-api tts "<script>" --out workspace/runs/<runId>/stages/03_audio/output/voiceover.wav`
+    - **Document / PDF / Video Analysis:** `gemini-api analyze -i ./docs/source.pdf "Extract key data"`
+    - **Dry-Run Inspection:** Append `--dry-run` to any `gemini-api` command to preview the Interactions API request without sending it.
 - **Editing Large Files Safely:**
   - Never fire multiple parallel `edit_file` calls on the same file (`public/index.html`, `public/app.js`, `src/index.ts`, `src/server.ts`). Make targeted sequential `edit_file` calls to save output tokens and avoid CRLF target mismatches.

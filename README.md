@@ -203,28 +203,53 @@ Once started:
 
 Because the ICM state lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/`) and `src/index.ts` uses pure cross-platform Node.js with zero browser or OS-specific dependencies, you can run the entire pipeline headlessly from any Linux terminal, SSH session, Docker container, or cron job.
 
-### Direct CLI Runner (`npm run cli:stage1`, `npm run cli:stage2`, `npm run cli`)
-1. **Run Stage 1 only (recommended when testing/tuning `01_research.md` before Stage 2):**
+### Direct CLI Runner (`npm run cli:stage1`, `npm run cli:stage2`, `npm run cli`, `--dry-run`)
+1. **Preview the assembled 5-layer prompt and Interactions API request at zero token cost (`--dry-run`):**
+   ```bash
+   npm run cli:stage1 -- --dry-run "Cloud Native Architecture in 2026"
+   ```
+   *(Writes `workspace/runs/_dry_run/stages/01_research/input/prompt_assembled.md` and prints the exact HTTP request headers and body with credentials redacted.)*
+2. **Run Stage 1 only (recommended when testing/tuning `01_research.md` before Stage 2):**
    ```bash
    npm run cli:stage1 -- "Cloud Native Architecture in 2026"
    ```
    *(Stops at the Human-in-the-Loop Intermission gate after writing `input/prompt_assembled.md`, `output/thinking_trace.md`, `output/research_summary.md`, and logging token telemetry to `meta.json`.)*
-2. **Inspect or edit the Stage 1 research artifact in `nano` or `vim`:**
+3. **Inspect or edit the Stage 1 research artifact in `nano` or `vim`:**
    ```bash
    nano workspace/runs/<runId>/stages/01_research/output/research_summary.md
    ```
-3. **Run or re-run Stage 2 standalone after reviewing/editing Stage 1:**
+4. **Run or re-run Stage 2 standalone after reviewing/editing Stage 1 (supports `--dry-run` as well):**
    ```bash
+   npm run cli:stage2 -- --dry-run <runId>
    npm run cli:stage2 -- <runId>
    ```
-4. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
+5. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
    ```bash
    npm run cli -- "Cloud Native Architecture in 2026"
    ```
-5. **Read the final Stage 2 output:**
+6. **Read the final Stage 2 output:**
    ```bash
    cat workspace/runs/<runId>/stages/02_script/output/script_draft.json
    ```
+
+### Multimodal Stage Expansion with the Official `gemini-api` CLI
+For downstream stages that generate or analyze media files on disk (images, voiceovers, video, music, or PDF corpora), this repository integrates seamlessly with Google AI Studio's stateless **`gemini-api` CLI** (`google-gemini/gemini-api-cli`):
+* **Install `gemini-api`:**
+  * **Linux / macOS:** `curl -fsSL https://raw.githubusercontent.com/google-gemini/gemini-api-cli/main/scripts/install.sh | bash`
+  * **Windows (PowerShell):** `iwr -useb https://raw.githubusercontent.com/google-gemini/gemini-api-cli/main/scripts/install.ps1 | iex`
+* **Example Multimodal Stage Commands (Writing Directly into ICM Stage Folders):**
+  ```bash
+  # Stage 3 Visuals: Generate slide or illustration assets (gemini-nano-banana-2.1)
+  gemini-api image "Minimalist architectural diagram of a cloud-native mesh" \
+    --out workspace/runs/<runId>/stages/03_visuals/output/hero.png
+
+  # Stage 3 Audio: Generate spoken voiceover from Stage 2 script (gemini-3.8-flash-tts)
+  gemini-api tts "Welcome to Module 1..." \
+    --out workspace/runs/<runId>/stages/03_audio/output/voiceover.wav
+
+  # Pre-Stage 1 Local Corpus Analysis: Analyze local PDFs or videos into Stage 1 input
+  gemini-api analyze -i ./workspace/_config/reference.pdf "Extract all regulatory requirements"
+  ```
 
 ---
 

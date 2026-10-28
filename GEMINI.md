@@ -17,8 +17,9 @@ Instead, always operate in this tight, single-step feedback loop:
 2. **Modify Only the Current Layer or Stage:**
    - **Step A — Identity & Routing (`workspace/GEMINI.md` & `workspace/CONTEXT.md`):** Align Layer 0 (Global Identity) and Layer 1 (Workspace Route Context) with the project's domain first.
    - **Step B — Stage 1 Contract (`prompts/01_research.md`):** Rewrite Stage 1's prompt and stop. Do **not** touch Stage 2 yet.
-3. **Test Stage 1 Standalone (`npm run cli:stage1`) & Audit Pure ICM Filesystem Traces:**
-   - **CRITICAL:** When testing Stage 1 before Stage 2 is customized, run **Stage 1 standalone** via `npm run cli:stage1 -- "<topic>"`. Do **not** run `npm run cli` during Stage 1 testing, because `npm run cli` also runs Stage 2 on the old uncustomized prompt and wastes tokens.
+3. **Test Stage 1 Standalone (`--dry-run` First, Then `npm run cli:stage1`) & Audit Pure ICM Filesystem Traces:**
+   - **Step 3a — Zero-Token Dry-Run Preview:** Before making a live API call, run `npm run cli:stage1 -- --dry-run "<topic>"` to assemble `workspace/runs/_dry_run/stages/01_research/input/prompt_assembled.md` and verify the rendered `Layer 0 + Layer 1 + Layer 2` prompt and Interactions API request payload at zero token cost.
+   - **Step 3b — Live Stage 1 Standalone Run:** Run **Stage 1 standalone** via `npm run cli:stage1 -- "<topic>"`. Do **not** run `npm run cli` during Stage 1 testing, because `npm run cli` also runs Stage 2 on the old uncustomized prompt and wastes tokens.
    - After the Stage 1 test finishes, inspect the self-contained run directory on disk (`workspace/runs/<runId>/`):
      - **Run Metadata & Token Telemetry (`workspace/runs/<runId>/meta.json`):** Contains `stage1Telemetry` (`thinkingLevel`, `thoughtSteps`, `searchQueries`, `inputTokens`, `thoughtsTokens`, `outputTokens`, `totalTokens`, `durationMs`), also logged to stdout as `[Stage 1 Telemetry]`.
      - **Assembled Input Context (`workspace/runs/<runId>/stages/01_research/input/prompt_assembled.md`):** The exact rendered Layer 0 + Layer 1 + Layer 2 prompt sent to Gemini 4 Argon.
