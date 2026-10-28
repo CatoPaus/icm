@@ -235,8 +235,12 @@ Because the ICM state lives in plain Markdown and JSON files on disk (`workspace
 ### Multimodal Stage Expansion with the Official `gemini-api` CLI
 For downstream stages that generate or analyze media files on disk (images, voiceovers, video, music, or PDF corpora), this repository integrates seamlessly with Google AI Studio's stateless **`gemini-api` CLI** (`google-gemini/gemini-api-cli`):
 * **Install `gemini-api`:**
-  * **Linux / macOS:** `curl -fsSL https://raw.githubusercontent.com/google-gemini/gemini-api-cli/main/scripts/install.sh | bash`
-  * **Windows (PowerShell):** `iwr -useb https://raw.githubusercontent.com/google-gemini/gemini-api-cli/main/scripts/install.ps1 | iex`
+  * **Linux / macOS:**
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/google-gemini/gemini-api-cli/main/scripts/install.sh | bash
+    ```
+  * **Windows (Direct GitHub Release ZIP — avoids Defender AMSI false-positives on `iwr | iex`):**
+    Download `gemini-api_Windows_x86_64.zip` from [github.com/google-gemini/gemini-api-cli/releases/latest](https://github.com/google-gemini/gemini-api-cli/releases/latest) and extract `gemini-api.exe` into your `PATH` (e.g., `%LOCALAPPDATA%\Programs\gemini-api`).
 * **Example Multimodal Stage Commands (Writing Directly into ICM Stage Folders):**
   ```bash
   # Stage 3 Visuals: Generate slide or illustration assets (gemini-nano-banana-2.1)
