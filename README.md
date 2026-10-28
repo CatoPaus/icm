@@ -44,7 +44,7 @@ Because the **ICM Engine** (`src/index.ts`, `prompts/`, `workspace/`) is complet
 ### Starting a New Specialized Project
 ```bash
 # 1. Clone this base repository into a new project directory
-git clone <base-repo-url> icm-podcast-studio
+git clone https://github.com/CatoPaus/icm.git icm-podcast-studio
 cd icm-podcast-studio
 
 # 2. Keep this base repository registered as 'upstream'
