@@ -42,8 +42,14 @@ This repository is designed to serve as an **untouched upstream base template** 
 Because the **Pure ICM Engine** (`src/index.ts`, `prompts/`, `workspace/`) has **zero external framework dependencies** and is completely decoupled from the **Presentation / Server Layer** (`src/server.ts`, `public/`), downstream projects can freely customize stages, prompts, or swap the Express SPA for a full framework like **Next.js** while keeping the core Gemini 4 Argon engine intact.
 
 ### Starting a New Specialized Project
+
+> **Important — Name Your Project Folder After Your Target Domain:**
+> When you clone this template (`git clone https://github.com/CatoPaus/icm.git <project-folder-name>`), the **Antigravity 2.0 ICM Co-Architect** automatically reads your project directory name at `SessionStart` (via `.agents/hooks.json`) and uses it as an immediate semantic signal to pre-populate domain-specific recommendations and multiple-choice options during setup.
+> * Example: Naming your folder `icm-kurs` or `icm-course-builder` automatically steers the Co-Architect's first interactive question and ` Recommended` options toward online course creation.
+> * Example: Naming your folder `icm-podcast-studio`, `icm-legal-review`, or `icm-competitor-intel` automatically tailors its Layer 0–3 and Stage 1–2 recommendations to those domains.
+
 ```bash
-# 1. Clone this base template repository into a new project directory
+# 1. Clone this base template repository into a domain-named project directory
 git clone https://github.com/CatoPaus/icm.git icm-podcast-studio
 cd icm-podcast-studio
 

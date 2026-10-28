@@ -56,9 +56,11 @@ if (mode === 'session-start') {
     }
   }
 
+  const projectFolderName = path.basename(repoRoot);
   const msg = [
     '[ICM Co-Architect Session Context]',
     `- Workspace Root: ${repoRoot}`,
+    `- Project Folder Name (Domain Signal): "${projectFolderName}" (use this folder name to infer the user's likely project domain and pre-populate tailored "(Recommended)" options when asking Question 1 via ask_question).`,
     `- ${latestRunInfo}`,
     '- Pure ICM Filesystem Traces: Every stage writes input/prompt_assembled.md, output/thinking_trace.md, and token telemetry in workspace/runs/<runId>/meta.json.',
     '- Reminder: Follow the root GEMINI.md one-question / one-stage-at-a-time workflow. Never dump multi-step plans before testing Stage 1 via npm run cli:stage1.'
