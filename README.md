@@ -23,9 +23,9 @@ By locking the entire runtime to **Gemini 4 Argon** (`src/index.ts`) and tuning 
 * **Stage 2 (`02_script` — `MEDIUM` thinking + zero web access):** Operates in a sealed sandbox using *only* the verified Stage 1 artifact and Layer 3 guide—so downstream deliverables can never introduce unverified claims.
 
 ### 3. Frictionless Human-in-the-Loop Iteration
-Because every run lives on disk and is surfaced in both the **Web Dashboard** (`src/server.ts`) and **Windows File Explorer** (`Open Folder`), you can:
+Because every run lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/`), you can:
 1. Run deep research once (watching it stream live via `research_stream.md`).
-2. Inspect, curate, or edit `research_summary.md` (or tweak `voice_guide.md`) either in the browser UI or directly in your local editor via the run folder.
+2. Inspect, curate, or edit `research_summary.md` (or tweak `voice_guide.md`) directly in your local editor or through the reference Web Dashboard ([`public/README.md`](./public/README.md)).
 3. Re-run Stage 2 (or future downstream stages) standalone in seconds without re-running or paying for Stage 1 research again.
 
 ### 4. Extensible N-Stage Pipeline Roadmap
@@ -108,15 +108,13 @@ All legacy models (`gemini-2.5-*`, `gemini-3.5-*`, etc.) and deprecated sampling
 3. **Sub-Second Grounding Citation Resolution (`resolveRedirect` & `cleanGroundingLinks`)**
    * Resolves `vertexaisearch.cloud.google.com/grounding-api-redirect/...` URLs using `redirect: 'manual'` first to read Google's `302 Location` header directly (~0.5s total for 100+ links) without timing out on unreachable third-party servers.
    * Weaves Interactions API `url_citation` annotations inline at exact UTF-8 byte offsets and deduplicates references in the **Sources & Citations** section.
-4. **Zero-Flicker Web Dashboard & Native Windows 11 File Explorer Integration**
-   * **SSR State Hydration (`window.__INITIAL_STATE__`):** `src/server.ts` embeds the initial runs and active run detail directly into `index.html` on `GET /`, eliminating initial page-load layout shift and flicker.
-   * **DOM Reconciliation (`reconcilePreviewHtml`):** `public/app.js` diffs child nodes in place during 3-second live polling so headings, links, and scroll position never flash.
-   * **Windows 11 File Explorer (`POST /api/run/:runId/open`):** Launches Explorer on the interactive desktop via `WScript.Shell` (`Win+E`), navigates in-place via `Shell.Application.Navigate2`, and nudges `WM_SIZE` to force Windows 11's `DesktopChildSiteBridge` XAML islands to paint immediately.
-   * **Live Terminal Mirror (`.genkit/terminal.log`):** `src/server.ts` automatically tees `stdout` and `stderr` (stripped of ANSI codes) to `.genkit/terminal.log` for instant inspection.
-5. **Built-In Antigravity 2.0 ICM Co-Architect (`GEMINI.md` & `.agents/`)**
+4. **Built-In Antigravity 2.0 ICM Co-Architect (`GEMINI.md` & `.agents/`)**
    * **Root `GEMINI.md`:** Configures the main Antigravity 2.0 agent as an interactive **ICM Co-Architect** that guides project customization one question and one stage at a time (avoiding brittle multi-step upfront plans), inspects traces via `genkit-mcp-server` (`get_trace`), and checks `.genkit/terminal.log`.
    * **Lifecycle Hooks (`.agents/hooks.json` & `.agents/scripts/icm-hooks.mjs`):** Automatically injects the latest run and trace ID at `SessionStart` and enforces a `PreToolUse` guardrail blocking legacy models or deprecated sampling parameters (`temperature`, `topP`, `topK`).
-   * **Interactive Playbook Skill (`.agents/skills/icm-co-architect/SKILL.md`):** Step-by-step runbook for specializing Layer 0/1, testing Stage 1 before designing Stage 2, and expanding the pipeline.
+   * **Interactive Playbook Skill (`.agents/skills/icm-co-architect/SKILL.md`):** Step-by-step runbook for specializing Layer 0/1, testing Stage 1 standalone (`npm run cli:stage1`) before designing Stage 2, and expanding the pipeline.
+5. **Decoupled Reference Demo Web Dashboard ([`public/README.md`](./public/README.md))**
+   * Includes an optional Express + Vanilla JS reference dashboard (`src/server.ts` & `public/`) with SSR state hydration, live DOM reconciliation, `.genkit/terminal.log` mirroring, and cross-platform Desktop File Manager integration (Ubuntu/Linux Desktop, WSL, macOS Finder, and Windows 11 Explorer).
+   * Full documentation for the demo web app lives in [`public/README.md`](./public/README.md).
 
 ---
 
@@ -137,9 +135,10 @@ The workspace layout maps abstract context layers directly to disk directories:
 ├── package.json
 ├── tsconfig.json
 ├── src/
-│   ├── index.ts                 # Main Orchestrator Flow, Gemini 4 Argon Plugin & Resumable Interrupts
-│   └── server.ts                # Express API, SSR Hydration, Explorer Launcher & Terminal Mirror
-├── public/                      # Web Dashboard SPA
+│   ├── index.ts                 # Main Orchestrator Flow, Gemini 4 Argon Plugin & Headless CLI
+│   └── server.ts                # Reference Demo Web Server (documented in public/README.md)
+├── public/                      # Reference Demo Web Dashboard SPA
+│   ├── README.md                # Demo Web Dashboard & Cross-Platform File Manager docs
 │   ├── index.html               # Dashboard layout & SSR state mount
 │   ├── style.css                # Design system & responsive workspace styling
 │   └── app.js                   # Client controller & DOM-reconciled live preview

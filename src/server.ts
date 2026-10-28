@@ -365,7 +365,7 @@ app.delete('/api/run/:runId', (req, res) => {
   }
 });
 
-// Endpoint to open a specific run's folder in file explorer on Windows 11 (targeting WinSta0\Default without frame-resize flicker)
+// Endpoint to open a specific run's folder in the native desktop file manager (Windows 11, Ubuntu/Linux Desktop, WSL, macOS)
 app.post('/api/run/:runId/open', (req, res) => {
   const { runId } = req.params;
   const runDir = path.resolve('./workspace/runs', runId);
@@ -375,7 +375,51 @@ app.post('/api/run/:runId/open', (req, res) => {
       return res.status(404).json({ error: 'Run directory not found' });
     }
 
-    console.log(`Opening folder in explorer: ${runDir}`);
+    console.log(`Opening folder in desktop file manager (${process.platform}): ${runDir}`);
+
+    if (process.platform === 'linux') {
+      // Check if running inside WSL on Windows first
+      let isWsl = false;
+      try {
+        const procVersion = fs.readFileSync('/proc/version', 'utf-8').toLowerCase();
+        isWsl = procVersion.includes('microsoft') || procVersion.includes('wsl');
+      } catch {
+        // Ignore if /proc/version is unreadable
+      }
+
+      if (isWsl) {
+        execFile('wslpath', ['-w', runDir], (err, winPath) => {
+          const targetPath = !err && winPath ? winPath.trim() : runDir;
+          execFile('explorer.exe', [targetPath], () => {});
+        });
+      } else {
+        // Ubuntu / Linux Desktop (GNOME Nautilus, KDE Dolphin, XFCE Thunar via xdg-open -> gio open -> nautilus)
+        execFile('xdg-open', [runDir], (xdgErr) => {
+          if (xdgErr) {
+            execFile('gio', ['open', runDir], (gioErr) => {
+              if (gioErr) {
+                execFile('nautilus', [runDir], (nautErr) => {
+                  if (nautErr) {
+                    console.error('Error launching Linux desktop file manager:', nautErr);
+                  }
+                });
+              }
+            });
+          }
+        });
+      }
+
+      return res.json({ success: true });
+    }
+
+    if (process.platform === 'darwin') {
+      execFile('open', [runDir], (err) => {
+        if (err) {
+          console.error('Error launching macOS Finder:', err);
+        }
+      });
+      return res.json({ success: true });
+    }
 
     const psQuote = (val: string) => `'${val.replace(/'/g, "''")}'`;
 
