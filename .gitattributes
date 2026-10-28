@@ -1,0 +1,11 @@
+# Enforce LF line endings across Windows, macOS, and Linux so multi-line file edits
+# and stage prompt assembly behave identically on every OS.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.wav binary
+*.mp3 binary
+*.mp4 binary

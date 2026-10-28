@@ -3,9 +3,10 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "npx tsx --watch-path=src --watch-path=prompts --env-file=.env.local src/server.ts",
+    "dev": "npx tsx watch --clear-screen=false --ignore=.icm/** --ignore=workspace/** --ignore=.sessions/** --env-file=.env.local src/server.ts",
     "dev:all": "npm run dev",
     "server": "npx tsx --env-file=.env.local src/server.ts",
+    "ui": "npm run server",
     "cli": "npx tsx --env-file=.env.local src/index.ts --cli",
     "cli:stage1": "npx tsx --env-file=.env.local src/index.ts --stage1",
     "cli:stage2": "npx tsx --env-file=.env.local src/index.ts --stage2",

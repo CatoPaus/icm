@@ -88,14 +88,28 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
 - **Adding a Vertical Context Layer (e.g., `workspace/_config/course_profile.md`):**
   - Load the file in `loadWorkspaceLayers()` inside [`src/index.ts`](../../src/index.ts) and inject it into the target `prompts/*.md` template.
 - **Adding a Horizontal Pipeline Stage (e.g., `prompts/03_slides.md`):**
-  1. Create `prompts/03_<name>.md` using `model: gemini-4-argon`.
+  1. Create `prompts/03_<name>.md` using `model: gemini-4-argon`. `loadStagePromptContract()` in [`src/index.ts`](../../src/index.ts) natively parses flat scalars (`title: string`), scalar arrays (`bullets: string[]`), and nested object arrays (`slides(array):` or `slides[]:` followed by indented child fields) directly from YAML frontmatter, so you never need to hardcode JSON schemas in `src/index.ts`:
+     ```yaml
+     output:
+       format: json
+       schema:
+         deckTitle: string
+         totalSlides: integer
+         slides(array):
+           slideNumber: integer
+           cueType: string
+           slideTitle: string
+           bullets: string[]
+           speakerNotes: string
+           visualPrompt: string
+     ```
   2. Add `runStage3Flow` and `--stage3` in [`src/index.ts`](../../src/index.ts) + `"cli:stage3"` in [`package.json`](../../package.json), and chain `runStage3Flow` inside `icmOrchestratorFlow`.
-  3. **Test Stage 3 standalone first** (`npm run cli:stage3 -- <runId>`) and verify `stages/03_<name>/input/prompt_assembled.md`, `output/thinking_trace.md`, and the output artifact on disk *before* wiring the new tab into [`src/server.ts`](../../src/server.ts), [`public/index.html`](../../public/index.html), and [`public/app.js`](../../public/app.js).
-- **Adding Multimodal Stages (`03_visuals`, `03_audio`, `03_video`, Document Analysis) via `gemini-api` CLI:**
-  - The official Google AI Studio `gemini-api` CLI (`google-gemini/gemini-api-cli`) is installed on the host and pairs naturally with ICM's filesystem-first stage directories:
+  3. **Test Stage 3 standalone first** (`npm run cli:stage3 -- --dry-run <runId>`, then `npm run cli:stage3 -- <runId>`) and verify `stages/03_<name>/input/prompt_assembled.md`, `output/thinking_trace.md`, and the output artifact on disk *before* wiring the new tab into [`src/server.ts`](../../src/server.ts), [`public/index.html`](../../public/index.html), and [`public/app.js`](../../public/app.js).
+- **Adding Multimodal Stages (`03_visuals`, `04_audio`, `03_video`, Document Analysis):**
+  - You can implement multimodal stages directly in [`src/index.ts`](../../src/index.ts) via zero-dependency `fetch` calls to `https://generativelanguage.googleapis.com/v1beta/interactions` (`gemini-nano-banana-2.1` for PNG slide/visual generation; `gemini-3.8-flash-tts` with `response_format: { type: "audio" }` and `generation_config: { speech_config: [{ voice: "Kore" }] }` for WAV voiceover synthesis), or invoke the `gemini-api` CLI binary (`gemini-api` on PATH, or `$env:LOCALAPPDATA\Programs\gemini-api\gemini-api.exe` on Windows if the IDE has not been restarted since installation):
     - **Image Generation (`gemini-nano-banana-2.1`):** `gemini-api image "<prompt>" --out workspace/runs/<runId>/stages/03_visuals/output/slide_01.png`
-    - **Speech / Voiceover (`gemini-3.8-flash-tts`):** `gemini-api tts "<script>" --out workspace/runs/<runId>/stages/03_audio/output/voiceover.wav`
+    - **Speech / Voiceover (`gemini-3.8-flash-tts`):** `gemini-api tts "<script>" --out workspace/runs/<runId>/stages/04_audio/output/voiceover.wav`
     - **Document / PDF / Video Analysis:** `gemini-api analyze -i ./docs/source.pdf "Extract key data"`
-    - **Dry-Run Inspection:** Append `--dry-run` to any `gemini-api` command to preview the Interactions API request without sending it.
+    - **Dry-Run Inspection:** Append `--dry-run` to preview the Interactions API request without sending it.
 - **Editing Large Files Safely:**
-  - Never fire multiple parallel `edit_file` calls on the same file (`public/index.html`, `public/app.js`, `src/index.ts`, `src/server.ts`). Make targeted sequential `edit_file` calls to save output tokens and avoid CRLF target mismatches.
+  - Never fire multiple parallel `edit_file` calls on the same file (`public/index.html`, `public/app.js`, `src/index.ts`, `src/server.ts`). Make targeted sequential `edit_file` calls to save output tokens.

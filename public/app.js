@@ -1118,7 +1118,7 @@ function handleServerOffline() {
       serverWarningTitle.textContent = 'Server Reconnecting / Restarting...';
     }
     if (serverWarningDesc) {
-      serverWarningDesc.textContent = 'The local server is currently restarting (usually triggered by a code update, prompt modification, or Genkit schema recompiling). This dashboard will automatically reconnect once it is back online.';
+      serverWarningDesc.textContent = 'The local server is currently restarting (usually triggered by a code update or stage contract modification). This dashboard will automatically reconnect once it is back online.';
     }
   }
 }

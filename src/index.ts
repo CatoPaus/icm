@@ -41,6 +41,121 @@ export interface StagePromptContract {
 }
 
 /**
+ * Parses `output.schema` or `output.jsonSchema` from stage contract YAML frontmatter.
+ * Supports flat scalars (`title: string`), scalar arrays (`bullets: string[]`),
+ * nested object arrays (`slides(array):` / `slides[]:` / `slides: array` with indented child fields),
+ * nested objects (`metadata:` with indented child fields), or inline JSON Schema (`jsonSchema: {...}`).
+ */
+function parseFrontmatterOutputSchema(outputBlock: string): Record<string, any> | undefined {
+  const inlineJsonMatch = outputBlock.match(/(?:jsonSchema|schema):\s*(\{[\s\S]*\})\s*$/);
+  if (inlineJsonMatch) {
+    try {
+      return JSON.parse(inlineJsonMatch[1]);
+    } catch {
+      // Fall through to line-by-line YAML schema parsing
+    }
+  }
+
+  const schemaSectionMatch = outputBlock.match(/schema:\s*[\r\n]+([\s\S]*)$/);
+  if (!schemaSectionMatch) return undefined;
+
+  const rawLines = schemaSectionMatch[1].split(/\r?\n/);
+  const schemaLines: Array<{ indent: number; text: string }> = [];
+  for (const line of rawLines) {
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    if (/^\S/.test(line)) break;
+    const indent = line.match(/^\s*/)?.[0].length ?? 0;
+    schemaLines.push({ indent, text: line.trim() });
+  }
+
+  if (schemaLines.length === 0) return undefined;
+
+  function parseBlock(startIndex: number, minIndent: number): {
+    properties: Record<string, any>;
+    required: string[];
+    nextIndex: number;
+  } {
+    const properties: Record<string, any> = {};
+    const required: string[] = [];
+    let i = startIndex;
+
+    while (i < schemaLines.length) {
+      const current = schemaLines[i];
+      if (!current || current.indent < minIndent) break;
+
+      const lineMatch = current.text.match(
+        /^([a-zA-Z0-9_]+)(\[\]|\(array\))?(\?)?:\s*(.*)$/i
+      );
+      if (!lineMatch) {
+        i++;
+        continue;
+      }
+
+      const [, propName, arraySuffix, optionalFlag, rawType] = lineMatch;
+      const typeStr = rawType.trim();
+      const isOptional = Boolean(optionalFlag);
+      const nextLine = schemaLines[i + 1];
+      const hasChildren = Boolean(nextLine && nextLine.indent > current.indent);
+
+      const isArrayHeader =
+        Boolean(arraySuffix) ||
+        /^array$/i.test(typeStr) ||
+        /^array<object>$/i.test(typeStr);
+
+      if (hasChildren && nextLine) {
+        const childBlock = parseBlock(i + 1, nextLine.indent);
+        const objectSchema = {
+          type: 'object',
+          properties: childBlock.properties,
+          required: childBlock.required,
+        };
+        properties[propName] = isArrayHeader
+          ? { type: 'array', items: objectSchema }
+          : objectSchema;
+        if (!isOptional) required.push(propName);
+        i = childBlock.nextIndex;
+        continue;
+      }
+
+      const scalarArrayMatch =
+        typeStr.match(/^(string|integer|number|boolean)\[\]$/i) ||
+        typeStr.match(/^array<\s*(string|integer|number|boolean)\s*>$/i);
+      if (scalarArrayMatch) {
+        properties[propName] = {
+          type: 'array',
+          items: { type: scalarArrayMatch[1].toLowerCase() },
+        };
+        if (!isOptional) required.push(propName);
+        i++;
+        continue;
+      }
+
+      const scalarMatch = typeStr.match(/^(string|integer|number|boolean)$/i);
+      if (scalarMatch) {
+        const scalarType = scalarMatch[1].toLowerCase();
+        properties[propName] = arraySuffix
+          ? { type: 'array', items: { type: scalarType } }
+          : { type: scalarType };
+        if (!isOptional) required.push(propName);
+      }
+
+      i++;
+    }
+
+    return { properties, required, nextIndex: i };
+  }
+
+  const root = parseBlock(0, schemaLines[0]?.indent ?? 2);
+  if (Object.keys(root.properties).length === 0) return undefined;
+
+  return {
+    type: 'object',
+    properties: root.properties,
+    required: root.required,
+  };
+}
+
+/**
  * Parses a stage contract Markdown file from `./prompts/<name>.md` (YAML frontmatter + Handlebars template)
  * without requiring any external framework dependencies.
  */
@@ -92,30 +207,7 @@ export function loadStagePromptContract(
   if (outputFormat === 'json') {
     const outputBlockMatch = frontmatter.match(/output:\s*[\r\n]+([\s\S]*)$/);
     if (outputBlockMatch) {
-      const schemaSectionMatch = outputBlockMatch[1].match(/schema:\s*[\r\n]+([\s\S]*)$/);
-      if (schemaSectionMatch) {
-        const properties: Record<string, any> = {};
-        const required: string[] = [];
-        const lines = schemaSectionMatch[1].split(/\r?\n/);
-        for (const line of lines) {
-          if (!line.trim() || /^\S/.test(line)) break;
-          const propMatch = line.match(/^\s+([a-zA-Z0-9_]+)(\?)?:\s*(string|integer|number|boolean)/i);
-          if (propMatch) {
-            const [, propName, isOptional, propType] = propMatch;
-            properties[propName] = { type: propType.toLowerCase() };
-            if (!isOptional) {
-              required.push(propName);
-            }
-          }
-        }
-        if (Object.keys(properties).length > 0) {
-          outputJsonSchema = {
-            type: 'object',
-            properties,
-            required,
-          };
-        }
-      }
+      outputJsonSchema = parseFrontmatterOutputSchema(outputBlockMatch[1]);
     }
   }
 
