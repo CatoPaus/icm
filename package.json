@@ -3,22 +3,12 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "npx tsx watch --clear-screen=false --ignore=.icm/** --ignore=workspace/** --ignore=.sessions/** --env-file=.env.local src/server.ts",
-    "dev:all": "npm run dev",
-    "server": "npx tsx --env-file=.env.local src/server.ts",
-    "ui": "npm run server",
     "cli": "npx tsx --env-file=.env.local src/index.ts --cli",
     "cli:stage1": "npx tsx --env-file=.env.local src/index.ts --stage1",
     "cli:stage2": "npx tsx --env-file=.env.local src/index.ts --stage2",
     "clean": "node scripts/cleanup.js"
   },
-  "dependencies": {
-    "cors": "^2.8.6",
-    "express": "^5.3.0"
-  },
   "devDependencies": {
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
     "@types/node": "^26.6.5",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"

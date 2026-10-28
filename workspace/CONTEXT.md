@@ -8,7 +8,7 @@ This workspace executes a two-stage sequential **100% Pure Interpretable Context
    - **Role**: Synthesize comprehensive, source-backed findings on the requested topic so downstream stages need zero external web access.
 
 2. **Intermission — Human-in-the-Loop Inspection & Editing**
-   - **Role**: Between Stage 1 and Stage 2, a human reviewer can inspect or edit `research_summary.md` directly in the Web Dashboard or on disk, and re-run Stage 2 standalone at any time (`npm run cli:stage2 -- <runId>`) at zero Stage 1 token cost.
+   - **Role**: Between Stage 1 and Stage 2, a human reviewer can inspect or edit `research_summary.md` directly on disk, and re-run Stage 2 standalone at any time (`npm run cli:stage2 -- <runId>`) at zero Stage 1 token cost.
 
 3. **Stage 2 — Voiceover Scriptwriting (`stages/02_script`)**
    - **Model & Thinking**: `gemini-4-argon` (`thinkingLevel: MEDIUM` by default, `maxOutputTokens: 32768`).
