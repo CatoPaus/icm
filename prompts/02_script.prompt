@@ -1,5 +1,5 @@
 ---
-model: googleai/gemini-4-argon
+model: gemini-4-argon
 config:
   maxOutputTokens: 32768
   thinkingConfig:

@@ -21,7 +21,6 @@ if (mode === 'session-start') {
   readStdinJson();
 
   const runsDir = path.join(repoRoot, 'workspace', 'runs');
-  const tracesDir = path.join(repoRoot, '.genkit', 'traces');
 
   let latestRunInfo = 'No runs executed yet in workspace/runs/.';
   if (fs.existsSync(runsDir)) {
@@ -57,33 +56,12 @@ if (mode === 'session-start') {
     }
   }
 
-  let latestTraceId = 'none';
-  if (fs.existsSync(tracesDir)) {
-    const traces = fs
-      .readdirSync(tracesDir)
-      .map((name) => {
-        const full = path.join(tracesDir, name);
-        try {
-          const stat = fs.statSync(full);
-          return stat.isFile() ? { name, mtimeMs: stat.mtimeMs } : null;
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-    if (traces.length > 0) {
-      latestTraceId = traces[0].name;
-    }
-  }
-
   const msg = [
     '[ICM Co-Architect Session Context]',
     `- Workspace Root: ${repoRoot}`,
     `- ${latestRunInfo}`,
-    `- Latest Genkit Trace ID: ${latestTraceId} (inspect via genkit-mcp-server get_trace or .genkit/terminal.log)`,
-    '- Reminder: Follow the root GEMINI.md one-question / one-stage-at-a-time workflow. Never dump multi-step plans before testing Stage 1.'
+    '- Pure ICM Filesystem Traces: Every stage writes input/prompt_assembled.md, output/thinking_trace.md, and token telemetry in workspace/runs/<runId>/meta.json.',
+    '- Reminder: Follow the root GEMINI.md one-question / one-stage-at-a-time workflow. Never dump multi-step plans before testing Stage 1 via npm run cli:stage1.'
   ].join('\n');
 
   process.stdout.write(
@@ -118,7 +96,7 @@ if (mode === 'pre-tool-use') {
       process.stdout.write(
         JSON.stringify({
           decision: 'deny',
-          reason: `Blocked by ICM Argon Guard: Legacy model "${forbiddenModelMatch[0]}" is forbidden. Use only "googleai/gemini-4-argon" ("gemini-4-argon").`
+          reason: `Blocked by ICM Argon Guard: Legacy model "${forbiddenModelMatch[0]}" is forbidden. Use only "gemini-4-argon".`
         })
       );
       process.exit(0);

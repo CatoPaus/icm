@@ -52,9 +52,9 @@ Clicking **Open Folder** in the Web Dashboard opens the active run directory (`w
 
 1. **Start the Dashboard:**
    ```bash
-   npm run genkit:dev
+   npm run dev
    ```
-   *(Or run `npm run server` to start only the Web Dashboard on `http://localhost:3000`.)*
+   *(Or run `npm run server` to start the Web Dashboard on `http://localhost:3000` without file watching.)*
 2. **Trigger a Pipeline Run:**
    * Open `http://localhost:3000`.
    * Enter a topic, select your desired Thinking Levels (`HIGH` for Stage 1 Research, `MEDIUM` for Stage 2 Scriptwriting), and click **Run Full Pipeline**.
