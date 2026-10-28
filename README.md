@@ -45,7 +45,7 @@ Because the **Pure ICM Engine** (`src/index.ts`, `prompts/`, `workspace/`) has *
 
 > **Important — Name Your Project Folder After Your Target Domain:**
 > When you clone this template (`git clone https://github.com/CatoPaus/icm.git <project-folder-name>`), the **Antigravity 2.0 ICM Co-Architect** automatically reads your project directory name at `SessionStart` (via `.agents/hooks.json`) and uses it as an immediate semantic signal to pre-populate domain-specific recommendations and multiple-choice options during setup.
-> * Example: Naming your folder `icm-kurs` or `icm-course-builder` automatically steers the Co-Architect's first interactive question and ` Recommended` options toward online course creation.
+> * Example: Naming your folder `icm-course-studio` or `icm-course-builder` automatically steers the Co-Architect's first interactive question and `(Recommended)` options toward online course creation.
 > * Example: Naming your folder `icm-podcast-studio`, `icm-legal-review`, or `icm-competitor-intel` automatically tailors its Layer 0–3 and Stage 1–2 recommendations to those domains.
 
 ```bash

@@ -32,7 +32,7 @@ In ICM, Stage 2 (`prompts/02_script.md`) consumes the physical file produced by 
 ## Phase 1: Project Goal & Layer 0 / Layer 1 Setup
 
 1. **Ask Question 1 (Domain & Goal — Informed by Project Folder Name):**
-   - Inspect the workspace folder name (e.g., `icm-kurs`, `icm-podcast-studio`, `icm-legal-review`) injected at `SessionStart` and use it as a semantic hint to pre-populate tailored `(Recommended)` multiple-choice options via `ask_question` for the project's domain, target deliverable, and language/tone rules.
+   - Inspect the workspace folder name (e.g., `icm-course-studio`, `icm-podcast-studio`, `icm-legal-review`) injected at `SessionStart` and use it as a semantic hint to pre-populate tailored `(Recommended)` multiple-choice options via `ask_question` for the project's domain, target deliverable, and language/tone rules.
 2. **Update Layer 0 & Layer 1 Only:**
    - Update [`workspace/GEMINI.md`](../../workspace/GEMINI.md) (Layer 0: Global Identity & Epistemic Rules).
    - Update [`workspace/CONTEXT.md`](../../workspace/CONTEXT.md) (Layer 1: Workspace Route Context).
