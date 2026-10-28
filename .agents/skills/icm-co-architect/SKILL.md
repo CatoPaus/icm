@@ -3,8 +3,8 @@ name: icm-co-architect
 description: >-
   Interactive one-step-at-a-time playbook for specializing, tuning, and debugging
   a 100% Pure Interpretable Context Methodology (ICM) repository. Activate this skill whenever
-  the user wants to customize this template for a new project, rewrite stage prompts
-  (01_research.prompt, 02_script.prompt), add new ICM stages/layers, or inspect filesystem
+  the user wants to customize this template for a new project, rewrite stage contracts
+  (01_research.md, 02_script.md), add new ICM stages/layers, or inspect filesystem
   traces (prompt_assembled.md, thinking_trace.md, meta.json) after a test run.
 ---
 
@@ -14,7 +14,7 @@ Use this skill to guide the user through customizing or debugging the ICM pipeli
 
 ## Core Rule: Why We Never Write Multi-Step Upfront Plans
 
-In ICM, Stage 2 (`prompts/02_script.prompt`) consumes the physical file produced by Stage 1 (`stages/01_research/output/research_summary.md`). Empirically, over 90% of human edits happen right after Stage 1. If you design Stage 1 and Stage 2 simultaneously before running Stage 1, any adjustment the user makes after seeing Stage 1's real output invalidates everything written for Stage 2.
+In ICM, Stage 2 (`prompts/02_script.md`) consumes the physical file produced by Stage 1 (`stages/01_research/output/research_summary.md`). Empirically, over 90% of human edits happen right after Stage 1. If you design Stage 1 and Stage 2 simultaneously before running Stage 1, any adjustment the user makes after seeing Stage 1's real output invalidates everything written for Stage 2.
 
 **Always follow the Single-Step Loop:**
 1. Ask **1 focused question** (prefer the `ask_question` tool with clear options).
@@ -36,15 +36,15 @@ In ICM, Stage 2 (`prompts/02_script.prompt`) consumes the physical file produced
 2. **Update Layer 0 & Layer 1 Only:**
    - Update [`workspace/GEMINI.md`](../../workspace/GEMINI.md) (Layer 0: Global Identity & Epistemic Rules).
    - Update [`workspace/CONTEXT.md`](../../workspace/CONTEXT.md) (Layer 1: Workspace Route Context).
-   - Stop and present the updated Layer 0/1 files before touching `prompts/01_research.prompt`.
+   - Stop and present the updated Layer 0/1 files before touching `prompts/01_research.md`.
 
 ---
 
-## Phase 2: Stage 1 (`prompts/01_research.prompt`) & Standalone Verification
+## Phase 2: Stage 1 (`prompts/01_research.md`) & Standalone Verification
 
 1. **Ask Question 2 (Stage 1 Output Structure):**
    - Ask what specific sections, facts, or strategic angles Stage 1 should research and write into `research_summary.md`, and whether `thinkingLevel` should remain `HIGH` (`maxOutputTokens: 65536`).
-2. **Edit Only `prompts/01_research.prompt`:**
+2. **Edit Only `prompts/01_research.md`:**
    - Keep `model: gemini-4-argon`, `maxOutputTokens: 65536`, and `{{#if globalIdentity}}` / `{{#if workspaceContext}}` blocks intact.
 3. **Run & Audit Stage 1 Standalone (Do NOT Run Stage 2 Yet):**
    - **Important:** Do **not** run `npm run cli -- "<topic>"` here, because `npm run cli` also runs Stage 2 with the old uncustomized prompt and wastes tokens.
@@ -56,11 +56,11 @@ In ICM, Stage 2 (`prompts/02_script.prompt`) consumes the physical file produced
      1. **Telemetry & Search Query Check:** Read `workspace/runs/<runId>/meta.json` (`stage1Telemetry`: `inputTokens`, `thoughtsTokens`, `outputTokens`, `totalTokens`, `durationMs`, `thoughtSteps`, `searchQueries`) and `stages/01_research/output/thinking_trace.md`.
      2. **Assembled Input Check:** Verify `stages/01_research/input/prompt_assembled.md` if you need to confirm how Layer 0 + Layer 1 + Layer 2 combined.
      3. **Output Artifact:** Read `workspace/runs/<runId>/stages/01_research/output/research_summary.md` and review its sections and resolved citations with the user.
-   - If Stage 1 needs refinement, apply the **Edit-Source Principle** (update `prompts/01_research.prompt` for reusable changes, or `research_summary.md` for one-off edits) before moving to Phase 3.
+   - If Stage 1 needs refinement, apply the **Edit-Source Principle** (update `prompts/01_research.md` for reusable changes, or `research_summary.md` for one-off edits) before moving to Phase 3.
 
 ---
 
-## Phase 3: Layer 3 (`workspace/_config/voice_guide.md`) & Stage 2 (`prompts/02_script.prompt`)
+## Phase 3: Layer 3 (`workspace/_config/voice_guide.md`) & Stage 2 (`prompts/02_script.md`)
 
 Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on disk:
 
@@ -68,7 +68,7 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
    - Ask what Stage 2 should transform `research_summary.md` into (e.g., course module, spoken script, podcast dialogue, executive brief) and what voice/style rules belong in [`workspace/_config/voice_guide.md`](../../workspace/_config/voice_guide.md).
 2. **Update Layer 3 & Stage 2:**
    - Update [`workspace/_config/voice_guide.md`](../../workspace/_config/voice_guide.md).
-   - Update [`prompts/02_script.prompt`](../../prompts/02_script.prompt) (`model: gemini-4-argon`, `thinkingLevel: MEDIUM`, `maxOutputTokens: 32768` or up to `65536`).
+   - Update [`prompts/02_script.md`](../../prompts/02_script.md) (`model: gemini-4-argon`, `thinkingLevel: MEDIUM`, `maxOutputTokens: 32768` or up to `65536`).
 3. **Test Stage 2 Standalone (Zero Stage 1 Cost):**
    - Run Stage 2 standalone against the existing `<runId>`:
      ```bash
@@ -82,9 +82,9 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
 ## Phase 4: Adding New Context Layers or Stages (`03_...`, `04_...`) & UI Customization
 
 - **Adding a Vertical Context Layer (e.g., `workspace/_config/course_profile.md`):**
-  - Load the file in `loadWorkspaceLayers()` inside [`src/index.ts`](../../src/index.ts) and inject it into the target `.prompt` template.
-- **Adding a Horizontal Pipeline Stage (e.g., `prompts/03_slides.prompt`):**
-  1. Create `prompts/03_<name>.prompt` using `model: gemini-4-argon`.
+  - Load the file in `loadWorkspaceLayers()` inside [`src/index.ts`](../../src/index.ts) and inject it into the target `prompts/*.md` template.
+- **Adding a Horizontal Pipeline Stage (e.g., `prompts/03_slides.md`):**
+  1. Create `prompts/03_<name>.md` using `model: gemini-4-argon`.
   2. Add `runStage3Flow` and `--stage3` in [`src/index.ts`](../../src/index.ts) + `"cli:stage3"` in [`package.json`](../../package.json), and chain `runStage3Flow` inside `icmOrchestratorFlow`.
   3. **Test Stage 3 standalone first** (`npm run cli:stage3 -- <runId>`) and verify `stages/03_<name>/input/prompt_assembled.md`, `output/thinking_trace.md`, and the output artifact on disk *before* wiring the new tab into [`src/server.ts`](../../src/server.ts), [`public/index.html`](../../public/index.html), and [`public/app.js`](../../public/app.js).
 - **Editing Large Files Safely:**

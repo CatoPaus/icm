@@ -41,16 +41,18 @@ export interface StagePromptContract {
 }
 
 /**
- * Parses a `.prompt` file from `./prompts/<name>.prompt` (YAML frontmatter + Handlebars template)
- * without requiring any external framework dependencies.
+ * Parses a stage contract Markdown file from `./prompts/<name>.md` (YAML frontmatter + Handlebars template)
+ * without requiring any external framework dependencies. Supports `.prompt` fallback for backwards compatibility.
  */
 export function loadStagePromptContract(
   promptName: string,
   promptDir: string = './prompts'
 ): StagePromptContract {
-  const filePath = path.resolve(promptDir, `${promptName}.prompt`);
+  const mdPath = path.resolve(promptDir, `${promptName}.md`);
+  const legacyPromptPath = path.resolve(promptDir, `${promptName}.prompt`);
+  const filePath = fs.existsSync(mdPath) ? mdPath : legacyPromptPath;
   if (!fs.existsSync(filePath)) {
-    throw new Error(`Stage prompt contract not found at: ${filePath}`);
+    throw new Error(`Stage contract not found at: ${mdPath}`);
   }
 
   const raw = fs.readFileSync(filePath, 'utf-8');

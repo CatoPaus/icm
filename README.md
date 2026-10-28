@@ -13,7 +13,7 @@ This setup is a **filesystem-first, human-in-the-loop intelligence and productio
 ### 1. The Filesystem *Is* the State Machine & Trace Log (ICM Layers 0–4)
 Instead of trapping intermediate agent state inside in-memory framework closures or external telemetry daemons, every boundary in the pipeline is a **numbered folder and an inspectable file on disk** under `workspace/runs/<runId>/`:
 * **Layer 0 & 1 (`workspace/GEMINI.md` + `workspace/CONTEXT.md`):** Global epistemic rules (strict fact-grounding, automatic Norwegian/English language matching) and pipeline awareness injected into every stage.
-* **Layer 2 (`prompts/01_research.prompt`, `prompts/02_script.prompt`):** Strict stage contracts and schemas parsed directly from disk.
+* **Layer 2 (`prompts/01_research.md`, `prompts/02_script.md`):** Strict stage contracts and schemas parsed directly from Markdown files on disk.
 * **Layer 3 (`workspace/_config/voice_guide.md`):** Reusable domain/style rules decoupled from the prompt logic.
 * **Layer 4 (`research_summary.md`, `script_draft.json`):** Concrete artifacts that act as the *only* handoff between stages, paired with the exact assembled input prompt (`input/prompt_assembled.md`) and reasoning trace (`output/thinking_trace.md`) in every stage folder.
 
@@ -30,7 +30,7 @@ Because every run lives in plain Markdown and JSON files on disk (`workspace/run
 
 ### 4. Extensible N-Stage Pipeline Roadmap
 `01_research` → `02_script` is the blueprint for a **plug-and-play N-stage pipeline**:
-* **Fan-out / Downstream Stages (`03_...`, `04_...`):** From a single verified `01_research` artifact, you can branch into multiple specialized outputs (e.g., executive strategy decks, competitor matrices, SEO/content briefs, audio/TTS generation via Gemini TTS, or visual storyboards) simply by adding a numbered stage folder and a `.prompt` file.
+* **Fan-out / Downstream Stages (`03_...`, `04_...`):** From a single verified `01_research` artifact, you can branch into multiple specialized outputs (e.g., executive strategy decks, competitor matrices, SEO/content briefs, audio/TTS generation via Gemini TTS, or visual storyboards) simply by adding a numbered stage folder and a `prompts/03_<name>.md` stage contract.
 * **1M-Token Deep Context Ingestion:** Drop large local reference corpora (PDFs, competitor dumps, financial reports, or prior run outputs) into a stage's `_config/` or `input/` folder so Argon can synthesize live Google Search grounding *with* hundreds of thousands of tokens of proprietary context.
 
 ---
@@ -80,15 +80,15 @@ All legacy models (`gemini-2.5-*`, `gemini-3.5-*`, etc.) and deprecated sampling
 
 | Pipeline Stage / Runner | Thinking Level | `maxOutputTokens` | Context Window | Rationale |
 | :--- | :--- | :--- | :--- | :--- |
-| **Stage 1: In-Depth Research** (`prompts/01_research.prompt`) | **`HIGH`** (fallback: `MEDIUM`) | `65536` *(max streaming)* | `1,048,576` | Maximizes reasoning depth for multi-source synthesis and Google Search grounding with verbatim citations. |
-| **Stage 2: Scriptwriting** (`prompts/02_script.prompt`) | **`MEDIUM`** (default) | `32768` | `1,048,576` | Balanced reasoning effort, latency, and token usage for structured JSON generation adhering to voice/pacing constraints. |
+| **Stage 1: In-Depth Research** (`prompts/01_research.md`) | **`HIGH`** (fallback: `MEDIUM`) | `65536` *(max streaming)* | `1,048,576` | Maximizes reasoning depth for multi-source synthesis and Google Search grounding with verbatim citations. |
+| **Stage 2: Scriptwriting** (`prompts/02_script.md`) | **`MEDIUM`** (default) | `32768` | `1,048,576` | Balanced reasoning effort, latency, and token usage for structured JSON generation adhering to voice/pacing constraints. |
 | **Interactive Approval Gate** (`handleInteractiveDeployment`, `approveAndResume`, `rejectAndResume`) | **`LOW`** | `32768` | `1,048,576` | Minimizes latency and token usage for fast tool routing and human-in-the-loop approval turns. |
 
 ### Token Limits & 1M Context Window Reference (`gemini-4-argon`)
 * **Unified 1M Context Window (`1,048,576` tokens):** Shared across **Input + Thinking + Output**. Any stage can ingest up to ~1M tokens of source documents, transcripts, or prior-stage artifacts without code changes.
 * **Standard / Streaming Output Ceiling (`65,536` tokens):** When using standard synchronous or SSE streaming requests (`background: false` on `/v1beta/interactions`), `max_output_tokens` caps combined thinking + output at **`65,536` tokens (64K)** per turn (setting `> 65536` without background mode returns HTTP `400`).
   * *Stage 1* is configured at the full **`65,536`** limit (a typical `HIGH`-thinking grounded research run uses ~`1K` input + ~`9K` thinking + ~`24K` output = ~`34K` total tokens).
-  * *Stage 2* and the interactive deployment tools are currently set to **`32,768`** tokens and can be raised to `65,536` in `prompts/02_script.prompt` and `src/index.ts` whenever needed.
+  * *Stage 2* and the interactive deployment tools are currently set to **`32,768`** tokens and can be raised to `65,536` in `prompts/02_script.md` and `src/index.ts` whenever needed.
 * **Future Option — Long Decode (`> 65,536` up to `1,048,576` output tokens):** If a single turn ever needs to generate more than 64K output tokens in one response, Gemini 4 Argon supports **Long Decode** on the Interactions API by enabling `background: true` and setting `max_output_tokens` between `262,144` and `1,048,576 - inputTokens`.
 
 ---
@@ -98,7 +98,7 @@ All legacy models (`gemini-2.5-*`, `gemini-3.5-*`, etc.) and deprecated sampling
 1. **Full 5-Layer ICM Context Injection & Self-Documenting Stage Folders**
    * **Layer 0 (`workspace/GEMINI.md`):** Global identity, epistemic rigor, automatic language alignment, and Markdown citation rules.
    * **Layer 1 (`workspace/CONTEXT.md`):** Workspace pipeline routing and stage boundary awareness.
-   * **Layer 2 (`prompts/01_research.prompt` & `prompts/02_script.prompt`):** Stage contracts parsed directly by `loadStagePromptContract()` in `src/index.ts`.
+   * **Layer 2 (`prompts/01_research.md` & `prompts/02_script.md`):** Markdown stage contracts (YAML frontmatter + template) parsed directly by `loadStagePromptContract()` in `src/index.ts`.
    * **Layer 3 (`workspace/_config/voice_guide.md`):** Global voice and pacing rules.
    * **Layer 4 (`workspace/runs/<runId>/stages/...`):** Every stage persists its exact assembled input prompt (`input/prompt_assembled.md`), its full reasoning & search trace (`output/thinking_trace.md`), and its final output artifact (`output/research_summary.md`, `output/script_draft.json`), plus token/latency telemetry in `workspace/runs/<runId>/meta.json`.
 2. **Direct Interactions API SSE Streaming & Automatic Fallback (`streamGemini4ArgonInteraction`)**
@@ -142,9 +142,9 @@ The workspace layout maps abstract context layers directly to disk directories:
 │   ├── index.html               # Dashboard layout & SSR state mount
 │   ├── style.css                # Design system & responsive workspace styling
 │   └── app.js                   # Client controller & DOM-reconciled live preview
-├── prompts/                     # Layer 2: Stage Contracts (.prompt templates)
-│   ├── 01_research.prompt       # Stage 1 contract (gemini-4-argon, thinkingLevel: HIGH)
-│   └── 02_script.prompt         # Stage 2 contract (gemini-4-argon, thinkingLevel: MEDIUM)
+├── prompts/                     # Layer 2: Stage Contracts (Markdown + YAML frontmatter)
+│   ├── 01_research.md           # Stage 1 contract (gemini-4-argon, thinkingLevel: HIGH)
+│   └── 02_script.md             # Stage 2 contract (gemini-4-argon, thinkingLevel: MEDIUM)
 └── workspace/                   # Scoped Workspace Sandbox
     ├── GEMINI.md                # Layer 0: Global Identity Guide
     ├── CONTEXT.md               # Layer 1: Workspace Route Context
@@ -204,7 +204,7 @@ Once started:
 Because the ICM state lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/`) and `src/index.ts` uses pure cross-platform Node.js with zero browser or OS-specific dependencies, you can run the entire pipeline headlessly from any Linux terminal, SSH session, Docker container, or cron job.
 
 ### Direct CLI Runner (`npm run cli:stage1`, `npm run cli:stage2`, `npm run cli`)
-1. **Run Stage 1 only (recommended when testing/tuning `01_research.prompt` before Stage 2):**
+1. **Run Stage 1 only (recommended when testing/tuning `01_research.md` before Stage 2):**
    ```bash
    npm run cli:stage1 -- "Cloud Native Architecture in 2026"
    ```

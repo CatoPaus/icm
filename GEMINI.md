@@ -16,7 +16,7 @@ Instead, always operate in this tight, single-step feedback loop:
    - Use the `ask_question` tool (interactive multiple-choice UI modal) or ask **one** focused question at a time to clarify the user's goal for the current layer or stage.
 2. **Modify Only the Current Layer or Stage:**
    - **Step A — Identity & Routing (`workspace/GEMINI.md` & `workspace/CONTEXT.md`):** Align Layer 0 (Global Identity) and Layer 1 (Workspace Route Context) with the project's domain first.
-   - **Step B — Stage 1 Contract (`prompts/01_research.prompt`):** Rewrite Stage 1's prompt and stop. Do **not** touch Stage 2 yet.
+   - **Step B — Stage 1 Contract (`prompts/01_research.md`):** Rewrite Stage 1's prompt and stop. Do **not** touch Stage 2 yet.
 3. **Test Stage 1 Standalone (`npm run cli:stage1`) & Audit Pure ICM Filesystem Traces:**
    - **CRITICAL:** When testing Stage 1 before Stage 2 is customized, run **Stage 1 standalone** via `npm run cli:stage1 -- "<topic>"`. Do **not** run `npm run cli` during Stage 1 testing, because `npm run cli` also runs Stage 2 on the old uncustomized prompt and wastes tokens.
    - After the Stage 1 test finishes, inspect the self-contained run directory on disk (`workspace/runs/<runId>/`):
@@ -25,9 +25,9 @@ Instead, always operate in this tight, single-step feedback loop:
      - **Thinking & Search Trace (`workspace/runs/<runId>/stages/01_research/output/thinking_trace.md`):** Every reasoning step and Google Search query executed by Gemini 4 Argon.
      - **Stage 1 Artifact (`workspace/runs/<runId>/stages/01_research/output/research_summary.md`):** Verify the actual Markdown output and resolved grounding citations on disk.
 4. **Apply the ICM Edit-Source Principle ("Configure the Factory, Not the Product"):**
-   - If the user wants a change to Stage 1's output, ask whether it is a **one-off edit** for this run (edit `research_summary.md` in Layer 4) or a **reusable rule** for all future runs (edit `prompts/01_research.prompt` in Layer 2 or `workspace/_config/` in Layer 3).
+   - If the user wants a change to Stage 1's output, ask whether it is a **one-off edit** for this run (edit `research_summary.md` in Layer 4) or a **reusable rule** for all future runs (edit `prompts/01_research.md` in Layer 2 or `workspace/_config/` in Layer 3).
 5. **Advance to Stage 2 Only After Stage 1 Verification:**
-   - Once the user locks in Stage 1's real output artifact, ask the next question to tailor Layer 3 (`workspace/_config/voice_guide.md`) and Stage 2 (`prompts/02_script.prompt`), then test Stage 2 standalone (`npm run cli:stage2 -- <runId>` or `Regenerate Script` in the Web Dashboard) at zero Stage 1 cost.
+   - Once the user locks in Stage 1's real output artifact, ask the next question to tailor Layer 3 (`workspace/_config/voice_guide.md`) and Stage 2 (`prompts/02_script.md`), then test Stage 2 standalone (`npm run cli:stage2 -- <runId>` or `Regenerate Script` in the Web Dashboard) at zero Stage 1 cost.
 
 Activate the **`icm-co-architect`** skill (`.agents/skills/icm-co-architect/SKILL.md`) whenever the user wants to specialize this repository for a new project, rewrite prompts, or add new stages/layers.
 
@@ -48,9 +48,9 @@ Activate the **`icm-co-architect`** skill (`.agents/skills/icm-co-architect/SKIL
 
 1. **Exclusive Model (`gemini-4-argon`):**
    - Never use or reintroduce legacy models (`gemini-2.5-*`, `gemini-3.5-*`, `gemini-1.5-*`, `gemini-pro`, etc.).
-   - Always use `gemini-4-argon` in `.prompt` frontmatter and `GEMINI_4_ARGON_MODEL` (`gemini-4-argon`) in `src/index.ts`.
+   - Always use `gemini-4-argon` in `prompts/*.md` frontmatter and `GEMINI_4_ARGON_MODEL` (`gemini-4-argon`) in `src/index.ts`.
 2. **Thinking Levels (`LOW` | `MEDIUM` | `HIGH`) — No Legacy Sampling Params:**
-   - Never add `temperature`, `topP`, or `topK` to any `.prompt` file or API request config.
+   - Never add `temperature`, `topP`, or `topK` to any `prompts/*.md` file or API request config.
    - Control reasoning depth strictly via `thinkingConfig.thinkingLevel`:
      - **`HIGH`**: Deep multi-source research & Google Search grounding (Stage 1 default, `maxOutputTokens: 65536`).
      - **`MEDIUM`**: Structured synthesis & scriptwriting from verified upstream artifacts (Stage 2+ default, `maxOutputTokens: 32768`).
