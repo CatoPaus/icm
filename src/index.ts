@@ -42,17 +42,15 @@ export interface StagePromptContract {
 
 /**
  * Parses a stage contract Markdown file from `./prompts/<name>.md` (YAML frontmatter + Handlebars template)
- * without requiring any external framework dependencies. Supports `.prompt` fallback for backwards compatibility.
+ * without requiring any external framework dependencies.
  */
 export function loadStagePromptContract(
   promptName: string,
   promptDir: string = './prompts'
 ): StagePromptContract {
-  const mdPath = path.resolve(promptDir, `${promptName}.md`);
-  const legacyPromptPath = path.resolve(promptDir, `${promptName}.prompt`);
-  const filePath = fs.existsSync(mdPath) ? mdPath : legacyPromptPath;
+  const filePath = path.resolve(promptDir, `${promptName}.md`);
   if (!fs.existsSync(filePath)) {
-    throw new Error(`Stage contract not found at: ${mdPath}`);
+    throw new Error(`Stage contract not found at: ${filePath}`);
   }
 
   const raw = fs.readFileSync(filePath, 'utf-8');
@@ -587,7 +585,7 @@ async function resolveRedirect(url: string): Promise<string> {
  * Parses markdown text and Interactions API grounding steps, resolves Vertex redirect URLs,
  * weaves inline `url_citation` annotations at their UTF-8 byte offsets, and formats reference links.
  */
-export async function cleanGroundingLinks(text: string, stepsOrParts?: any[]): Promise<string> {
+export async function cleanGroundingLinks(text: string, steps?: any[]): Promise<string> {
   const redirectRegex =
     /https:\/\/vertexaisearch\.cloud\.google\.com\/grounding-api-redirect\/[a-zA-Z0-9_\-\+=]+/g;
   const textMatches = text.match(redirectRegex) || [];
@@ -600,37 +598,30 @@ export async function cleanGroundingLinks(text: string, stepsOrParts?: any[]): P
     url: string;
   }> = [];
 
-  if (Array.isArray(stepsOrParts)) {
-    for (const item of stepsOrParts) {
-      // Native Interactions API step (`google_search_result`) or legacy part
-      const searchResults =
-        item?.type === 'google_search_result'
-          ? item.result
-          : item?.custom?.googleSearchResult?.result;
-      if (Array.isArray(searchResults)) {
-        for (const resItem of searchResults) {
+  if (Array.isArray(steps)) {
+    for (const step of steps) {
+      if (step?.type === 'google_search_result' && Array.isArray(step.result)) {
+        for (const resItem of step.result) {
           if (resItem?.url && typeof resItem.url === 'string') {
             groundedSources.push({ title: resItem.title, url: resItem.url });
           }
         }
       }
 
-      // Native Interactions API step (`model_output`) or legacy part annotations
-      const contentList =
-        item?.type === 'model_output' && Array.isArray(item.content) ? item.content : [item];
-      for (const contentPart of contentList) {
-        const annotations = contentPart?.annotations || contentPart?.metadata?.annotations;
-        if (Array.isArray(annotations)) {
-          for (const ann of annotations) {
-            if (ann?.url && typeof ann.url === 'string') {
-              groundedSources.push({ title: ann.title, url: ann.url });
-              if (typeof ann.end_index === 'number' && ann.end_index > 0) {
-                inlineAnnotations.push({
-                  start_index: ann.start_index,
-                  end_index: ann.end_index,
-                  title: ann.title,
-                  url: ann.url,
-                });
+      if (step?.type === 'model_output' && Array.isArray(step.content)) {
+        for (const contentPart of step.content) {
+          if (Array.isArray(contentPart?.annotations)) {
+            for (const ann of contentPart.annotations) {
+              if (ann?.url && typeof ann.url === 'string') {
+                groundedSources.push({ title: ann.title, url: ann.url });
+                if (typeof ann.end_index === 'number' && ann.end_index > 0) {
+                  inlineAnnotations.push({
+                    start_index: ann.start_index,
+                    end_index: ann.end_index,
+                    title: ann.title,
+                    url: ann.url,
+                  });
+                }
               }
             }
           }

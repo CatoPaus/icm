@@ -87,7 +87,6 @@ if (mode === 'pre-tool-use') {
   const normalizedPath = targetPath.replace(/\\/g, '/');
   const isPromptOrSource =
     normalizedPath.includes('/prompts/') ||
-    normalizedPath.endsWith('.prompt') ||
     normalizedPath.includes('/src/');
 
   if (isPromptOrSource && contentToWrite) {
@@ -102,8 +101,7 @@ if (mode === 'pre-tool-use') {
       process.exit(0);
     }
 
-    const isPromptFile =
-      normalizedPath.includes('/prompts/') || normalizedPath.endsWith('.prompt');
+    const isPromptFile = normalizedPath.includes('/prompts/');
     const forbiddenSamplingMatch = contentToWrite.match(/\b(temperature|topP|topK)\s*:/);
     if (isPromptFile && forbiddenSamplingMatch) {
       process.stdout.write(

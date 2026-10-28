@@ -8,10 +8,10 @@ node_modules/
 *.key
 *.pem
 
-# Genkit telemetry, snapshots, and local sessions
+# Local runtime logs, snapshots, and sessions
 .sessions/
 .snapshots/
-.genkit/
+.icm/
 
 # User-generated workspace runs and stage outputs (private research & scripts)
 workspace/runs/

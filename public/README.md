@@ -27,9 +27,9 @@ Clicking **Open Folder** in the Web Dashboard opens the active run directory (`w
 * **Windows 11 (`process.platform === 'win32'`):**
   * Uses `Win11ExplorerHelper` (`CreateProcessW` pinned to the interactive `WinSta0\Default` desktop) to reuse an existing File Explorer tab or launch a fresh window, and sends a `WM_SIZE` nudge so Windows 11's `DesktopChildSiteBridge` XAML islands paint immediately without blank tabs.
 
-### 4. Live Terminal Mirror (`.genkit/terminal.log`)
-* When `src/server.ts` starts (`npm run server` or `npm run dev:all`), it automatically tees all `stdout` and `stderr` output (stripped of ANSI escape codes) to `.genkit/terminal.log`.
-* Both human developers and the Antigravity 2.0 ICM Co-Architect agent can inspect `.genkit/terminal.log` to diagnose runtime or API errors without copying and pasting terminal output.
+### 4. Live Terminal Mirror (`.icm/terminal.log`)
+* When `src/server.ts` starts (`npm run server` or `npm run dev`), it automatically tees all `stdout` and `stderr` output (stripped of ANSI escape codes) to `.icm/terminal.log`.
+* Both human developers and the Antigravity 2.0 ICM Co-Architect agent can inspect `.icm/terminal.log` to diagnose runtime or API errors without copying and pasting terminal output.
 
 ---
 

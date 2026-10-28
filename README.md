@@ -37,7 +37,7 @@ Because every run lives in plain Markdown and JSON files on disk (`workspace/run
 
 ## Using as an Upstream Base / Template Repository
 
-This repository is designed to serve as an **untouched upstream base template** for specialized downstream projects (e.g., `icm-podcast-studio`, `icm-market-strategy`, `icm-legal-review`). Runtime outputs (`workspace/runs/`, `.genkit/`, `.sessions/`) are excluded via `.gitignore` so the base repository remains clean.
+This repository is designed to serve as an **untouched upstream base template** for specialized downstream projects (e.g., `icm-podcast-studio`, `icm-market-strategy`, `icm-legal-review`). Runtime outputs (`workspace/runs/`, `.icm/`, `.sessions/`) are excluded via `.gitignore` so the base repository remains clean.
 
 Because the **Pure ICM Engine** (`src/index.ts`, `prompts/`, `workspace/`) has **zero external framework dependencies** and is completely decoupled from the **Presentation / Server Layer** (`src/server.ts`, `public/`), downstream projects can freely customize stages, prompts, or swap the Express SPA for a full framework like **Next.js** while keeping the core Gemini 4 Argon engine intact.
 
@@ -113,7 +113,7 @@ All legacy models (`gemini-2.5-*`, `gemini-3.5-*`, etc.) and deprecated sampling
    * **Lifecycle Hooks (`.agents/hooks.json` & `.agents/scripts/icm-hooks.mjs`):** Automatically injects the latest run status at `SessionStart` and enforces a `PreToolUse` guardrail blocking legacy models or deprecated sampling parameters (`temperature`, `topP`, `topK`).
    * **Interactive Playbook Skill (`.agents/skills/icm-co-architect/SKILL.md`):** Step-by-step runbook for specializing Layer 0/1, testing Stage 1 standalone (`npm run cli:stage1`) before designing Stage 2, and expanding the pipeline.
 5. **Decoupled Reference Demo Web Dashboard ([`public/README.md`](./public/README.md))**
-   * Includes an optional Express + Vanilla JS reference dashboard (`src/server.ts` & `public/`) with SSR state hydration, live DOM reconciliation, `.genkit/terminal.log` mirroring, and cross-platform Desktop File Manager integration (Ubuntu/Linux Desktop, WSL, macOS Finder, and Windows 11 Explorer).
+   * Includes an optional Express + Vanilla JS reference dashboard (`src/server.ts` & `public/`) with SSR state hydration, live DOM reconciliation, `.icm/terminal.log` mirroring, and cross-platform Desktop File Manager integration (Ubuntu/Linux Desktop, WSL, macOS Finder, and Windows 11 Explorer).
    * Full documentation for the demo web app lives in [`public/README.md`](./public/README.md).
 
 ---

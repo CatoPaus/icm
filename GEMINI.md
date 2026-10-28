@@ -37,7 +37,7 @@ Activate the **`icm-co-architect`** skill (`.agents/skills/icm-co-architect/SKIL
 
 - **Exact File Locations (Do Not Guess Paths):**
   - `src/index.ts`: Pure ICM engine (`runStage1Flow`, `runStage2Flow`, `icmOrchestratorFlow`), `streamGemini4ArgonInteraction()`, `loadStagePromptContract()`, `loadWorkspaceLayers()`, `cleanGroundingLinks()`, and the headless CLI entrypoint (`--cli`, `--stage1`, `--stage2`). *(There is no `src/cli.ts`.)*
-  - `src/server.ts`: Express server (`http://localhost:3000`), SSR `window.__INITIAL_STATE__` hydration, cross-platform desktop file manager launcher (Windows 11, Ubuntu/Linux Desktop, WSL, macOS), and `.genkit/terminal.log` mirror.
+  - `src/server.ts`: Express server (`http://localhost:3000`), SSR `window.__INITIAL_STATE__` hydration, cross-platform desktop file manager launcher (Windows 11, Ubuntu/Linux Desktop, WSL, macOS), and `.icm/terminal.log` mirror.
   - `public/index.html`, `public/app.js`, `public/style.css`, `public/README.md`: Reference Demo Web Dashboard SPA.
 - **Targeted Edits Over Full-File Overwrites:**
   - When modifying large files (`src/index.ts`, `src/server.ts`, `public/app.js`, `public/index.html`), use `edit_file` sequentially rather than firing parallel overlapping `edit_file` calls on the same file or rewriting the entire file with `write_file`.

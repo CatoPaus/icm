@@ -17,9 +17,9 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Mirror terminal stdout/stderr to .genkit/terminal.log (gitignored) so the agent can always inspect
+// Mirror terminal stdout/stderr to .icm/terminal.log (gitignored) so the agent can always inspect
 // live terminal output whenever asked without requiring an @terminal mention pill.
-const terminalLogPath = path.resolve('.genkit/terminal.log');
+const terminalLogPath = path.resolve('.icm/terminal.log');
 try {
   fs.mkdirSync(path.dirname(terminalLogPath), { recursive: true });
   fs.writeFileSync(
