@@ -43,16 +43,20 @@ Because the **ICM Engine** (`src/index.ts`, `prompts/`, `workspace/`) is complet
 
 ### Starting a New Specialized Project
 ```bash
-# 1. Clone this base repository into a new project directory
+# 1. Clone this base template repository into a new project directory
 git clone https://github.com/CatoPaus/icm.git icm-podcast-studio
 cd icm-podcast-studio
 
-# 2. Keep this base repository registered as 'upstream'
+# 2. Rename 'origin' to 'upstream' (so 'upstream' always points to the untouched base template)
 git remote rename origin upstream
 
-# 3. Point 'origin' to your new specialized project's repository
-git remote add origin <new-specialized-repo-url>
+# 3. Point 'origin' to your new specialized GitHub repository and push
+git remote add origin https://github.com/CatoPaus/icm-podcast-studio.git
 git push -u origin main
+
+# 4. Install dependencies and add your Gemini API key
+npm install
+echo 'GEMINI_API_KEY="your-gemini-api-key"' > .env.local
 ```
 
 ### Pulling Future Engine Upgrades into Specialized Projects
