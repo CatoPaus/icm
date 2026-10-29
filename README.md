@@ -117,6 +117,7 @@ The workspace layout maps abstract context layers directly to disk directories:
 .
 ├── .gitattributes               # Enforces clean LF line endings across Windows, macOS, and Linux
 ├── GEMINI.md                    # Antigravity 2.0 Main Agent Rules (ICM Co-Architect)
+├── SPEC.md                      # Open Knowledge Format (OKF v0.2) Upstream Specification
 ├── .agents/                     # Antigravity 2.0 Workspace Customizations
 │   ├── hooks.json               # SessionStart context injector & PreToolUse Argon guardrail
 │   ├── scripts/
@@ -127,18 +128,23 @@ The workspace layout maps abstract context layers directly to disk directories:
 ├── package.json                 # Zero runtime dependencies (only tsx, typescript, @types/node)
 ├── tsconfig.json
 ├── src/
-│   └── index.ts                 # 100% Pure ICM Engine, Gemini 4 Argon SSE Client & CLI
+│   └── index.ts                 # 100% Pure ICM + OKF v0.2 Engine, Gemini 4 Argon SSE Client & CLI
 ├── prompts/                     # Layer 2: Stage Contracts (Markdown + YAML frontmatter)
 │   ├── 01_research.md           # Stage 1 contract (gemini-4-argon, thinkingLevel: HIGH)
 │   └── 02_script.md             # Stage 2 contract (gemini-4-argon, thinkingLevel: MEDIUM)
 └── workspace/                   # Scoped Workspace Sandbox
-    ├── GEMINI.md                # Layer 0: Global Identity Guide
+    ├── GEMINI.md                # Layer 0: Global Identity Guide (OKF v0.2 Provenance)
     ├── CONTEXT.md               # Layer 1: Workspace Route Context
     ├── _config/                 # Layer 3: Global Reference Materials
     │   └── voice_guide.md       # Global brand voice tone
+    ├── bundle/                  # Layer 3: Persistent OKF v0.2 Knowledge Bundle (Git-Tracked)
+    │   ├── index.md             # Progressive disclosure directory listing (okf_version: "0.2")
+    │   ├── log.md               # Chronological audit log (## YYYY-MM-DD)
+    │   ├── viz.html             # Optional interactive Cytoscape.js + Marked graph explorer (--viz)
+    │   └── research/            # Promoted OKF v0.2 concept documents (<concept>.md)
     └── runs/                    # Per-run isolated stage execution directories
         └── <runId>/
-            ├── meta.json        # Run status + Stage 1 & 2 token/latency/search telemetry
+            ├── meta.json        # Run status + Stage 1 & 2 token/latency/search & OKF trust telemetry
             └── stages/
                 ├── 01_research/
                 │   ├── input/prompt_assembled.md
@@ -173,9 +179,9 @@ GEMINI_API_KEY="your-gemini-api-key"
 
 ---
 
-## Running the ICM Pipeline (`npm run cli:stage1`, `npm run cli:stage2`, `npm run cli`, `--dry-run`)
+## Running the ICM + OKF v0.2 Pipeline (`cli:stage1`, `cli:verify`, `cli:stage2`, `cli:viz`, `cli`, `--dry-run`)
 
-Because the ICM state lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/`) and `src/index.ts` uses pure cross-platform Node.js with zero external dependencies, you can run every stage standalone from any Windows, macOS, or Linux terminal, SSH session, Docker container, or cron job:
+Because the ICM state lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/` and `workspace/bundle/`) and `src/index.ts` uses pure cross-platform Node.js with zero external dependencies, you can run every stage standalone from any Windows, macOS, or Linux terminal, SSH session, Docker container, or cron job:
 
 1. **Preview the assembled 5-layer prompt and Interactions API request at zero token cost (`--dry-run`):**
    ```bash
@@ -186,21 +192,28 @@ Because the ICM state lives in plain Markdown and JSON files on disk (`workspace
    ```bash
    npm run cli:stage1 -- "Cloud Native Architecture in 2026"
    ```
-   *(Stops at the Human-in-the-Loop Intermission gate after writing `input/prompt_assembled.md`, `output/thinking_trace.md`, `output/research_summary.md`, and logging token telemetry to `meta.json`.)*
-3. **Inspect or edit the Stage 1 research artifact in your editor:**
+   *(Stops at the Human-in-the-Loop Intermission gate after writing `input/prompt_assembled.md`, `output/thinking_trace.md`, `output/research_summary.md` with OKF v0.2 frontmatter + `[^id]` footnotes, syncing to `workspace/bundle/`, and logging token + OKF telemetry to `meta.json`.)*
+3. **Inspect, edit, and verify the Stage 1 OKF concept artifact at Intermission (`cli:verify`):**
    ```bash
    nano workspace/runs/<runId>/stages/01_research/output/research_summary.md
+   npm run cli:verify -- <runId> --by human:reviewer
    ```
-4. **Run or re-run Stage 2 standalone after reviewing/editing Stage 1 (supports `--dry-run` as well):**
+   *(Stamps `verified: [{ by: "human:reviewer", at: "..." }]` and `status: stable`, upgrading `trust_tier` from `unverified` to `human-reviewed` in both `research_summary.md` and `workspace/bundle/`.)*
+4. **Run or re-run Stage 2 standalone after reviewing/verifying Stage 1 (supports `--dry-run` and `--verify`):**
    ```bash
    npm run cli:stage2 -- --dry-run <runId>
    npm run cli:stage2 -- <runId>
    ```
-5. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
+5. **Generate the zero-dependency interactive OKF Knowledge Graph Explorer (`cli:viz`):**
+   ```bash
+   npm run cli:viz
+   ```
+   *(Walks `workspace/bundle/` and writes a self-contained single-file `workspace/bundle/viz.html` with Cytoscape.js force-directed graph, trust-tier & staleness badges, and bidirectional backlinks.)*
+6. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
    ```bash
    npm run cli -- "Cloud Native Architecture in 2026"
    ```
-6. **Read the final Stage 2 output:**
+7. **Read the final Stage 2 output:**
    ```bash
    cat workspace/runs/<runId>/stages/02_script/output/script_draft.json
    ```

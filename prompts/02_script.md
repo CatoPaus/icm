@@ -35,10 +35,12 @@ STYLE CONSTRAINTS:
 Adhere to these tone requirements:
 {{toneRules}}
 
-Additionally, follow this structural constraint:
+Additionally, follow these structural and spoken-delivery constraints:
 - Write the script using short, readable sentences. Aim for approximately 80–120 characters (about 15–25 words) per sentence. This ensures natural breathing pauses and optimal pacing for voiceover delivery.
+- The source research is an Open Knowledge Format (`OKF v0.2`) concept document containing YAML frontmatter (`sources`, `generated`, `verified`, `stale_after`) and `[^id]` footnote markers.
+- NEVER include raw URLs (`https://...`), Markdown links (`[title](url)`), or OKF footnote tags (`[^id]`) in `title` or `scriptBody`. If you reference an authority or source, name the organization or study naturally in spoken words (e.g., "According to the latest Cloud Native Computing Foundation survey...").
 
-SOURCE RESEARCH:
+SOURCE RESEARCH (OKF v0.2 Concept Document):
 {{researchFile}}
 
 CRITICAL REQUIREMENT:

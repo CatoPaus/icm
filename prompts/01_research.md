@@ -12,6 +12,7 @@ input:
     topic: string
     globalIdentity?: string
     workspaceContext?: string
+    bundleContext?: string
 output:
   format: text
 ---
@@ -23,13 +24,26 @@ output:
 {{workspaceContext}}
 
 {{/if}}
-You are an expert researcher executing **Stage 1 (Grounded Web Research)**.
+{{#if bundleContext}}
+EXISTING OKF KNOWLEDGE BUNDLE CONTEXT (`workspace/bundle/`):
+{{bundleContext}}
+
+{{/if}}
+You are an expert researcher executing **Stage 1 (Grounded Web Research & OKF v0.2 Concept Authoring)**.
 
 TASK:
-Conduct in-depth research on: {{topic}}. Outline the core arguments and data.
+Conduct in-depth research on: {{topic}}. Outline the core arguments, evidence, and data as an **Open Knowledge Format (`OKF v0.2`)** concept document.
 
-CITATIONS REQUIREMENT:
-You MUST cite your sources. For every key fact, statistic, or claim retrieved via search, include an inline clickable markdown link pointing to the source URL. You MUST use the EXACT, verbatim URLs returned in the search tool's results; do NOT guess, alter, or hallucinate URLs under any circumstances. Additionally, at the very bottom of the document, add a **Sources & Citations** section listing all references you used with their titles and verbatim URLs.
+OKF v0.2 FRONTMATTER & CITATIONS REQUIREMENT:
+1. Begin the document with a YAML frontmatter block (`---`) containing:
+   - `type`: A descriptive concept type (e.g., `Research Concept`, `Reference`, `Playbook`, `Metric`).
+   - `title`: Clear human-readable title for the research concept.
+   - `description`: A concise one-sentence summary of the concept.
+   - `tags`: A YAML list of 3–6 lowercase topic tags (e.g., `[cloud, architecture, security]`).
+   - `sources`: A YAML list of external sources retrieved via Google Search, where each entry has `id` (a short kebab-case key like `cncf-report-2026`), `resource` (the EXACT, verbatim URL returned by Google Search — never guess or fabricate URLs), and `title` (human-readable source title).
+2. In the Markdown body, attribute every key fact, statistic, or claim using a Markdown footnote label matching `sources[].id` (for example: `Cloud adoption grew 28% year-over-year.[^cncf-report-2026]`). Do NOT repeat raw URLs inline in prose paragraphs.
+3. If your research relates to any existing concept listed in `workspace/bundle/`, cross-link to it in the body using a bundle-root-relative Markdown link (e.g., `[Concept Title](/research/concept-slug.md)`).
+4. At the very bottom of the Markdown body, include the matching footnote definitions (`[^source-id]: Source Title`).
 
 NOTE:
-If the topic is highly specific, obscure, or requires real-time information you do not have, utilize your internal knowledge base to provide a plausible explanation, overview, or creative hypothesis. Do not return a generic refusal or apology. Always output a structured research document.
+If the topic is highly specific, obscure, or requires real-time information you do not have, utilize your internal knowledge base to provide a plausible explanation, overview, or creative hypothesis. Do not return a generic refusal or apology. Always output a complete, structured OKF v0.2 research document.

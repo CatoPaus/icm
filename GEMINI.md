@@ -25,14 +25,15 @@ Instead, always operate in this tight, single-step feedback loop:
      - **Run Metadata & Token Telemetry (`workspace/runs/<runId>/meta.json`):** Contains `stage1Telemetry` (`thinkingLevel`, `thoughtSteps`, `searchQueries`, `inputTokens`, `thoughtsTokens`, `outputTokens`, `totalTokens`, `durationMs`), also logged to stdout as `[Stage 1 Telemetry]`.
      - **Assembled Input Context (`workspace/runs/<runId>/stages/01_research/input/prompt_assembled.md`):** The exact rendered Layer 0 + Layer 1 + Layer 2 prompt sent to Gemini 4 Argon.
      - **Thinking & Search Trace (`workspace/runs/<runId>/stages/01_research/output/thinking_trace.md`):** Every reasoning step and Google Search query executed by Gemini 4 Argon.
-     - **Stage 1 Artifact (`workspace/runs/<runId>/stages/01_research/output/research_summary.md`):** Verify the actual Markdown output and resolved grounding citations on disk.
-4. **Apply the ICM Edit-Source Principle ("Configure the Factory, Not the Product"):**
+     - **Stage 1 OKF v0.2 Artifact (`workspace/runs/<runId>/stages/01_research/output/research_summary.md` & `workspace/bundle/`):** Verify the OKF v0.2 YAML frontmatter (`type`, `title`, `description`, `tags`, `status: draft`, `generated`, `stale_after`, `sources`) and `[^id]` footnotes in the body, plus automatic promotion to `workspace/bundle/research/` (`index.md`, `log.md`).
+4. **Apply the ICM Edit-Source Principle & Intermission Verification (`npm run cli:verify -- <runId>`):**
    - If the user wants a change to Stage 1's output, ask whether it is a **one-off edit** for this run (edit `research_summary.md` in Layer 4) or a **reusable rule** for all future runs (edit `prompts/01_research.md` in Layer 2 or `workspace/_config/` in Layer 3).
+   - At Intermission, stamp human sign-off via `npm run cli:verify -- <runId> [--by human:<id>]` (transitioning `status: stable` and `trust_tier: human-reviewed`).
 5. **Advance to Stage 2 (and Stages 3/4) One Stage at a Time:**
-   - Once the user locks in Stage 1's real output artifact, ask the next question to tailor Layer 3 (`workspace/_config/voice_guide.md`) and Stage 2 (`prompts/02_script.md`), then test Stage 2 standalone (`npm run cli:stage2 -- --dry-run <runId>`, then `npm run cli:stage2 -- <runId>`) at zero Stage 1 cost.
+   - Once the user locks in Stage 1's real output artifact, ask the next question to tailor Layer 3 (`workspace/_config/voice_guide.md`) and Stage 2 (`prompts/02_script.md`), then test Stage 2 standalone (`npm run cli:stage2 -- --dry-run <runId>`, then `npm run cli:stage2 -- <runId>`) at zero Stage 1 cost. Stage 2 evaluates `trust_tier` and `is_stale` on `research_summary.md`, records them in `meta.json`, and keeps spoken output free of URLs/footnotes.
    - Follow the same standalone pattern for any additional text or multimodal stages (`03_slides`, `03_visuals` via `gemini-nano-banana-2.1`, `04_audio` via `gemini-3.8-flash-tts`).
-6. **Build a Bespoke Domain Web Studio Only After Artifacts Exist on Disk (Phase 5):**
-   - This template intentionally ships with **no pre-baked generic Web UI** so your UI design is never anchored to an outdated layout.
+6. **Build a Bespoke Domain Web Studio or OKF Graph Explorer (`npm run cli:viz`) Only After Artifacts Exist on Disk (Phase 5):**
+   - This template intentionally ships with **no pre-baked generic Web UI** so your UI design is never anchored to an outdated layout, while providing a zero-dependency OKF v0.2 interactive graph viewer generator (`npm run cli:viz` -> `workspace/bundle/viz.html`).
    - Once all pipeline stages and real artifacts in `workspace/runs/<runId>/` are verified, ask if the user wants a **custom Domain Web Studio** designed specifically around their pipeline's real outputs (e.g., an Interactive Course & Slide Carousel Player, a Podcast Waveform Studio, or a Legal Clause Diff Matrix) or prefers to keep the project as a pure headless CLI pipeline.
 
 Activate the **`icm-co-architect`** skill (`.agents/skills/icm-co-architect/SKILL.md`) whenever the user wants to specialize this repository for a new project, rewrite prompts, add new stages/layers, or build a custom domain UI.
@@ -42,9 +43,10 @@ Activate the **`icm-co-architect`** skill (`.agents/skills/icm-co-architect/SKIL
 ## 2. Codebase Map & Editing Discipline
 
 - **Exact File Locations (Do Not Guess Paths):**
-  - `src/index.ts`: Pure zero-dependency ICM engine (`runStage1Flow`, `runStage2Flow`, `icmOrchestratorFlow`), `streamGemini4ArgonInteraction()`, `loadStagePromptContract()`, `parseFrontmatterOutputSchema()`, `loadWorkspaceLayers()`, `cleanGroundingLinks()`, and the headless CLI entrypoint (`--cli`, `--stage1`, `--stage2`, `--dry-run`). *(There is no `src/cli.ts`.)*
+  - `src/index.ts`: Pure zero-dependency ICM + OKF v0.2 engine (`runStage1Flow`, `runStage2Flow`, `icmOrchestratorFlow`), `streamGemini4ArgonInteraction()`, `loadStagePromptContract()`, `parseFrontmatterOutputSchema()`, `parseOkfDocument()`, `serializeOkfDocument()`, `getOkfTrustTier()`, `isOkfStale()`, `cleanGroundingLinks()`, `writeBundleConcept()`, `regenerateBundleIndexes()`, `appendBundleLog()`, `verifyOkfConcept()`, `generateBundleVisualization()`, and the headless CLI entrypoint (`--cli`, `--stage1`, `--stage2`, `--verify`, `--viz`, `--dry-run`). *(There is no `src/cli.ts`.)*
+  - `SPEC.md`: Upstream Open Knowledge Format (`OKF v0.2`) specification (`GoogleCloudPlatform/open-knowledge-format`).
   - `prompts/01_research.md` & `prompts/02_script.md`: Layer 2 stage contracts (YAML frontmatter + Handlebars-style template).
-  - `workspace/GEMINI.md`, `workspace/CONTEXT.md`, `workspace/_config/voice_guide.md`: Layers 0, 1, and 3 context files.
+  - `workspace/GEMINI.md`, `workspace/CONTEXT.md`, `workspace/_config/voice_guide.md`, `workspace/bundle/` (`index.md`, `log.md`): Layers 0, 1, and 3 context & persistent knowledge bundle files.
 - **Targeted Edits Over Full-File Overwrites:**
   - When modifying large files (`src/index.ts`), use `edit_file` sequentially rather than firing parallel overlapping `edit_file` calls on the same file.
 

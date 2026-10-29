@@ -673,11 +673,830 @@ async function resolveRedirect(url: string): Promise<string> {
   }
 }
 
+export type TrustTier = 'unverified' | 'machine-confirmed' | 'human-reviewed';
+
+export interface OKFActorEvent {
+  by: string;
+  at?: string;
+}
+
+export interface OKFSource {
+  id?: string;
+  resource: string;
+  title?: string;
+  author?: string;
+  usage_count?: number;
+  last_modified?: string;
+  usage_window?: { from: string; to: string };
+}
+
+export interface OKFFrontmatter {
+  okf_version?: string;
+  type?: string;
+  resource?: string;
+  title?: string;
+  description?: string;
+  tags?: string[];
+  status?: 'draft' | 'stable' | 'deprecated' | string;
+  runtime?: string;
+  parameters?: Array<{ name: string; type: string; required?: boolean }>;
+  computation?: string;
+  executor?: { resource: string; receipt?: string[] };
+  attester?: { resource: string };
+  generated?: OKFActorEvent;
+  verified?: OKFActorEvent | OKFActorEvent[];
+  stale_after?: string;
+  sources?: OKFSource[];
+  usage_window?: { from: string; to: string };
+  [key: string]: any;
+}
+
+export interface OKFDocument {
+  frontmatter: OKFFrontmatter;
+  body: string;
+}
+
+export const RESERVED_OKF_FILENAMES = new Set(['index.md', 'log.md']);
+
+const PREFERRED_OKF_KEY_ORDER = [
+  'okf_version',
+  'type',
+  'resource',
+  'title',
+  'description',
+  'tags',
+  'status',
+  'runtime',
+  'parameters',
+  'computation',
+  'executor',
+  'attester',
+  'generated',
+  'verified',
+  'stale_after',
+  'sources',
+  'usage_window',
+];
+
+function stripYamlComment(raw: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+    } else if (ch === '"' && !inSingle && raw[i - 1] !== '\\') {
+      inDouble = !inDouble;
+    } else if (ch === '#' && !inSingle && !inDouble) {
+      if (i === 0 || /\s/.test(raw[i - 1])) {
+        return raw.slice(0, i).trimEnd();
+      }
+    }
+  }
+  return raw.trim();
+}
+
+function splitYamlFlowItems(inner: string): string[] {
+  const items: string[] = [];
+  let current = '';
+  let depthBracket = 0;
+  let depthBrace = 0;
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      current += ch;
+    } else if (ch === '"' && !inSingle && inner[i - 1] !== '\\') {
+      inDouble = !inDouble;
+      current += ch;
+    } else if (!inSingle && !inDouble) {
+      if (ch === '[') {
+        depthBracket++;
+        current += ch;
+      } else if (ch === ']') {
+        depthBracket = Math.max(0, depthBracket - 1);
+        current += ch;
+      } else if (ch === '{') {
+        depthBrace++;
+        current += ch;
+      } else if (ch === '}') {
+        depthBrace = Math.max(0, depthBrace - 1);
+        current += ch;
+      } else if (ch === ',' && depthBracket === 0 && depthBrace === 0) {
+        if (current.trim() !== '') items.push(current.trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim() !== '') items.push(current.trim());
+  return items;
+}
+
+function parseYamlScalar(rawInput: string): any {
+  const s = stripYamlComment(rawInput);
+  if (s === '') return '';
+  if (s === 'null' || s === '~') return null;
+  if (s === 'true') return true;
+  if (s === 'false') return false;
+  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) {
+    return s
+      .slice(1, -1)
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\t/g, '\t')
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\');
+  }
+  if (s.startsWith("'") && s.endsWith("'") && s.length >= 2) {
+    return s.slice(1, -1).replace(/''/g, "'");
+  }
+  if (/^-?\d+$/.test(s)) {
+    return parseInt(s, 10);
+  }
+  if (/^-?\d+\.\d+$/.test(s)) {
+    return parseFloat(s);
+  }
+  // Keep ISO 8601 timestamps and strings as literal strings (OKF v0.2 YAML 1.2 convention)
+  return s;
+}
+
+function findUnquotedColon(pair: string): number {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < pair.length; i++) {
+    const ch = pair[i];
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+    } else if (ch === '"' && !inSingle && pair[i - 1] !== '\\') {
+      inDouble = !inDouble;
+    } else if (ch === ':' && !inSingle && !inDouble) {
+      if (i + 1 >= pair.length || /\s/.test(pair[i + 1])) {
+        return i;
+      }
+    }
+  }
+  return pair.indexOf(':');
+}
+
+function parseYamlFlowValue(rawInput: string): any {
+  const s = stripYamlComment(rawInput);
+  if (s.startsWith('[') && s.endsWith(']')) {
+    const inner = s.slice(1, -1).trim();
+    if (!inner) return [];
+    return splitYamlFlowItems(inner).map((item) => parseYamlFlowValue(item));
+  }
+  if (s.startsWith('{') && s.endsWith('}')) {
+    const inner = s.slice(1, -1).trim();
+    const obj: Record<string, any> = {};
+    if (!inner) return obj;
+    for (const pair of splitYamlFlowItems(inner)) {
+      const colonIdx = findUnquotedColon(pair);
+      if (colonIdx === -1) continue;
+      const k = parseYamlScalar(pair.slice(0, colonIdx).trim());
+      const v = parseYamlFlowValue(pair.slice(colonIdx + 1).trim());
+      obj[String(k)] = v;
+    }
+    return obj;
+  }
+  return parseYamlScalar(s);
+}
+
+function matchYamlKeyValue(text: string): { key: string; rest: string } | null {
+  const m = text.match(/^([A-Za-z0-9_.\-]+|"[^"]+"|'[^']+'):(?:\s+(.*)|\s*)$/);
+  if (!m) return null;
+  const rawKey = m[1];
+  const key = String(parseYamlScalar(rawKey));
+  const rest = (m[2] ?? '').trim();
+  return { key, rest };
+}
+
+/**
+ * Zero-dependency OKF v0.2 YAML frontmatter + Markdown body parser.
+ * Supports block mappings, block sequences, flow sequences/mappings, YAML 1.2 block scalars (`|` and `>`),
+ * plain multi-line scalars, and leaves ISO 8601 timestamps as exact strings per SPEC.md §5.
+ */
+export function parseOkfDocument(text: string): OKFDocument {
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 0 || lines[0].trim() !== '---') {
+    return { frontmatter: {}, body: text };
+  }
+
+  let endIdx = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') {
+      endIdx = i;
+      break;
+    }
+  }
+  if (endIdx === -1) {
+    throw new Error('Unterminated YAML frontmatter block in OKF document');
+  }
+
+  const rawFmLines = lines.slice(1, endIdx);
+  const parsedLines: Array<{
+    indent: number;
+    text: string;
+    rawLine: string;
+    isBlankOrComment: boolean;
+  }> = [];
+
+  for (const line of rawFmLines) {
+    const rawIndent = line.match(/^\s*/)?.[0].length ?? 0;
+    const cleaned = stripYamlComment(line);
+    const trimmed = cleaned.trim();
+    parsedLines.push({
+      indent: rawIndent,
+      text: trimmed,
+      rawLine: line,
+      isBlankOrComment: trimmed === '',
+    });
+  }
+
+  function nextSignificantIndex(fromIdx: number): number {
+    let idx = fromIdx;
+    while (idx < parsedLines.length && parsedLines[idx].isBlankOrComment) {
+      idx++;
+    }
+    return idx;
+  }
+
+  function parseBlockScalar(
+    startIndex: number,
+    parentIndent: number,
+    style: '|' | '>',
+    chomp: '-' | '+' | ''
+  ): { value: string; nextIndex: number } {
+    const contentLines: Array<{ isBlank: boolean; raw: string; indent: number }> = [];
+    let i = startIndex;
+    let blockIndent = -1;
+
+    while (i < parsedLines.length) {
+      const entry = parsedLines[i];
+      const isTrulyEmpty = entry.rawLine.trim() === '';
+      if (isTrulyEmpty) {
+        contentLines.push({ isBlank: true, raw: '', indent: 0 });
+        i++;
+        continue;
+      }
+      if (entry.indent <= parentIndent) {
+        break;
+      }
+      if (blockIndent === -1) {
+        blockIndent = entry.indent;
+      }
+      const sliced =
+        entry.rawLine.length >= blockIndent
+          ? entry.rawLine.slice(blockIndent)
+          : entry.rawLine.trimStart();
+      contentLines.push({ isBlank: false, raw: sliced, indent: entry.indent });
+      i++;
+    }
+
+    // Trim trailing blank lines unless chomp === '+'
+    while (
+      chomp !== '+' &&
+      contentLines.length > 0 &&
+      contentLines[contentLines.length - 1].isBlank
+    ) {
+      contentLines.pop();
+    }
+
+    if (contentLines.length === 0) {
+      return { value: '', nextIndex: i };
+    }
+
+    let result = '';
+    if (style === '|') {
+      result = contentLines.map((l) => (l.isBlank ? '' : l.raw)).join('\n');
+    } else {
+      // Folded style (`>`): single newlines between normal lines fold into spaces; blank lines become paragraph breaks
+      const paragraphs: string[] = [];
+      let currentPara: string[] = [];
+      for (const l of contentLines) {
+        if (l.isBlank) {
+          if (currentPara.length > 0) {
+            paragraphs.push(currentPara.join(' '));
+            currentPara = [];
+          }
+          paragraphs.push('');
+        } else {
+          currentPara.push(l.raw.trimEnd());
+        }
+      }
+      if (currentPara.length > 0) {
+        paragraphs.push(currentPara.join(' '));
+      }
+      result = paragraphs.join('\n').replace(/\n{2,}/g, '\n\n');
+    }
+
+    if (chomp === '+') {
+      result = `${result}\n`;
+    }
+    return { value: result, nextIndex: i };
+  }
+
+  function parseKeyValueChild(
+    kvRest: string,
+    currentLineIdx: number,
+    parentIndent: number
+  ): { value: any; nextIndex: number } {
+    const blockScalarMatch = kvRest.match(/^([|>])([+\-])?$/);
+    if (blockScalarMatch) {
+      return parseBlockScalar(
+        currentLineIdx + 1,
+        parentIndent,
+        blockScalarMatch[1] as '|' | '>',
+        (blockScalarMatch[2] || '') as '-' | '+' | ''
+      );
+    }
+
+    if (kvRest !== '') {
+      return { value: parseYamlFlowValue(kvRest), nextIndex: currentLineIdx + 1 };
+    }
+
+    const nextIdx = nextSignificantIndex(currentLineIdx + 1);
+    if (nextIdx < parsedLines.length && parsedLines[nextIdx].indent > parentIndent) {
+      return parseYamlNode(nextIdx, parsedLines[nextIdx].indent);
+    }
+    return { value: '', nextIndex: nextIdx };
+  }
+
+  function parseYamlNode(
+    startIndex: number,
+    minIndent: number
+  ): { value: any; nextIndex: number } {
+    const firstIdx = nextSignificantIndex(startIndex);
+    if (firstIdx >= parsedLines.length) {
+      return { value: {}, nextIndex: firstIdx };
+    }
+    const first = parsedLines[firstIdx];
+    if (first.indent < minIndent) {
+      return { value: {}, nextIndex: firstIdx };
+    }
+
+    // Sequence block (`- ...`)
+    if (first.text === '-' || first.text.startsWith('- ')) {
+      const arr: any[] = [];
+      const seqIndent = first.indent;
+      let i = firstIdx;
+
+      while (i < parsedLines.length) {
+        i = nextSignificantIndex(i);
+        if (i >= parsedLines.length) break;
+        const cur = parsedLines[i];
+        if (cur.indent < seqIndent) break;
+        if (cur.indent > seqIndent) {
+          i++;
+          continue;
+        }
+        if (cur.text !== '-' && !cur.text.startsWith('- ')) break;
+
+        const itemRest = cur.text.slice(1).trim();
+        if (!itemRest) {
+          const nextIdx = nextSignificantIndex(i + 1);
+          if (nextIdx < parsedLines.length && parsedLines[nextIdx].indent > seqIndent) {
+            const child = parseYamlNode(nextIdx, parsedLines[nextIdx].indent);
+            arr.push(child.value);
+            i = child.nextIndex;
+          } else {
+            arr.push(null);
+            i = nextIdx;
+          }
+          continue;
+        }
+
+        const itemBlockMatch = itemRest.match(/^([|>])([+\-])?$/);
+        if (itemBlockMatch) {
+          const child = parseBlockScalar(
+            i + 1,
+            seqIndent,
+            itemBlockMatch[1] as '|' | '>',
+            (itemBlockMatch[2] || '') as '-' | '+' | ''
+          );
+          arr.push(child.value);
+          i = child.nextIndex;
+          continue;
+        }
+
+        if (itemRest.startsWith('{') || itemRest.startsWith('[')) {
+          arr.push(parseYamlFlowValue(itemRest));
+          i++;
+          continue;
+        }
+
+        const kv = matchYamlKeyValue(itemRest);
+        if (kv) {
+          const itemObj: Record<string, any> = {};
+          const itemPropIndent = seqIndent + 2;
+          const firstProp = parseKeyValueChild(kv.rest, i, seqIndent);
+          itemObj[kv.key] = firstProp.value;
+          i = firstProp.nextIndex;
+
+          while (i < parsedLines.length) {
+            i = nextSignificantIndex(i);
+            if (i >= parsedLines.length) break;
+            const propLine = parsedLines[i];
+            if (propLine.indent <= seqIndent) break;
+            if (
+              propLine.indent === seqIndent &&
+              (propLine.text === '-' || propLine.text.startsWith('- '))
+            ) {
+              break;
+            }
+            const propKv = matchYamlKeyValue(propLine.text);
+            if (!propKv) {
+              i++;
+              continue;
+            }
+            const propRes = parseKeyValueChild(
+              propKv.rest,
+              i,
+              Math.max(propLine.indent, itemPropIndent - 1)
+            );
+            itemObj[propKv.key] = propRes.value;
+            i = propRes.nextIndex;
+          }
+          arr.push(itemObj);
+          continue;
+        }
+
+        arr.push(parseYamlFlowValue(itemRest));
+        i++;
+      }
+
+      return { value: arr, nextIndex: i };
+    }
+
+    // Plain multi-line continuation scalar (indented lines that are neither `-` nor `key: value`)
+    if (!matchYamlKeyValue(first.text)) {
+      const scalarParts: string[] = [];
+      const scalarIndent = first.indent;
+      let i = firstIdx;
+      while (i < parsedLines.length) {
+        i = nextSignificantIndex(i);
+        if (i >= parsedLines.length) break;
+        const cur = parsedLines[i];
+        if (cur.indent < scalarIndent) break;
+        if (
+          cur.text === '-' ||
+          cur.text.startsWith('- ') ||
+          Boolean(matchYamlKeyValue(cur.text))
+        ) {
+          break;
+        }
+        scalarParts.push(cur.text);
+        i++;
+      }
+      return { value: parseYamlScalar(scalarParts.join(' ')), nextIndex: i };
+    }
+
+    // Mapping block (`key: ...`)
+    const obj: Record<string, any> = {};
+    const mapIndent = first.indent;
+    let i = firstIdx;
+
+    while (i < parsedLines.length) {
+      i = nextSignificantIndex(i);
+      if (i >= parsedLines.length) break;
+      const cur = parsedLines[i];
+      if (cur.indent < mapIndent) break;
+      if (cur.text === '-' || cur.text.startsWith('- ')) break;
+      const kv = matchYamlKeyValue(cur.text);
+      if (!kv) {
+        i++;
+        continue;
+      }
+
+      const childRes = parseKeyValueChild(kv.rest, i, cur.indent);
+      obj[kv.key] = childRes.value;
+      i = childRes.nextIndex;
+    }
+
+    return { value: obj, nextIndex: i };
+  }
+
+  const firstSigIdx = nextSignificantIndex(0);
+  const rootParsed =
+    firstSigIdx < parsedLines.length
+      ? parseYamlNode(firstSigIdx, parsedLines[firstSigIdx].indent).value
+      : {};
+  if (!rootParsed || typeof rootParsed !== 'object' || Array.isArray(rootParsed)) {
+    throw new Error('OKF frontmatter must be a YAML mapping');
+  }
+
+  let body = lines.slice(endIdx + 1).join('\n');
+  if (body.startsWith('\n')) {
+    body = body.slice(1);
+  }
+
+  return {
+    frontmatter: rootParsed as OKFFrontmatter,
+    body,
+  };
+}
+
+function formatYamlScalar(val: any, inFlowContext: boolean = false): string {
+  if (val === null || val === undefined) return 'null';
+  if (typeof val === 'boolean' || typeof val === 'number') return String(val);
+  const s = String(val);
+  if (s === '') return '""';
+  const needsQuotes =
+    /[:#\[\]{}&*!|>'"%@`\-?]/.test(s[0]) ||
+    s.endsWith(':') ||
+    /:\s/.test(s) ||
+    /\s#/.test(s) ||
+    /[\r\n\t]/.test(s) ||
+    /^\s|\s$/.test(s) ||
+    (inFlowContext && /[,[\]{}]/.test(s)) ||
+    /^(true|false|null|~|-?\d+(\.\d+)?)$/i.test(s);
+  if (needsQuotes) {
+    return `"${s
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\t/g, '\\t')}"`;
+  }
+  return s;
+}
+
+function serializeYamlKeyValue(key: string, val: any, indent: string = ''): string[] {
+  if (val === undefined) return [];
+  if (val === null || typeof val === 'boolean' || typeof val === 'number' || typeof val === 'string') {
+    if (key === 'okf_version') {
+      return [`${indent}${key}: "${String(val).replace(/"/g, '')}"`];
+    }
+    return [`${indent}${key}: ${formatYamlScalar(val)}`];
+  }
+
+  if (Array.isArray(val)) {
+    if (val.length === 0) {
+      return [`${indent}${key}: []`];
+    }
+    const allScalars = val.every(
+      (item) => typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean'
+    );
+    if (allScalars) {
+      return [`${indent}${key}: [${val.map((v) => formatYamlScalar(v, true)).join(', ')}]`];
+    }
+    const lines = [`${indent}${key}:`];
+    for (const item of val) {
+      if (item && typeof item === 'object' && !Array.isArray(item)) {
+        const keys = Object.keys(item).filter((k) => item[k] !== undefined);
+        // Compact inline mapping for { by, at } or { name, type, required }
+        if (
+          keys.length <= 3 &&
+          keys.every(
+            (k) =>
+              ['by', 'at', 'name', 'type', 'required', 'from', 'to'].includes(k) &&
+              (item[k] === null ||
+                typeof item[k] === 'string' ||
+                typeof item[k] === 'number' ||
+                typeof item[k] === 'boolean')
+          )
+        ) {
+          const pairs = keys.map((k) => `${k}: ${formatYamlScalar(item[k], true)}`).join(', ');
+          lines.push(`${indent}  - { ${pairs} }`);
+        } else {
+          keys.forEach((k, idx) => {
+            const prefix = idx === 0 ? `${indent}  - ` : `${indent}    `;
+            const v = item[k];
+            if (Array.isArray(v)) {
+              const vScalars = v.every(
+                (sub) =>
+                  typeof sub === 'string' || typeof sub === 'number' || typeof sub === 'boolean'
+              );
+              if (v.length === 0) {
+                lines.push(`${prefix}${k}: []`);
+              } else if (vScalars) {
+                lines.push(
+                  `${prefix}${k}: [${v.map((sub) => formatYamlScalar(sub, true)).join(', ')}]`
+                );
+              } else {
+                const subLines = serializeYamlKeyValue(k, v, `${indent}    `);
+                if (idx === 0 && subLines.length > 0) {
+                  lines.push(`${indent}  - ${subLines[0].trimStart()}`);
+                  lines.push(...subLines.slice(1));
+                } else {
+                  lines.push(...subLines);
+                }
+              }
+            } else if (v && typeof v === 'object') {
+              const subEntries = Object.entries(v).filter(([, sv]) => sv !== undefined);
+              const allSubScalars = subEntries.every(
+                ([, sv]) =>
+                  sv === null ||
+                  typeof sv === 'string' ||
+                  typeof sv === 'number' ||
+                  typeof sv === 'boolean'
+              );
+              if (subEntries.length === 0) {
+                lines.push(`${prefix}${k}: {}`);
+              } else if (allSubScalars && subEntries.length <= 4) {
+                const subPairs = subEntries
+                  .map(([sk, sv]) => `${sk}: ${formatYamlScalar(sv, true)}`)
+                  .join(', ');
+                lines.push(`${prefix}${k}: { ${subPairs} }`);
+              } else {
+                const subLines = serializeYamlKeyValue(k, v, `${indent}    `);
+                if (idx === 0 && subLines.length > 0) {
+                  lines.push(`${indent}  - ${subLines[0].trimStart()}`);
+                  lines.push(...subLines.slice(1));
+                } else {
+                  lines.push(...subLines);
+                }
+              }
+            } else {
+              lines.push(`${prefix}${k}: ${formatYamlScalar(v)}`);
+            }
+          });
+        }
+      } else {
+        lines.push(`${indent}  - ${formatYamlScalar(item)}`);
+      }
+    }
+    return lines;
+  }
+
+  if (typeof val === 'object') {
+    const entries = Object.entries(val).filter(([, v]) => v !== undefined);
+    if (entries.length === 0) return [`${indent}${key}: {}`];
+    const isCompactActorOrWindow = entries.every(
+      ([k, v]) =>
+        ['by', 'at', 'from', 'to'].includes(k) &&
+        (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
+    );
+    if (isCompactActorOrWindow) {
+      const pairs = entries.map(([k, v]) => `${k}: ${formatYamlScalar(v, true)}`).join(', ');
+      return [`${indent}${key}: { ${pairs} }`];
+    }
+    const lines = [`${indent}${key}:`];
+    for (const [subKey, subVal] of entries) {
+      lines.push(...serializeYamlKeyValue(subKey, subVal, `${indent}  `));
+    }
+    return lines;
+  }
+
+  return [`${indent}${key}: ${formatYamlScalar(val)}`];
+}
+
+/**
+ * Serializes an OKFDocument into UTF-8 Markdown with ordered YAML frontmatter (`SPEC.md` §4).
+ */
+export function serializeOkfDocument(doc: OKFDocument): string {
+  const fm = doc.frontmatter || {};
+  const orderedKeys: string[] = [];
+  for (const key of PREFERRED_OKF_KEY_ORDER) {
+    if (key in fm && fm[key] !== undefined) {
+      orderedKeys.push(key);
+    }
+  }
+  for (const key of Object.keys(fm)) {
+    if (!orderedKeys.includes(key) && fm[key] !== undefined) {
+      orderedKeys.push(key);
+    }
+  }
+
+  const fmLines: string[] = [];
+  for (const key of orderedKeys) {
+    fmLines.push(...serializeYamlKeyValue(key, fm[key]));
+  }
+
+  const trimmedBody = (doc.body || '').replace(/^\r?\n+/, '');
+  const finalBody = trimmedBody.endsWith('\n') ? trimmedBody : `${trimmedBody}\n`;
+  if (fmLines.length === 0) {
+    return finalBody;
+  }
+  return `---\n${fmLines.join('\n')}\n---\n\n${finalBody}`;
+}
+
+/**
+ * Validates OKF v0.2 conformance (`SPEC.md` §11: `type` is required).
+ */
+export function validateOkfDocument(doc: OKFDocument): void {
+  const typeVal = doc.frontmatter?.type;
+  if (!typeVal || typeof typeVal !== 'string' || !typeVal.trim()) {
+    throw new Error('Missing required OKF v0.2 frontmatter key: type');
+  }
+}
+
+/**
+ * Normalizes `verified` frontmatter into an array of `{ by, at }` objects (`SPEC.md` §5.2 & §11).
+ * A bare `{ by, at }` mapping is treated as a single-element list.
+ */
+export function normalizeVerified(frontmatter: Record<string, any>): OKFActorEvent[] {
+  const verified = frontmatter?.verified;
+  if (!verified) return [];
+  if (Array.isArray(verified)) {
+    return verified.filter((v) => v && typeof v === 'object' && typeof v.by === 'string');
+  }
+  if (typeof verified === 'object' && typeof verified.by === 'string') {
+    return [verified as OKFActorEvent];
+  }
+  return [];
+}
+
+/**
+ * Derives an OKF v0.2 trust tier from `verified` (`SPEC.md` §5.3):
+ * - No `verified` key => `'unverified'`
+ * - `verified` by non-`human:` actors only => `'machine-confirmed'`
+ * - `verified` by any `human:<id>` actor => `'human-reviewed'`
+ */
+export function getOkfTrustTier(frontmatter: Record<string, any>): TrustTier {
+  const events = normalizeVerified(frontmatter);
+  if (events.length === 0) return 'unverified';
+  for (const event of events) {
+    const by = String(event?.by || '');
+    if (by.startsWith('human:')) {
+      return 'human-reviewed';
+    }
+  }
+  return 'machine-confirmed';
+}
+
+export const trust_tier = getOkfTrustTier;
+
+/**
+ * Evaluates whether an OKF v0.2 concept is stale (`now >= stale_after` per `SPEC.md` §5.5).
+ * Requires an ISO 8601 datetime with `T` and an explicit timezone offset (`Z` or `[+-]HH:MM`).
+ */
+export function isOkfStale(frontmatter: Record<string, any>, now?: Date): boolean {
+  const raw = String(frontmatter?.stale_after || '').trim();
+  if (!raw || !raw.includes('T')) return false;
+  if (!/(Z|[+\-]\d{2}:?\d{2})$/i.test(raw)) return false;
+  const staleAfterMs = Date.parse(raw);
+  if (Number.isNaN(staleAfterMs)) return false;
+  const nowMs = (now ?? new Date()).getTime();
+  return nowMs >= staleAfterMs;
+}
+
+export const is_stale = isOkfStale;
+
+function generateSourceSlugId(
+  titleOrUrl: string,
+  resourceUrl: string,
+  usedIds: Set<string>
+): string {
+  let base = titleOrUrl
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/^https?:\/\/(www\.)?/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!base || base.length < 2) {
+    try {
+      base = new URL(resourceUrl).hostname
+        .replace(/^www\./, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    } catch {
+      base = 'source';
+    }
+  }
+  const words = base.split('-').filter(Boolean).slice(0, 4);
+  base = words.join('-').slice(0, 32).replace(/-+$/g, '') || 'source';
+
+  let candidate = base;
+  let counter = 2;
+  while (usedIds.has(candidate)) {
+    candidate = `${base}-${counter}`;
+    counter++;
+  }
+  usedIds.add(candidate);
+  return candidate;
+}
+
+export interface CleanGroundingOptions {
+  topic?: string;
+  model?: string;
+  generatedBy?: string;
+  generatedAt?: string;
+  staleAfter?: string;
+  staleAfterDays?: number;
+  type?: string;
+  status?: 'draft' | 'stable' | 'deprecated';
+  tags?: string[];
+}
+
 /**
  * Parses markdown text and Interactions API grounding steps, resolves Vertex redirect URLs,
- * weaves inline `url_citation` annotations at their UTF-8 byte offsets, and formats reference links.
+ * weaves inline `url_citation` annotations at their UTF-8 byte offsets as OKF v0.2 `[^id]` footnotes,
+ * lifts all external sources into YAML frontmatter (`sources: [{ id, resource, title }]`),
+ * and formats a complete OKF v0.2 Concept Document (`SPEC.md` §4 & §5).
  */
-export async function cleanGroundingLinks(text: string, steps?: any[]): Promise<string> {
+export async function cleanGroundingLinks(
+  text: string,
+  steps?: any[],
+  options?: CleanGroundingOptions
+): Promise<string> {
   const redirectRegex =
     /https:\/\/vertexaisearch\.cloud\.google\.com\/grounding-api-redirect\/[a-zA-Z0-9_\-\+=]+/g;
   const textMatches = text.match(redirectRegex) || [];
@@ -747,28 +1566,103 @@ export async function cleanGroundingLinks(text: string, steps?: any[]): Promise<
     }
   }
 
-  // 1. Weave inline url_citation annotations into the UTF-8 buffer before byte offsets change
+  // Pre-register any existing frontmatter sources so their IDs are preserved during byte-offset weaving
+  const usedIds = new Set<string>();
+  const sourcesByUrl = new Map<string, OKFSource>();
+  const sourcesById = new Map<string, OKFSource>();
+  const orderedSources: OKFSource[] = [];
+
+  const registerSource = (
+    rawUrl: string,
+    rawTitle?: string,
+    preferredId?: string,
+    extra?: Partial<OKFSource>
+  ): OKFSource => {
+    const resolvedUrl = (urlMap.get(rawUrl) || rawUrl).trim();
+    const cleanTitle = (rawTitle || '')
+      .replace(/\s*\(Alternativ indeks\)\s*$/i, '')
+      .replace(/^\*\*|\*\*$/g, '')
+      .trim();
+
+    if (preferredId && sourcesById.has(preferredId)) {
+      const existingById = sourcesById.get(preferredId)!;
+      if (cleanTitle && (!existingById.title || existingById.title === existingById.resource)) {
+        existingById.title = cleanTitle;
+      }
+      return existingById;
+    }
+
+    if (sourcesByUrl.has(resolvedUrl)) {
+      const existing = sourcesByUrl.get(resolvedUrl)!;
+      if (cleanTitle && (!existing.title || existing.title === existing.resource)) {
+        existing.title = cleanTitle;
+      }
+      return existing;
+    }
+
+    let fallbackLabel = cleanTitle;
+    if (!fallbackLabel) {
+      try {
+        fallbackLabel = new URL(resolvedUrl).hostname.replace(/^www\./, '');
+      } catch {
+        fallbackLabel = 'source';
+      }
+    }
+
+    let id = preferredId?.trim() || '';
+    if (id) {
+      usedIds.add(id);
+    } else {
+      id = generateSourceSlugId(fallbackLabel, resolvedUrl, usedIds);
+    }
+
+    const entry: OKFSource = {
+      id,
+      resource: resolvedUrl,
+      title: cleanTitle || fallbackLabel,
+      ...extra,
+    };
+    sourcesByUrl.set(resolvedUrl, entry);
+    sourcesById.set(id, entry);
+    orderedSources.push(entry);
+    return entry;
+  };
+
+  // Check if raw text already begins with YAML frontmatter so we don't weave inline footnotes inside frontmatter
+  let frontmatterEndByteOffset = 0;
+  const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
+  if (fmMatch) {
+    frontmatterEndByteOffset = Buffer.byteLength(fmMatch[0], 'utf8');
+    try {
+      const initialDoc = parseOkfDocument(text);
+      const initialSources = initialDoc.frontmatter?.sources;
+      if (Array.isArray(initialSources)) {
+        for (const s of initialSources) {
+          if (s && typeof s === 'object' && s.resource) {
+            const { id, resource, title, ...rest } = s;
+            registerSource(String(resource), title ? String(title) : undefined, id ? String(id) : undefined, rest);
+          }
+        }
+      }
+    } catch {
+      // Ignore partial frontmatter errors before full cleanup
+    }
+  }
+
+  // 1. Weave inline url_citation annotations into the UTF-8 buffer as OKF v0.2 [^id] footnotes before byte offsets change
   let workingText = text;
   if (inlineAnnotations.length > 0) {
     const buf = Buffer.from(workingText, 'utf8');
-    const byEndIndex = new Map<number, Array<{ title: string; url: string }>>();
+    const byEndIndex = new Map<number, OKFSource[]>();
     for (const ann of inlineAnnotations) {
-      if (ann.end_index > buf.length) continue;
-      const resolvedUrl = urlMap.get(ann.url) || ann.url;
-      let label = ann.title?.trim() || '';
-      if (!label) {
-        try {
-          label = new URL(resolvedUrl).hostname.replace(/^www\./, '');
-        } catch {
-          label = 'source';
-        }
-      }
+      if (ann.end_index > buf.length || ann.end_index <= frontmatterEndByteOffset) continue;
+      const srcEntry = registerSource(ann.url, ann.title);
       if (!byEndIndex.has(ann.end_index)) {
         byEndIndex.set(ann.end_index, []);
       }
       const group = byEndIndex.get(ann.end_index)!;
-      if (!group.some((item) => item.url === resolvedUrl)) {
-        group.push({ title: label, url: resolvedUrl });
+      if (!group.some((item) => item.id === srcEntry.id)) {
+        group.push(srcEntry);
       }
     }
 
@@ -777,10 +1671,22 @@ export async function cleanGroundingLinks(text: string, steps?: any[]): Promise<
     let cursor = buf.length;
 
     for (const endIdx of sortedEnds) {
-      const links = byEndIndex.get(endIdx)!;
-      const citationMarkdown = ` (${links.map((l) => `[${l.title}](${l.url})`).join(', ')})`;
+      const sourcesAtSpan = byEndIndex.get(endIdx)!;
+      const precedingSlice = buf.subarray(Math.max(0, endIdx - 64), endIdx).toString('utf8');
+      const followingSlice = buf
+        .subarray(endIdx, Math.min(buf.length, endIdx + 64))
+        .toString('utf8');
+      const neededFootnotes = sourcesAtSpan
+        .filter(
+          (s) =>
+            !precedingSlice.endsWith(`[^${s.id}]`) && !followingSlice.startsWith(`[^${s.id}]`)
+        )
+        .map((s) => `[^${s.id}]`)
+        .join('');
       chunks.unshift(buf.subarray(endIdx, cursor));
-      chunks.unshift(Buffer.from(citationMarkdown, 'utf8'));
+      if (neededFootnotes) {
+        chunks.unshift(Buffer.from(neededFootnotes, 'utf8'));
+      }
       cursor = endIdx;
     }
     chunks.unshift(buf.subarray(0, cursor));
@@ -788,65 +1694,942 @@ export async function cleanGroundingLinks(text: string, steps?: any[]): Promise<
   }
 
   // 2. Replace any remaining raw redirect URLs in the text
-  let cleanedText = workingText;
   for (const [original, resolved] of urlMap.entries()) {
     if (resolved && resolved !== original) {
       console.log(`Resolved: ${original.substring(0, 60)}... -> ${resolved}`);
-      cleanedText = cleanedText.replaceAll(original, resolved);
+      workingText = workingText.replaceAll(original, resolved);
     }
   }
 
-  // 3. Convert bare "* **Title**: https://..." lines in Sources & Citations into clickable markdown links and deduplicate
-  const seenSourceUrls = new Set<string>();
-  const lines = cleanedText.split('\n');
-  const formattedLines: string[] = [];
-  const bareSourceLineRegex = /^(\s*[\*\-]\s+)\*\*(.+?)\*\*:\s+(https?:\/\/\S+)\s*$/;
+  // Strip outer ```markdown or ```yaml wrapper if the model accidentally fenced the entire document
+  workingText = workingText
+    .replace(/^```(?:markdown|md|yaml)\r?\n([\s\S]*?)\r?\n```\s*$/i, '$1')
+    .trim();
 
-  for (const line of lines) {
-    const match = line.match(bareSourceLineRegex);
-    if (match) {
-      const [, prefix, rawTitle, url] = match;
-      if (seenSourceUrls.has(url)) {
+  // 3. Parse existing frontmatter + body (if present)
+  let parsedDoc: OKFDocument;
+  try {
+    parsedDoc = parseOkfDocument(workingText);
+  } catch {
+    parsedDoc = { frontmatter: {}, body: workingText };
+  }
+
+  if (Array.isArray(parsedDoc.frontmatter.sources)) {
+    for (const s of parsedDoc.frontmatter.sources) {
+      if (s && typeof s === 'object' && s.resource) {
+        const { id, resource, title, ...rest } = s;
+        registerSource(String(resource), title ? String(title) : undefined, id ? String(id) : undefined, rest);
+      }
+    }
+  }
+
+  let bodyText = parsedDoc.body;
+
+  // 4. Extract legacy "* **Title**: https://..." or "- [Title](https://...)" citation lines and convert to OKF sources
+  const bareSourceLineRegex = /^(\s*[\*\-]\s+)\*\*(.+?)\*\*:\s+(https?:\/\/\S+)\s*$/;
+  const bulletLinkSourceLineRegex = /^(\s*[\*\-]\s+)\[\*\*?(.+?)\*\*?\]\((https?:\/\/[^\s)]+)\)\s*$/;
+  const footnoteDefLineRegex = /^\[\^([A-Za-z0-9_\-]+)\]:\s*(.+)$/;
+  const existingFootnoteDefs = new Map<string, string>();
+
+  const rawBodyLines = bodyText.split(/\r?\n/);
+  const cleanedBodyLines: string[] = [];
+  let inLegacyCitationsSection = false;
+
+  for (const line of rawBodyLines) {
+    if (/^#{1,3}\s+(Sources\s*&\s*Citations|Citations|Grounded\s+Search\s+References)\s*$/i.test(line.trim())) {
+      inLegacyCitationsSection = true;
+      continue;
+    }
+    if (inLegacyCitationsSection && /^#{1,3}\s+/.test(line.trim())) {
+      inLegacyCitationsSection = false;
+    }
+
+    const fnMatch = line.trim().match(footnoteDefLineRegex);
+    if (fnMatch) {
+      const [, fnId, fnRest] = fnMatch;
+      const urlInFn = fnRest.match(/(https?:\/\/[^\s)]+)/);
+      if (urlInFn) {
+        const titlePart = fnRest
+          .replace(/\[([^\]]+)\]\(https?:\/\/[^\s)]+\)/, '$1')
+          .replace(urlInFn[1], '')
+          .replace(/^[\s:\-–—]+|[\s:\-–—]+$/g, '')
+          .trim();
+        const src = registerSource(urlInFn[1], titlePart || fnId, fnId);
+        existingFootnoteDefs.set(src.id!, src.title || src.resource);
+      } else {
+        existingFootnoteDefs.set(fnId, fnRest.trim());
+      }
+      continue;
+    }
+
+    const bareMatch = line.match(bareSourceLineRegex);
+    if (bareMatch) {
+      const [, , rawTitle, url] = bareMatch;
+      const src = registerSource(url, rawTitle);
+      existingFootnoteDefs.set(src.id!, src.title || src.resource);
+      continue;
+    }
+
+    if (inLegacyCitationsSection) {
+      const bulletMatch = line.match(bulletLinkSourceLineRegex);
+      if (bulletMatch) {
+        const src = registerSource(bulletMatch[3], bulletMatch[2]);
+        existingFootnoteDefs.set(src.id!, src.title || src.resource);
         continue;
       }
-      seenSourceUrls.add(url);
-      const cleanTitle = rawTitle.replace(/\s*\(Alternativ indeks\)\s*$/i, '').trim();
-      formattedLines.push(`${prefix}[**${cleanTitle}**](${url})`);
-    } else {
-      formattedLines.push(line);
+      const plainUrlBullet = line.match(/^\s*[\*\-]\s+(https?:\/\/\S+)\s*$/);
+      if (plainUrlBullet) {
+        const src = registerSource(plainUrlBullet[1]);
+        existingFootnoteDefs.set(src.id!, src.title || src.resource);
+        continue;
+      }
+      if (!line.trim()) continue;
     }
-  }
-  cleanedText = formattedLines.join('\n');
 
-  // 4. Ensure any grounded sources from the Interactions API that were not cited are appended
-  const missingSources: Array<{ title: string; url: string }> = [];
-  const seenUrls = new Set<string>();
+    cleanedBodyLines.push(line);
+  }
+
+  bodyText = cleanedBodyLines.join('\n');
+
+  // 5. Convert inline external markdown links in prose (`([Title](https://...))` or `[Title](https://...)`)
+  // into OKF v0.2 `[^id]` footnote references while leaving Markdown images (`![Alt](https://...)`)
+  // and internal bundle links (`/foo.md`, `./bar.md`) intact.
+  bodyText = bodyText.replace(
+    /\s*\(\s*(?<!\!)\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)\s*\)/g,
+    (_full, label: string, url: string) => {
+      const src = registerSource(url, label);
+      return `[^${src.id}]`;
+    }
+  );
+
+  bodyText = bodyText.replace(
+    /(?<!\!)\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    (_full, label: string, url: string) => {
+      const cleanLabel = label.replace(/^\*\*|\*\*$/g, '').trim();
+      const src = registerSource(url, cleanLabel);
+      // If the link text was just a domain/URL citation marker, emit footnote directly; otherwise keep anchor text + footnote
+      if (/^https?:\/\//i.test(cleanLabel) || cleanLabel.toLowerCase() === 'source' || cleanLabel.toLowerCase() === 'link') {
+        return `[^${src.id}]`;
+      }
+      return `${label}[^${src.id}]`;
+    }
+  );
+
+  // Deduplicate adjacent identical footnote markers like `[^id][^id]`
+  bodyText = bodyText.replace(/(\[\^[A-Za-z0-9_\-]+\])\1+/g, '$1');
+
+  // 6. Register any remaining groundedSources from the Interactions API steps
   for (const src of groundedSources) {
-    const finalUrl = urlMap.get(src.url) || src.url;
-    if (finalUrl && !seenUrls.has(finalUrl) && !cleanedText.includes(finalUrl)) {
-      seenUrls.add(finalUrl);
-      missingSources.push({
-        title: src.title || finalUrl,
-        url: finalUrl,
-      });
+    registerSource(src.url, src.title);
+  }
+
+  // 7. Append OKF v0.2 footnote definitions (`[^id]: Title`) at the bottom of the body (SPEC.md §5.1)
+  const citedFootnoteIds = Array.from(
+    new Set(Array.from(bodyText.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1]))
+  );
+  const allFootnoteIds = Array.from(
+    new Set([...citedFootnoteIds, ...existingFootnoteDefs.keys()])
+  );
+
+  const footnoteLines: string[] = [];
+  for (const fnId of allFootnoteIds) {
+    const src = sourcesById.get(fnId);
+    const label = src?.title || existingFootnoteDefs.get(fnId) || src?.resource || fnId;
+    footnoteLines.push(`[^${fnId}]: ${label}`);
+  }
+
+  bodyText = bodyText.trim();
+  if (footnoteLines.length > 0) {
+    bodyText = `${bodyText}\n\n${footnoteLines.join('\n')}\n`;
+  } else {
+    bodyText = `${bodyText}\n`;
+  }
+
+  // 8. Build complete OKF v0.2 Frontmatter (SPEC.md §4.1 & §5)
+  const fm: OKFFrontmatter = { ...parsedDoc.frontmatter };
+  if (!fm.type || !String(fm.type).trim()) {
+    fm.type = options?.type || 'Research Concept';
+  }
+
+  if (!fm.title || !String(fm.title).trim()) {
+    const headingMatch = bodyText.match(/^#\s+(.+)$/m);
+    fm.title =
+      headingMatch?.[1]?.replace(/[*_`]/g, '').trim() ||
+      options?.topic ||
+      'Grounded Research Concept';
+  }
+
+  if (!fm.description || !String(fm.description).trim()) {
+    const firstPara = bodyText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find(
+        (l) =>
+          l.length > 25 &&
+          !l.startsWith('#') &&
+          !l.startsWith('[^') &&
+          !l.startsWith('|') &&
+          !l.startsWith('```')
+      );
+    const cleanSummary = firstPara
+      ? firstPara
+          .replace(/\[\^[A-Za-z0-9_\-]+\]/g, '')
+          .replace(/^[\*\-\d.]+\s+/, '')
+          .replace(/\*\*/g, '')
+          .split(/(?<=[.!?])\s+/)[0]
+          .slice(0, 200)
+          .trim()
+      : `Grounded research synthesis on ${fm.title}.`;
+    fm.description = cleanSummary || `Grounded research synthesis on ${fm.title}.`;
+  }
+
+  if (!Array.isArray(fm.tags) || fm.tags.length === 0) {
+    if (options?.tags && options.tags.length > 0) {
+      fm.tags = options.tags;
+    } else {
+      const topicWords = String(options?.topic || fm.title || 'research')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .split(/[^a-z0-9]+/)
+        .filter((w) => w.length >= 3 && !['the', 'and', 'for', 'with', 'from', 'that', 'this'].includes(w))
+        .slice(0, 5);
+      fm.tags = topicWords.length > 0 ? Array.from(new Set(topicWords)) : ['research', 'icm'];
     }
   }
 
-  if (missingSources.length > 0) {
-    const appendix =
-      '\n\n### Grounded Search References\n' +
-      missingSources.map((s) => `- [**${s.title}**](${s.url})`).join('\n');
-    cleanedText += appendix;
+  if (!fm.status) {
+    fm.status = options?.status || 'draft';
   }
 
-  return cleanedText;
+  const nowIso =
+    options?.generatedAt || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const existingGen =
+    fm.generated && typeof fm.generated === 'object' ? fm.generated : ({} as OKFActorEvent);
+  fm.generated = {
+    by:
+      existingGen.by ||
+      options?.generatedBy ||
+      `icm-stage1/${options?.model || GEMINI_4_ARGON_MODEL}`,
+    at: existingGen.at || nowIso,
+  };
+
+  if (!fm.stale_after) {
+    if (options?.staleAfter) {
+      fm.stale_after = options.staleAfter;
+    } else {
+      const days = options?.staleAfterDays ?? 30;
+      const baseMs = Date.parse(fm.generated.at || nowIso) || Date.now();
+      const staleDate = new Date(baseMs + days * 24 * 60 * 60 * 1000);
+      fm.stale_after = staleDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
+    }
+  }
+
+  fm.sources = orderedSources;
+
+  return serializeOkfDocument({
+    frontmatter: fm,
+    body: bodyText,
+  });
 }
 
-// Helper to load ICM Layer 0 (GEMINI.md), Layer 1 (CONTEXT.md), and Layer 3 (_config/voice_guide.md) from disk
-function loadWorkspaceLayers(workspacePath: string) {
+function isCodeFenceDelimiter(line: string): string | null {
+  const m = line.match(/^\s*(`{3,}|~{3,})/);
+  return m ? m[1][0] : null;
+}
+
+function matchTopLevelMarkdownHeading(line: string): string | null {
+  // Only match unindented (0-3 spaces) `# Heading` lines outside code blocks
+  const m = line.match(/^ {0,3}#\s+(.+)$/);
+  return m ? `# ${m[1].trim()}` : null;
+}
+
+function extractTopLevelHeadings(body: string): string[] {
+  const headings: string[] = [];
+  let inFenceChar: string | null = null;
+  for (const line of body.split(/\r?\n/)) {
+    const fenceChar = isCodeFenceDelimiter(line);
+    if (fenceChar) {
+      if (!inFenceChar) {
+        inFenceChar = fenceChar;
+      } else if (inFenceChar === fenceChar) {
+        inFenceChar = null;
+      }
+      continue;
+    }
+    if (inFenceChar) continue;
+    const h = matchTopLevelMarkdownHeading(line);
+    if (h) {
+      headings.push(h);
+    }
+  }
+  return headings;
+}
+
+function extractSchemaFieldNames(body: string): string[] {
+  const fields = new Set<string>();
+  let inSchema = false;
+  let inFenceChar: string | null = null;
+  for (const line of body.split(/\r?\n/)) {
+    const fenceChar = isCodeFenceDelimiter(line);
+    if (fenceChar) {
+      if (!inFenceChar) {
+        inFenceChar = fenceChar;
+      } else if (inFenceChar === fenceChar) {
+        inFenceChar = null;
+      }
+      continue;
+    }
+    if (inFenceChar) continue;
+    const h = matchTopLevelMarkdownHeading(line);
+    if (h) {
+      inSchema = h.toLowerCase() === '# schema';
+      continue;
+    }
+    const trimmed = line.trim();
+    if (inSchema && trimmed) {
+      for (const m of trimmed.matchAll(/`([A-Za-z_][A-Za-z0-9_.]*)`/g)) {
+        fields.add(m[1]);
+      }
+    }
+  }
+  return Array.from(fields);
+}
+
+function mergeMarkdownSectionsAndSchema(existingBody: string, incomingBody: string): string {
+  if (!existingBody.trim()) return incomingBody;
+  if (!incomingBody.trim()) return existingBody;
+
+  const parseSections = (text: string) => {
+    const sections = new Map<string, string[]>();
+    const order: string[] = [];
+    const footnotes = new Map<string, string>();
+    let currentHeading = '__preamble__';
+    let inFenceChar: string | null = null;
+    sections.set(currentHeading, []);
+    order.push(currentHeading);
+
+    for (const line of text.split(/\r?\n/)) {
+      const fenceChar = isCodeFenceDelimiter(line);
+      if (fenceChar) {
+        if (!inFenceChar) {
+          inFenceChar = fenceChar;
+        } else if (inFenceChar === fenceChar) {
+          inFenceChar = null;
+        }
+        sections.get(currentHeading)!.push(line);
+        continue;
+      }
+      if (!inFenceChar) {
+        const fnMatch = line.trim().match(/^\[\^([A-Za-z0-9_\-]+)\]:\s*(.+)$/);
+        if (fnMatch) {
+          footnotes.set(fnMatch[1], line.trim());
+          continue;
+        }
+        const hm = matchTopLevelMarkdownHeading(line);
+        if (hm) {
+          currentHeading = hm;
+          if (!sections.has(currentHeading)) {
+            sections.set(currentHeading, []);
+            order.push(currentHeading);
+          }
+          continue;
+        }
+      }
+      sections.get(currentHeading)!.push(line);
+    }
+    return { sections, order, footnotes };
+  };
+
+  const oldParsed = parseSections(existingBody);
+  const newParsed = parseSections(incomingBody);
+
+  const combinedOrder = [...newParsed.order];
+  for (const h of oldParsed.order) {
+    if (!combinedOrder.includes(h)) {
+      combinedOrder.push(h);
+    }
+  }
+
+  const outBlocks: string[] = [];
+  for (const heading of combinedOrder) {
+    const oldLines = oldParsed.sections.get(heading) || [];
+    const newLines = newParsed.sections.get(heading) || [];
+
+    let bodyLines: string[];
+    if (heading.toLowerCase() === '# schema' && oldLines.length > 0 && newLines.length > 0) {
+      // Non-shrinking union of # Schema field lines
+      const mergedSchemaLines = [...oldLines.filter((l) => l.trim() !== '')];
+      const existingFields = new Set(extractSchemaFieldNames(`# Schema\n${oldLines.join('\n')}`));
+      for (const l of newLines) {
+        if (!l.trim()) continue;
+        const fieldMatches = Array.from(l.matchAll(/`([A-Za-z_][A-Za-z0-9_.]*)`/g)).map((m) => m[1]);
+        if (fieldMatches.length === 0 || fieldMatches.some((f) => !existingFields.has(f))) {
+          mergedSchemaLines.push(l);
+          fieldMatches.forEach((f) => existingFields.add(f));
+        }
+      }
+      bodyLines = mergedSchemaLines;
+    } else if (newLines.some((l) => l.trim() !== '')) {
+      bodyLines = newLines;
+    } else {
+      bodyLines = oldLines;
+    }
+
+    const content = bodyLines.join('\n').trim();
+    if (heading === '__preamble__') {
+      if (content) outBlocks.push(content);
+    } else {
+      outBlocks.push(content ? `${heading}\n\n${content}` : heading);
+    }
+  }
+
+  const mergedFootnotes = new Map<string, string>(oldParsed.footnotes);
+  for (const [fnId, fnLine] of newParsed.footnotes.entries()) {
+    mergedFootnotes.set(fnId, fnLine);
+  }
+  const allFootnotes = Array.from(mergedFootnotes.values());
+  if (allFootnotes.length > 0) {
+    outBlocks.push(allFootnotes.join('\n'));
+  }
+
+  return `${outBlocks.join('\n\n').trim()}\n`;
+}
+
+/**
+ * Merges an existing OKF concept document with an updated document, preserving all prior
+ * `sources`, `tags`, `verified` sign-offs, `# Schema` fields, and `# Section` headings when augmenting.
+ */
+export function mergeConceptDocuments(
+  existing: OKFDocument,
+  incoming: OKFDocument
+): OKFDocument {
+  const mergedFm: OKFFrontmatter = {
+    ...existing.frontmatter,
+    ...incoming.frontmatter,
+  };
+
+  // Do not downgrade `stable` status to `draft` during non-shrinking augmentation
+  if (existing.frontmatter?.status === 'stable' && incoming.frontmatter?.status === 'draft') {
+    mergedFm.status = 'stable';
+  }
+
+  // Preserve non-shrinking union of sources (`resource` | `url` | `path` | `id`)
+  const existingSources = Array.isArray(existing.frontmatter?.sources)
+    ? existing.frontmatter.sources
+    : [];
+  const incomingSources = Array.isArray(incoming.frontmatter?.sources)
+    ? incoming.frontmatter.sources
+    : [];
+  const mergedSources: OKFSource[] = [];
+  const seenKeys = new Set<string>();
+  const seenIds = new Set<string>();
+
+  for (const src of [...existingSources, ...incomingSources]) {
+    if (!src || typeof src !== 'object') continue;
+    const locator = String((src as any).resource || (src as any).url || (src as any).path || src.id || '').trim();
+    if (!locator) continue;
+    if (seenKeys.has(locator)) {
+      const target = mergedSources.find(
+        (s) => ((s as any).resource || (s as any).url || (s as any).path || s.id) === locator
+      );
+      if (target && src.title && (!target.title || target.title === target.resource)) {
+        target.title = src.title;
+      }
+      continue;
+    }
+    seenKeys.add(locator);
+    let id = src.id || 'source';
+    let counter = 2;
+    while (seenIds.has(id)) {
+      id = `${src.id || 'source'}-${counter++}`;
+    }
+    seenIds.add(id);
+    mergedSources.push({ ...src, id });
+  }
+  mergedFm.sources = mergedSources;
+
+  // Preserve union of tags
+  const existingTags = Array.isArray(existing.frontmatter?.tags) ? existing.frontmatter.tags : [];
+  const incomingTags = Array.isArray(incoming.frontmatter?.tags) ? incoming.frontmatter.tags : [];
+  if (existingTags.length > 0 || incomingTags.length > 0) {
+    mergedFm.tags = Array.from(new Set([...existingTags, ...incomingTags].map(String)));
+  }
+
+  // Preserve existing human/machine `verified` records alongside any new verification events
+  const existingVerified = normalizeVerified(existing.frontmatter || {});
+  const incomingVerified = normalizeVerified(incoming.frontmatter || {});
+  if (existingVerified.length > 0 || incomingVerified.length > 0) {
+    const combinedVerified: OKFActorEvent[] = [];
+    for (const v of [...existingVerified, ...incomingVerified]) {
+      if (!combinedVerified.some((c) => c.by === v.by && c.at === v.at)) {
+        combinedVerified.push(v);
+      }
+    }
+    mergedFm.verified = combinedVerified;
+  }
+
+  return {
+    frontmatter: mergedFm,
+    body: mergeMarkdownSectionsAndSchema(existing.body, incoming.body),
+  };
+}
+
+/**
+ * Writes an OKF v0.2 concept document to `bundleRoot/<conceptId>.md` with universal
+ * Augmentation Guards enforced across ALL concept types (fixing OKF reference_agent Trap 2).
+ */
+export function writeBundleConcept(
+  bundleRoot: string,
+  conceptId: string,
+  docInput: OKFDocument | string,
+  options?: {
+    mergeExisting?: boolean;
+    allowDestructiveOverwrite?: boolean;
+    actor?: string;
+  }
+): { path: string; conceptId: string; bytes: number; action: 'Creation' | 'Update' } {
+  const cleanCid = conceptId
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\.md$/i, '');
+  const baseName = path.posix.basename(`${cleanCid}.md`);
+  if (RESERVED_OKF_FILENAMES.has(baseName)) {
+    throw new Error(
+      `Cannot write concept to "${baseName}": index.md and log.md are reserved OKF filenames (SPEC.md §3.1).`
+    );
+  }
+
+  const doc: OKFDocument =
+    typeof docInput === 'string' ? parseOkfDocument(docInput) : docInput;
+  validateOkfDocument(doc);
+
+  const resolvedBundleRoot = path.resolve(bundleRoot);
+  const targetPath = path.resolve(resolvedBundleRoot, `${cleanCid}.md`);
+  const existed = fs.existsSync(targetPath);
+  let docToWrite: OKFDocument = {
+    frontmatter: { ...doc.frontmatter },
+    body: doc.body,
+  };
+
+  if (existed) {
+    const existingRaw = fs.readFileSync(targetPath, 'utf-8');
+    const existingDoc = parseOkfDocument(existingRaw);
+
+    if (!options?.allowDestructiveOverwrite) {
+      if (options?.mergeExisting) {
+        docToWrite = mergeConceptDocuments(existingDoc, docToWrite);
+      } else {
+        // Universal Augmentation Guard 1: Non-shrinking `sources` across all concept types
+        const oldSources = Array.isArray(existingDoc.frontmatter?.sources)
+          ? existingDoc.frontmatter.sources
+          : existingDoc.frontmatter?.sources
+            ? [existingDoc.frontmatter.sources]
+            : [];
+        const newSources = Array.isArray(docToWrite.frontmatter?.sources)
+          ? docToWrite.frontmatter.sources
+          : docToWrite.frontmatter?.sources
+            ? [docToWrite.frontmatter.sources]
+            : [];
+        const newSourceIds = new Set(
+          newSources.map((s: any) => String(s?.id || s?.resource || s?.url || s?.path || '')).filter(Boolean)
+        );
+        const missingSourceIds = oldSources
+          .map((s: any) => String(s?.id || s?.resource || s?.url || s?.path || ''))
+          .filter((id: string) => id && !newSourceIds.has(id));
+        if (newSources.length < oldSources.length || missingSourceIds.length > 0) {
+          throw new Error(
+            `OKF Augmentation Guard [${cleanCid}]: Update removes existing source IDs (${missingSourceIds.join(', ') || `${oldSources.length} -> ${newSources.length}`}). Merge new sources into the existing list.`
+          );
+        }
+
+        // Universal Augmentation Guard 2: Preserve `# Schema` fields and top-level `#` headings across all concept types
+        const oldHeadings = extractTopLevelHeadings(existingDoc.body);
+        const newHeadings = new Set(extractTopLevelHeadings(docToWrite.body));
+        const missingHeadings = oldHeadings.filter((h) => !newHeadings.has(h));
+        if (missingHeadings.length > 0) {
+          throw new Error(
+            `OKF Augmentation Guard [${cleanCid}]: Update drops existing section heading "${missingHeadings[0]}" (${missingHeadings.join(', ')}).`
+          );
+        }
+
+        const oldSchemaFields = extractSchemaFieldNames(existingDoc.body);
+        const newSchemaFields = new Set(extractSchemaFieldNames(docToWrite.body));
+        const missingSchemaFields = oldSchemaFields.filter((f) => !newSchemaFields.has(f));
+        if (missingSchemaFields.length > 0) {
+          throw new Error(
+            `OKF Augmentation Guard [${cleanCid}]: Update drops existing # Schema field(s): ${missingSchemaFields.join(', ')}.`
+          );
+        }
+
+        // Universal Augmentation Guard 3: Prevent silent erasure of human `verified` sign-offs
+        const oldVerified = normalizeVerified(existingDoc.frontmatter);
+        const newVerified = normalizeVerified(docToWrite.frontmatter);
+        const hadHumanVerify = oldVerified.some((v) => String(v.by || '').startsWith('human:'));
+        const hasHumanVerify = newVerified.some((v) => String(v.by || '').startsWith('human:'));
+        if (hadHumanVerify && !hasHumanVerify) {
+          throw new Error(
+            `OKF Augmentation Guard [${cleanCid}]: Update drops existing human verification sign-off without preserving 'verified' history.`
+          );
+        }
+      }
+    }
+  }
+
+  if (!docToWrite.frontmatter.generated || typeof docToWrite.frontmatter.generated !== 'object') {
+    docToWrite.frontmatter.generated = {
+      by: options?.actor || `icm/${GEMINI_4_ARGON_MODEL}`,
+      at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    };
+  }
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  const serialized = serializeOkfDocument(docToWrite);
+  fs.writeFileSync(targetPath, serialized, 'utf-8');
+
+  return {
+    path: path.relative(resolvedBundleRoot, targetPath).replace(/\\/g, '/'),
+    conceptId: cleanCid,
+    bytes: Buffer.byteLength(serialized, 'utf-8'),
+    action: existed ? 'Update' : 'Creation',
+  };
+}
+
+/**
+ * 100% deterministic `index.md` generator for an OKF v0.2 bundle (`SPEC.md` §8 & §12).
+ * Zero hidden LLM calls (fixes OKF reference_agent Trap 3) and excludes both `index.md` and `log.md`.
+ */
+export function regenerateBundleIndexes(bundleRoot: string): string[] {
+  const resolvedRoot = path.resolve(bundleRoot);
+  if (!fs.existsSync(resolvedRoot)) return [];
+
+  const dirsToIndex = new Set<string>([resolvedRoot]);
+  function scanDirs(dir: string) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        scanDirs(fullPath);
+      } else if (
+        entry.isFile() &&
+        entry.name.endsWith('.md') &&
+        !RESERVED_OKF_FILENAMES.has(entry.name)
+      ) {
+        let cur = path.dirname(fullPath);
+        while (cur.startsWith(resolvedRoot)) {
+          dirsToIndex.add(cur);
+          if (cur === resolvedRoot) break;
+          cur = path.dirname(cur);
+        }
+      }
+    }
+  }
+  scanDirs(resolvedRoot);
+
+  // Sort directories deepest first so subdirectory descriptions roll up deterministically
+  const sortedDirs = Array.from(dirsToIndex).sort((a, b) => {
+    const depthA = path.relative(resolvedRoot, a).split(path.sep).filter(Boolean).length;
+    const depthB = path.relative(resolvedRoot, b).split(path.sep).filter(Boolean).length;
+    return depthB - depthA || a.localeCompare(b);
+  });
+
+  const dirDescriptions = new Map<string, string>();
+  const writtenPaths: string[] = [];
+
+  for (const directory of sortedDirs) {
+    const entries: Array<{ type: string; title: string; link: string; desc: string }> = [];
+    const children = fs
+      .readdirSync(directory, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const child of children) {
+      if (RESERVED_OKF_FILENAMES.has(child.name)) continue;
+      const fullChild = path.join(directory, child.name);
+      if (child.isFile() && child.name.endsWith('.md')) {
+        try {
+          const doc = parseOkfDocument(fs.readFileSync(fullChild, 'utf-8'));
+          const fm = doc.frontmatter || {};
+          const title = String(fm.title || path.basename(child.name, '.md'));
+          const desc = String(fm.description || '');
+          const typ = String(fm.type || 'Other');
+          entries.push({ type: typ, title, link: child.name, desc });
+        } catch {
+          // Skip malformed files
+        }
+      } else if (child.isDirectory() && dirsToIndex.has(fullChild)) {
+        const subDesc = dirDescriptions.get(fullChild) || `Concepts in ${child.name}`;
+        entries.push({
+          type: 'Subdirectories',
+          title: child.name,
+          link: `${child.name}/index.md`,
+          desc: subDesc,
+        });
+      }
+    }
+
+    const isRoot = directory === resolvedRoot;
+    const indexPath = path.join(directory, 'index.md');
+
+    if (entries.length === 0) {
+      if (isRoot) {
+        const emptyIndex = [
+          '---',
+          'okf_version: "0.2"',
+          '---',
+          '',
+          '# Knowledge Bundle Index',
+          '',
+          '_No concepts indexed yet. Run Stage 1 (`npm run cli:stage1 -- "<topic>"`) to populate `workspace/bundle/`._',
+          '',
+        ].join('\n');
+        fs.writeFileSync(indexPath, emptyIndex, 'utf-8');
+        writtenPaths.push(indexPath);
+      }
+      continue;
+    }
+
+    const grouped = new Map<string, Array<{ title: string; link: string; desc: string }>>();
+    for (const e of entries) {
+      const groupKey = e.type || 'Other';
+      if (!grouped.has(groupKey)) grouped.set(groupKey, []);
+      grouped.get(groupKey)!.push({ title: e.title, link: e.link, desc: e.desc });
+    }
+
+    const sections: string[] = [];
+    for (const typ of Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b))) {
+      const groupItems = grouped
+        .get(typ)!
+        .sort((a, b) => a.title.toLowerCase().localeCompare(b.title.toLowerCase()));
+      const sectionLines = [`# ${typ}`, ''];
+      for (const item of groupItems) {
+        const suffix = item.desc ? ` - ${item.desc}` : '';
+        sectionLines.push(`* [${item.title}](${item.link})${suffix}`);
+      }
+      sections.push(sectionLines.join('\n'));
+    }
+
+    // SPEC.md §8 & §12: Bundle-root index.md carries okf_version: "0.2"; subdirectory index.md has no frontmatter
+    const indexContent = isRoot
+      ? `---\nokf_version: "0.2"\n---\n\n${sections.join('\n\n')}\n`
+      : `${sections.join('\n\n')}\n`;
+
+    fs.writeFileSync(indexPath, indexContent, 'utf-8');
+    writtenPaths.push(indexPath);
+
+    if (!isRoot) {
+      if (entries.length === 1 && entries[0].desc) {
+        dirDescriptions.set(directory, entries[0].desc);
+      } else {
+        const sampleTitles = entries
+          .slice(0, 3)
+          .map((e) => e.title)
+          .join(', ');
+        dirDescriptions.set(
+          directory,
+          `${entries.length} concept(s) including ${sampleTitles}${entries.length > 3 ? '...' : ''}`
+        );
+      }
+    }
+  }
+
+  return writtenPaths;
+}
+
+/**
+ * Appends a date-grouped entry (`## YYYY-MM-DD`, newest first) to `bundleRoot/log.md` (`SPEC.md` §9).
+ */
+export function appendBundleLog(
+  bundleRoot: string,
+  action: 'Creation' | 'Update' | 'Verification' | 'Deprecation' | 'Initialization',
+  conceptId: string,
+  title: string,
+  detail?: string
+): string {
+  const resolvedRoot = path.resolve(bundleRoot);
+  fs.mkdirSync(resolvedRoot, { recursive: true });
+  const logPath = path.join(resolvedRoot, 'log.md');
+  const today = new Date().toISOString().slice(0, 10);
+  const cleanCid = conceptId.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\.md$/i, '');
+  const suffix = detail ? ` (${detail})` : '';
+  const entryBullet = `* **${action}**: [${title}](/${cleanCid}.md)${suffix}`;
+
+  let existing = '';
+  if (fs.existsSync(logPath)) {
+    existing = fs.readFileSync(logPath, 'utf-8');
+  }
+
+  if (!existing.trim()) {
+    const content = `# Directory Update Log\n\n## ${today}\n${entryBullet}\n`;
+    fs.writeFileSync(logPath, content, 'utf-8');
+    return logPath;
+  }
+
+  const lines = existing.split(/\r?\n/);
+  const todayHeadingIdx = lines.findIndex((l) => l.trim() === `## ${today}`);
+  if (todayHeadingIdx !== -1) {
+    lines.splice(todayHeadingIdx + 1, 0, entryBullet);
+    fs.writeFileSync(logPath, lines.join('\n').trimEnd() + '\n', 'utf-8');
+    return logPath;
+  }
+
+  const firstDateHeadingIdx = lines.findIndex((l) => /^##\s+\d{4}-\d{2}-\d{2}/.test(l.trim()));
+  if (firstDateHeadingIdx !== -1) {
+    lines.splice(firstDateHeadingIdx, 0, `## ${today}`, entryBullet, '');
+    fs.writeFileSync(logPath, lines.join('\n').trimEnd() + '\n', 'utf-8');
+    return logPath;
+  }
+
+  const appended = `${existing.trimEnd()}\n\n## ${today}\n${entryBullet}\n`;
+  fs.writeFileSync(logPath, appended, 'utf-8');
+  return logPath;
+}
+
+/**
+ * Promotes/synchronizes a Stage 1 `research_summary.md` artifact into `workspace/bundle/research/<slug>.md`,
+ * regenerates deterministic `index.md` files, and logs the update in `workspace/bundle/log.md`.
+ */
+export function syncRunToBundle(
+  workspacePath: string,
+  runId: string,
+  options?: {
+    conceptSlug?: string;
+    actionOverride?: 'Creation' | 'Update' | 'Verification';
+  }
+): { conceptId: string; bundleFilePath: string } | null {
+  const resolvedWorkspace = path.resolve(workspacePath);
+  const runDir = path.join(resolvedWorkspace, 'runs', runId);
+  const researchPath = path.join(runDir, 'stages/01_research/output/research_summary.md');
+  if (!fs.existsSync(researchPath)) return null;
+
+  const bundleRoot = path.join(resolvedWorkspace, 'bundle');
+  const doc = parseOkfDocument(fs.readFileSync(researchPath, 'utf-8'));
+  if (!doc.frontmatter.type) {
+    doc.frontmatter.type = 'Research Concept';
+  }
+
+  let slug = options?.conceptSlug || '';
+  if (!slug) {
+    const metaPath = path.join(runDir, 'meta.json');
+    if (fs.existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        const existingCid = String(meta?.okf?.bundleConceptId || '').trim();
+        if (existingCid.startsWith('research/')) {
+          slug = existingCid.slice('research/'.length);
+        }
+      } catch {
+        // Ignore unreadable meta.json
+      }
+    }
+  }
+  if (!slug) {
+    const baseSource = String(doc.frontmatter.title || runId)
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/-\d{10,}$/, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48)
+      .replace(/-+$/g, '');
+    slug = baseSource || 'research-concept';
+  }
+
+  const conceptId = `research/${slug}`;
+  const bundleFilePath = path.join(bundleRoot, `${conceptId}.md`);
+  const writeResult = writeBundleConcept(bundleRoot, conceptId, doc, { mergeExisting: true });
+  regenerateBundleIndexes(bundleRoot);
+
+  const writtenDoc = fs.existsSync(bundleFilePath)
+    ? parseOkfDocument(fs.readFileSync(bundleFilePath, 'utf-8'))
+    : doc;
+  const tier = getOkfTrustTier(writtenDoc.frontmatter);
+  const status = String(writtenDoc.frontmatter.status || 'draft');
+  const action = options?.actionOverride || writeResult.action;
+  appendBundleLog(
+    bundleRoot,
+    action,
+    conceptId,
+    String(writtenDoc.frontmatter.title || slug),
+    `run: ${runId}, status: ${status}, trust_tier: ${tier}`
+  );
+
+  return {
+    conceptId,
+    bundleFilePath,
+  };
+}
+
+// Helper to load ICM Layer 0 (GEMINI.md), Layer 1 (CONTEXT.md), and Layer 3 (_config/voice_guide.md + bundle/index.md) from disk
+export function loadWorkspaceLayers(workspacePath: string) {
   const geminiGuidePath = path.join(workspacePath, 'GEMINI.md');
   const contextGuidePath = path.join(workspacePath, 'CONTEXT.md');
   const toneGuidePath = path.join(workspacePath, '_config/voice_guide.md');
+  const bundleRoot = path.join(workspacePath, 'bundle');
+
+  let bundleContext = '';
+  if (fs.existsSync(bundleRoot) && fs.statSync(bundleRoot).isDirectory()) {
+    const freshSummaries: string[] = [];
+    const staleConceptRelPaths: string[] = [];
+    const deprecatedConceptRelPaths: string[] = [];
+
+    const scanBundleConcepts = (dir: string) => {
+      const entries = fs
+        .readdirSync(dir, { withFileTypes: true })
+        .sort((a, b) => a.name.localeCompare(b.name));
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          scanBundleConcepts(full);
+        } else if (
+          entry.isFile() &&
+          entry.name.endsWith('.md') &&
+          !RESERVED_OKF_FILENAMES.has(entry.name)
+        ) {
+          try {
+            const doc = parseOkfDocument(fs.readFileSync(full, 'utf-8'));
+            const relFile = path.relative(bundleRoot, full).replace(/\\/g, '/');
+            const relCid = relFile.replace(/\.md$/i, '');
+            const status = String(doc.frontmatter.status || 'stable').toLowerCase();
+            if (status === 'deprecated') {
+              deprecatedConceptRelPaths.push(`\`${relFile}\``);
+            } else if (isOkfStale(doc.frontmatter)) {
+              staleConceptRelPaths.push(`\`${relFile}\``);
+            } else {
+              const tier = getOkfTrustTier(doc.frontmatter);
+              freshSummaries.push(
+                `- [/${relCid}.md] **${doc.frontmatter.title || relCid}** (${doc.frontmatter.type || 'Concept'}, trust_tier: ${tier}): ${doc.frontmatter.description || ''}`
+              );
+            }
+          } catch {
+            // Ignore unreadable concept files
+          }
+        }
+      }
+    };
+
+    scanBundleConcepts(bundleRoot);
+    if (
+      freshSummaries.length > 0 ||
+      staleConceptRelPaths.length > 0 ||
+      deprecatedConceptRelPaths.length > 0
+    ) {
+      const lines: string[] = [
+        'Progressive Disclosure Index (`workspace/bundle/index.md`) — Fresh Active Concepts (`now < stale_after`):',
+        ...freshSummaries.slice(0, 25),
+      ];
+      if (staleConceptRelPaths.length > 0) {
+        lines.push(
+          `Skipped stale concepts (${staleConceptRelPaths.length}): ${staleConceptRelPaths.join(', ')}`
+        );
+      }
+      if (deprecatedConceptRelPaths.length > 0) {
+        lines.push(
+          `Skipped deprecated concepts (${deprecatedConceptRelPaths.length}): ${deprecatedConceptRelPaths.join(', ')}`
+        );
+      }
+      bundleContext = lines.join('\n');
+    }
+  }
 
   return {
     globalIdentity: fs.existsSync(geminiGuidePath)
@@ -858,6 +2641,7 @@ function loadWorkspaceLayers(workspacePath: string) {
     toneGuide: fs.existsSync(toneGuidePath)
       ? fs.readFileSync(toneGuidePath, 'utf-8')
       : 'Maintain a professional and clear tone.',
+    bundleContext,
   };
 }
 
@@ -1001,11 +2785,12 @@ export async function runStage1Flow(input: {
   success: boolean;
   runId: string;
   outputPath: string;
+  bundleConceptId?: string;
   dryRun?: boolean;
 }> {
   const workspacePath = path.resolve(input.workspaceRoot);
   const runDir = path.join(workspacePath, 'runs', input.runId);
-  const { globalIdentity, workspaceContext } = loadWorkspaceLayers(workspacePath);
+  const { globalIdentity, workspaceContext, bundleContext } = loadWorkspaceLayers(workspacePath);
 
   const contract = loadStagePromptContract('01_research');
   const stage1ThinkingLevel = normalizeThinkingLevel(input.thinkingLevel, contract.thinkingLevel);
@@ -1021,11 +2806,12 @@ export async function runStage1Flow(input: {
   const researchStreamTarget = path.join(stage1Dir, 'output/research_stream.md');
   fs.mkdirSync(path.dirname(researchFileTarget), { recursive: true });
 
-  // Assemble Layer 0 + Layer 1 + Layer 2 prompt and persist to stages/01_research/input/prompt_assembled.md
+  // Assemble Layer 0 + Layer 1 + Layer 2 + Layer 3 (OKF Bundle Index) prompt and persist to stages/01_research/input/prompt_assembled.md
   const assembledPrompt = renderPromptTemplate(contract.template, {
     topic: input.topic,
     globalIdentity,
     workspaceContext,
+    bundleContext,
   });
 
   const assembledInputPath = writeStageAssembledInput(
@@ -1042,6 +2828,23 @@ export async function runStage1Flow(input: {
   );
 
   if (input.dryRun) {
+    const metaPath = path.join(runDir, 'meta.json');
+    try {
+      const meta: Record<string, any> = fs.existsSync(metaPath)
+        ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+        : {
+            runId: input.runId,
+            topic: input.topic,
+            model: GEMINI_4_ARGON_MODEL,
+            researchThinkingLevel: stage1ThinkingLevel,
+            createdAt: new Date().toISOString(),
+          };
+      meta.status = 'stage1_dry_run';
+      meta.dryRun = true;
+      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    } catch {
+      // Ignore metadata update errors
+    }
     printDryRunPreview('01_research', assembledInputPath, assembledPrompt, {
       thinkingLevel: stage1ThinkingLevel,
       maxOutputTokens: contract.maxOutputTokens,
@@ -1103,7 +2906,10 @@ export async function runStage1Flow(input: {
     );
   }
 
-  const cleanedText = await cleanGroundingLinks(stage1Response.text, stage1Response.steps);
+  const cleanedText = await cleanGroundingLinks(stage1Response.text, stage1Response.steps, {
+    topic: input.topic,
+    model: GEMINI_4_ARGON_MODEL,
+  });
   fs.writeFileSync(researchFileTarget, cleanedText, 'utf-8');
   if (fs.existsSync(researchStreamTarget)) {
     try {
@@ -1112,6 +2918,9 @@ export async function runStage1Flow(input: {
       // Ignore cleanup errors
     }
   }
+
+  const stage1Doc = parseOkfDocument(cleanedText);
+  const syncedBundle = syncRunToBundle(workspacePath, input.runId);
 
   const durationMs = Date.now() - startTimeMs;
   const usage = stage1Response.usage;
@@ -1130,32 +2939,272 @@ export async function runStage1Flow(input: {
     `[Stage 1 Telemetry]: input=${usage.inputTokens}, thoughts=${usage.thoughtsTokens}, output=${usage.outputTokens}, total=${usage.totalTokens} tokens (${(durationMs / 1000).toFixed(1)}s)`
   );
   console.log(`Stage 1 complete. Output written to: ${researchFileTarget}`);
+  if (syncedBundle) {
+    console.log(
+      `[OKF Bundle Sync]: Synced concept '${syncedBundle.conceptId}' -> ${syncedBundle.bundleFilePath}`
+    );
+  }
 
   const metaPath = path.join(runDir, 'meta.json');
-  if (fs.existsSync(metaPath)) {
-    try {
-      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-      meta.stage1Telemetry = {
-        thinkingLevel: usedThinkingLevel,
-        thoughtSteps: stage1Response.thoughts.length,
-        searchQueries: stage1Response.searchQueries,
-        inputTokens: usage.inputTokens,
-        thoughtsTokens: usage.thoughtsTokens,
-        outputTokens: usage.outputTokens,
-        totalTokens: usage.totalTokens,
-        durationMs,
-      };
-      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
-    } catch {
-      // Ignore metadata update errors
-    }
+  try {
+    const meta: Record<string, any> = fs.existsSync(metaPath)
+      ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+      : {
+          runId: input.runId,
+          topic: input.topic,
+          model: GEMINI_4_ARGON_MODEL,
+          researchThinkingLevel: usedThinkingLevel,
+          createdAt: new Date().toISOString(),
+          status: 'stage1_completed',
+        };
+    const trustTier = getOkfTrustTier(stage1Doc.frontmatter);
+    const stale = isOkfStale(stage1Doc.frontmatter);
+    const sourcesCount = Array.isArray(stage1Doc.frontmatter.sources)
+      ? stage1Doc.frontmatter.sources.length
+      : 0;
+    meta.stage1Telemetry = {
+      thinkingLevel: usedThinkingLevel,
+      thoughtSteps: stage1Response.thoughts.length,
+      searchQueries: stage1Response.searchQueries,
+      inputTokens: usage.inputTokens,
+      thoughtsTokens: usage.thoughtsTokens,
+      outputTokens: usage.outputTokens,
+      totalTokens: usage.totalTokens,
+      durationMs,
+      trust_tier: trustTier,
+      is_stale: stale,
+      sourcesCount,
+    };
+    meta.okf = {
+      type: stage1Doc.frontmatter.type || 'Research Concept',
+      title: stage1Doc.frontmatter.title || input.topic,
+      status: stage1Doc.frontmatter.status || 'draft',
+      trust_tier: trustTier,
+      is_stale: stale,
+      stale_after: stage1Doc.frontmatter.stale_after,
+      generated: stage1Doc.frontmatter.generated,
+      verified: normalizeVerified(stage1Doc.frontmatter),
+      sourcesCount,
+      bundleConceptId: syncedBundle?.conceptId,
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+  } catch {
+    // Ignore metadata update errors
   }
 
   return {
     success: true,
     runId: input.runId,
     outputPath: researchFileTarget,
+    bundleConceptId: syncedBundle?.conceptId,
   };
+}
+
+function normalizeVerifierActor(actor?: string): string {
+  const raw = (actor || '').trim();
+  if (!raw) {
+    const user = process.env.USER || process.env.USERNAME || 'reviewer';
+    return `human:${user}`;
+  }
+  if (raw.startsWith('human:') || raw.startsWith('process:') || raw.includes('/')) {
+    return raw;
+  }
+  return `human:${raw}`;
+}
+
+/**
+ * Stamps OKF v0.2 `verified: [{ by, at }]` and `status: stable` onto a Stage 1 `research_summary.md`
+ * (by `<runId>`) or a bundle concept `.md` file, updates `meta.json`, and syncs to `workspace/bundle/`.
+ */
+export function verifyOkfConcept(
+  runIdOrPath: string,
+  options?: {
+    workspaceRoot?: string;
+    by?: string;
+    at?: string;
+  }
+): {
+  filePath: string;
+  runId?: string;
+  bundleConceptId?: string;
+  status: string;
+  trust_tier: TrustTier;
+  is_stale: boolean;
+  verified: OKFActorEvent[];
+} {
+  const workspacePath = path.resolve(options?.workspaceRoot || './workspace');
+  const actor = normalizeVerifierActor(options?.by);
+  const atIso = options?.at || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  const candidateRunDir = path.join(workspacePath, 'runs', runIdOrPath);
+  const candidateRunResearch = path.join(
+    candidateRunDir,
+    'stages/01_research/output/research_summary.md'
+  );
+
+  let targetFilePath = '';
+  let detectedRunId: string | undefined;
+
+  if (fs.existsSync(candidateRunResearch)) {
+    targetFilePath = candidateRunResearch;
+    detectedRunId = runIdOrPath;
+  } else if (fs.existsSync(path.resolve(runIdOrPath))) {
+    targetFilePath = path.resolve(runIdOrPath);
+  } else {
+    const bundleCandidate = path.join(
+      workspacePath,
+      'bundle',
+      runIdOrPath.endsWith('.md') ? runIdOrPath : `${runIdOrPath}.md`
+    );
+    if (fs.existsSync(bundleCandidate)) {
+      targetFilePath = bundleCandidate;
+    } else {
+      throw new Error(
+        `Could not find Stage 1 research artifact or OKF concept for "${runIdOrPath}".`
+      );
+    }
+  }
+
+  const raw = fs.readFileSync(targetFilePath, 'utf-8');
+  const doc = parseOkfDocument(raw);
+  if (!doc.frontmatter.type) {
+    doc.frontmatter.type = 'Research Concept';
+  }
+
+  const existingVerified = normalizeVerified(doc.frontmatter);
+  existingVerified.push({ by: actor, at: atIso });
+  doc.frontmatter.verified = existingVerified;
+  doc.frontmatter.status = 'stable';
+
+  const serialized = serializeOkfDocument(doc);
+  fs.writeFileSync(targetFilePath, serialized, 'utf-8');
+
+  const trustTier = getOkfTrustTier(doc.frontmatter);
+  const stale = isOkfStale(doc.frontmatter);
+  let bundleConceptId: string | undefined;
+
+  if (detectedRunId) {
+    const synced = syncRunToBundle(workspacePath, detectedRunId, {
+      actionOverride: 'Verification',
+    });
+    bundleConceptId = synced?.conceptId;
+
+    const metaPath = path.join(candidateRunDir, 'meta.json');
+    try {
+      const meta: Record<string, any> = fs.existsSync(metaPath)
+        ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+        : {
+            runId: detectedRunId,
+            topic: doc.frontmatter.title || detectedRunId,
+            model: GEMINI_4_ARGON_MODEL,
+            createdAt: new Date().toISOString(),
+            status: 'stage1_verified',
+          };
+      const sourcesCount = Array.isArray(doc.frontmatter.sources)
+        ? doc.frontmatter.sources.length
+        : 0;
+      if (meta.status === 'stage1_completed') {
+        meta.status = 'stage1_verified';
+      }
+      meta.okf = {
+        ...(meta.okf || {}),
+        type: doc.frontmatter.type,
+        title: doc.frontmatter.title,
+        status: doc.frontmatter.status,
+        trust_tier: trustTier,
+        is_stale: stale,
+        stale_after: doc.frontmatter.stale_after,
+        generated: doc.frontmatter.generated,
+        verified: existingVerified,
+        sourcesCount,
+        bundleConceptId: bundleConceptId || meta.okf?.bundleConceptId,
+      };
+      if (meta.stage1Telemetry) {
+        meta.stage1Telemetry.trust_tier = trustTier;
+        meta.stage1Telemetry.is_stale = stale;
+      }
+      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    } catch {
+      // Ignore meta update errors
+    }
+  } else {
+    const bundleRoot = path.join(workspacePath, 'bundle');
+    if (targetFilePath.startsWith(bundleRoot)) {
+      const relCid = path
+        .relative(bundleRoot, targetFilePath)
+        .replace(/\\/g, '/')
+        .replace(/\.md$/i, '');
+      bundleConceptId = relCid;
+      regenerateBundleIndexes(bundleRoot);
+      appendBundleLog(
+        bundleRoot,
+        'Verification',
+        relCid,
+        String(doc.frontmatter.title || relCid),
+        `verified by ${actor}, trust_tier: ${trustTier}`
+      );
+    }
+  }
+
+  console.log(
+    `[OKF Verification Gate]: Verified ${targetFilePath} (by: ${actor}, status: stable, trust_tier: ${trustTier}, is_stale: ${stale})`
+  );
+
+  return {
+    filePath: targetFilePath,
+    runId: detectedRunId,
+    bundleConceptId,
+    status: String(doc.frontmatter.status),
+    trust_tier: trustTier,
+    is_stale: stale,
+    verified: existingVerified,
+  };
+}
+
+/**
+ * Strips raw URLs (`https://...`), Markdown links (`[label](url)` and internal `[label](/concept.md)`),
+ * `verified-source:...` tokens, and OKF footnote tags (`[^id]`) from spoken script text so voiceover
+ * deliverables (`script_draft.json`) never suffer URL or markup leakage.
+ */
+export function sanitizeSpokenScript(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/\s*\(\s*(?<!\!)\[([^\]]+)\]\((?:https?:\/\/|verified-source:)[^\s)]+\)\s*\)/g, '')
+    .replace(
+      /(?<!\!)\[([^\]]+)\]\((?:https?:\/\/|verified-source:|\/|\.\.?\/|[^)\s]+\.md)[^\s)]*\)/g,
+      '$1'
+    )
+    .replace(/\[\^[A-Za-z0-9_\-]+\]:\s*.*$/gm, '')
+    .replace(/\[\^[A-Za-z0-9_\-]+\]/g, '')
+    .replace(/\s*\(\s*(?:https?:\/\/|verified-source:)[^\s)]+\s*\)/g, '')
+    .replace(/(?:https?:\/\/|verified-source:)\S+/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\s+([.,;!?])/g, '$1')
+    .trim();
+}
+
+function formatResearchForStage2Prompt(doc: OKFDocument, rawText: string): string {
+  if (!doc.frontmatter || Object.keys(doc.frontmatter).length === 0) {
+    return rawText;
+  }
+  const sanitizedFm: OKFFrontmatter = {
+    ...doc.frontmatter,
+  };
+  if (Array.isArray(sanitizedFm.sources)) {
+    sanitizedFm.sources = sanitizedFm.sources.map((s) => ({
+      id: s.id,
+      resource: s.title ? `verified-source:${s.id || 'ref'}` : s.resource,
+      title: s.title || s.id || 'Verified Source',
+      ...(s.author ? { author: s.author } : {}),
+      ...(s.usage_count !== undefined ? { usage_count: s.usage_count } : {}),
+      ...(s.last_modified ? { last_modified: s.last_modified } : {}),
+      ...(s.usage_window ? { usage_window: s.usage_window } : {}),
+    }));
+  }
+  return serializeOkfDocument({
+    frontmatter: sanitizedFm,
+    body: doc.body,
+  });
 }
 
 // 2. Standalone Stage 2 Scriptwriting Runner (Reads Verified Stage 1 Artifact from Disk)
@@ -1167,6 +3216,8 @@ export async function runStage2Flow(input: {
 }): Promise<{
   success: boolean;
   outputPath: string;
+  trust_tier: TrustTier;
+  is_stale: boolean;
   dryRun?: boolean;
 }> {
   const workspacePath = path.resolve(input.workspaceRoot);
@@ -1185,16 +3236,37 @@ export async function runStage2Flow(input: {
 
   fs.mkdirSync(path.dirname(scriptOutputTarget), { recursive: true });
 
+  const startTimeMs = Date.now();
+  const activeResearchData = fs.readFileSync(researchFileTarget, 'utf-8');
+  const researchDoc = parseOkfDocument(activeResearchData);
+  const trustTier = getOkfTrustTier(researchDoc.frontmatter);
+  const stale = isOkfStale(researchDoc.frontmatter);
+  const docStatus = String(researchDoc.frontmatter.status || 'stable');
+  const sourcesCount = Array.isArray(researchDoc.frontmatter.sources)
+    ? researchDoc.frontmatter.sources.length
+    : 0;
+
   console.log(
     `--- Executing Stage 2: Scriptwriting for Run: ${input.runId} [model: ${GEMINI_4_ARGON_MODEL}, thinkingLevel: ${stage2ThinkingLevel}${input.dryRun ? ', DRY-RUN' : ''}] ---`
   );
+  console.log(
+    `[Stage 2 OKF Gate]: status=${docStatus}, trust_tier=${trustTier}, is_stale=${stale}, sources=${sourcesCount}`
+  );
+  if (stale) {
+    console.warn(
+      `[Stage 2 OKF Warning]: Source concept is STALE (stale_after: ${researchDoc.frontmatter.stale_after}). Consider refreshing Stage 1.`
+    );
+  } else if (trustTier === 'unverified') {
+    console.log(
+      `[Stage 2 OKF Advisory]: Consuming unverified Stage 1 artifact (run 'npm run cli:verify -- ${input.runId}' to stamp human-reviewed sign-off).`
+    );
+  }
 
-  const startTimeMs = Date.now();
-  const activeResearchData = fs.readFileSync(researchFileTarget, 'utf-8');
+  const stage2ResearchInput = formatResearchForStage2Prompt(researchDoc, activeResearchData);
 
   // Assemble Layer 0 + Layer 1 + Layer 2 + Layer 3 + Layer 4 prompt and persist to stages/02_script/input/prompt_assembled.md
   const assembledPrompt = renderPromptTemplate(contract.template, {
-    researchFile: activeResearchData,
+    researchFile: stage2ResearchInput,
     toneRules: toneGuide,
     globalIdentity,
     workspaceContext,
@@ -1213,7 +3285,47 @@ export async function runStage2Flow(input: {
     assembledPrompt
   );
 
+  const updateMetaWithStage2Okf = (telemetryExtra?: Record<string, any>) => {
+    const metaPath = path.join(runDir, 'meta.json');
+    try {
+      const meta: Record<string, any> = fs.existsSync(metaPath)
+        ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+        : {
+            runId: input.runId,
+            topic: researchDoc.frontmatter.title || input.runId,
+            model: GEMINI_4_ARGON_MODEL,
+            scriptThinkingLevel: stage2ThinkingLevel,
+            createdAt: new Date().toISOString(),
+            status: input.dryRun ? 'stage2_dry_run' : 'completed',
+          };
+      meta.okf = {
+        ...(meta.okf || {}),
+        type: researchDoc.frontmatter.type || 'Research Concept',
+        title: researchDoc.frontmatter.title || meta.topic,
+        status: docStatus,
+        trust_tier: trustTier,
+        is_stale: stale,
+        stale_after: researchDoc.frontmatter.stale_after,
+        generated: researchDoc.frontmatter.generated,
+        verified: normalizeVerified(researchDoc.frontmatter),
+        sourcesCount,
+      };
+      meta.stage2Telemetry = {
+        ...(meta.stage2Telemetry || {}),
+        trust_tier: trustTier,
+        is_stale: stale,
+        sourceStatus: docStatus,
+        sourcesCount,
+        ...(telemetryExtra || {}),
+      };
+      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    } catch {
+      // Ignore metadata update errors
+    }
+  };
+
   if (input.dryRun) {
+    updateMetaWithStage2Okf();
     printDryRunPreview('02_script', assembledInputPath, assembledPrompt, {
       thinkingLevel: stage2ThinkingLevel,
       maxOutputTokens: contract.maxOutputTokens,
@@ -1225,6 +3337,8 @@ export async function runStage2Flow(input: {
     return {
       success: true,
       outputPath: assembledInputPath,
+      trust_tier: trustTier,
+      is_stale: stale,
       dryRun: true,
     };
   }
@@ -1248,9 +3362,15 @@ export async function runStage2Flow(input: {
 
   if (contract.outputFormat === 'json') {
     const parsedJson = JSON.parse(stage2Response.text);
+    if (typeof parsedJson.title === 'string') {
+      parsedJson.title = sanitizeSpokenScript(parsedJson.title);
+    }
+    if (typeof parsedJson.scriptBody === 'string') {
+      parsedJson.scriptBody = sanitizeSpokenScript(parsedJson.scriptBody);
+    }
     fs.writeFileSync(scriptOutputTarget, JSON.stringify(parsedJson, null, 2), 'utf-8');
   } else {
-    fs.writeFileSync(scriptOutputTarget, stage2Response.text, 'utf-8');
+    fs.writeFileSync(scriptOutputTarget, sanitizeSpokenScript(stage2Response.text), 'utf-8');
   }
 
   const durationMs = Date.now() - startTimeMs;
@@ -1270,28 +3390,21 @@ export async function runStage2Flow(input: {
   );
   console.log(`Stage 2 complete. Output written to: ${scriptOutputTarget}`);
 
-  const metaPath = path.join(runDir, 'meta.json');
-  if (fs.existsSync(metaPath)) {
-    try {
-      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-      meta.stage2Telemetry = {
-        thinkingLevel: usedThinkingLevel,
-        thoughtSteps: stage2Response.thoughts.length,
-        inputTokens: usage.inputTokens,
-        thoughtsTokens: usage.thoughtsTokens,
-        outputTokens: usage.outputTokens,
-        totalTokens: usage.totalTokens,
-        durationMs,
-      };
-      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
-    } catch {
-      // Ignore metadata update errors
-    }
-  }
+  updateMetaWithStage2Okf({
+    thinkingLevel: usedThinkingLevel,
+    thoughtSteps: stage2Response.thoughts.length,
+    inputTokens: usage.inputTokens,
+    thoughtsTokens: usage.thoughtsTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    durationMs,
+  });
 
   return {
     success: true,
     outputPath: scriptOutputTarget,
+    trust_tier: trustTier,
+    is_stale: stale,
   };
 }
 
@@ -1314,7 +3427,8 @@ export async function icmOrchestratorFlow(input: {
   });
 
   // --- INTERMISSION: HUMAN-IN-THE-LOOP FILESYSTEM GATE ---
-  // Between Stage 1 and Stage 2, the reviewer can inspect/edit `research_summary.md`
+  // Between Stage 1 and Stage 2, the reviewer can inspect/edit `research_summary.md`,
+  // stamp human sign-off via `npm run cli:verify -- <runId>`,
   // and re-run Stage 2 standalone at any time via `runStage2Flow` (`npm run cli:stage2 -- <runId>`).
 
   const stage2Result = await runStage2Flow({
@@ -1329,36 +3443,994 @@ export async function icmOrchestratorFlow(input: {
   };
 }
 
+const OKF_TYPE_PALETTE: Record<string, string> = {
+  'Research Concept': '#2563eb',
+  'BigQuery Dataset': '#8b5cf6',
+  'BigQuery Table': '#3b82f6',
+  Reference: '#10b981',
+  Metric: '#0d9488',
+  Playbook: '#d97706',
+  'Attested Computation': '#7c3aed',
+};
+const DEFAULT_OKF_NODE_COLOR = '#64748b';
+
+export interface OKFConceptNode {
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  resource: string;
+  tags: string[];
+  body: string;
+  status: string;
+  generated: OKFActorEvent | Record<string, any>;
+  verified: OKFActorEvent[];
+  stale_after: string;
+  sources: OKFSource[];
+  trust_tier: TrustTier;
+  stale: boolean;
+  links_to: string[];
+}
+
+function resolveBundleLinkTarget(
+  rawTarget: string,
+  docDir: string,
+  bundleRootResolved: string
+): string | null {
+  const cleaned = rawTarget.trim().replace(/#[A-Za-z0-9_\-]*$/, '');
+  if (!cleaned || cleaned.includes('://') || cleaned.startsWith('mailto:') || cleaned.startsWith('#')) {
+    return null;
+  }
+
+  let resolvedAbs: string;
+  if (cleaned.startsWith('/')) {
+    // SPEC.md §6.1: Bundle-root-relative path (fixes OKF reference_agent Trap 1)
+    resolvedAbs = path.resolve(bundleRootResolved, cleaned.slice(1));
+  } else if (cleaned.startsWith('./') || cleaned.startsWith('../')) {
+    // SPEC.md §6.1: Explicit file-relative path (`./` or `../`)
+    resolvedAbs = path.resolve(docDir, cleaned);
+  } else {
+    // Bare path (e.g. `sibling.md` or `references/skills/run-on-bq.md` per SPEC.md §6.3 & §10.2):
+    // Prefer file-relative if it exists in docDir; fall back to bundle-root-relative if it exists at bundleRoot or starts with `references/`.
+    const docRelCandidate = path.resolve(docDir, cleaned);
+    const rootRelCandidate = path.resolve(bundleRootResolved, cleaned);
+    if (
+      fs.existsSync(docRelCandidate) ||
+      fs.existsSync(`${docRelCandidate}.md`)
+    ) {
+      resolvedAbs = docRelCandidate;
+    } else if (
+      fs.existsSync(rootRelCandidate) ||
+      fs.existsSync(`${rootRelCandidate}.md`) ||
+      cleaned.startsWith('references/')
+    ) {
+      resolvedAbs = rootRelCandidate;
+    } else {
+      resolvedAbs = docRelCandidate;
+    }
+  }
+
+  const relToBundle = path.relative(bundleRootResolved, resolvedAbs).replace(/\\/g, '/');
+  if (!relToBundle || relToBundle.startsWith('..') || path.isAbsolute(relToBundle)) {
+    return null;
+  }
+
+  const withoutExt = relToBundle.replace(/\.md$/i, '');
+  const baseName = path.posix.basename(`${withoutExt}.md`);
+  if (RESERVED_OKF_FILENAMES.has(baseName)) {
+    return null;
+  }
+  return withoutExt;
+}
+
+/**
+ * Extracts all internal concept links from both Markdown body links (`[...](/foo.md)` and `[...](../bar.md)`)
+ * and path-valued frontmatter fields (`resource`, `sources[].resource`, `computation`, `executor.resource`, `attester.resource`).
+ */
+export function extractConceptLinks(
+  body: string,
+  frontmatter: OKFFrontmatter,
+  docDir: string,
+  bundleRoot: string
+): string[] {
+  const bundleRootResolved = path.resolve(bundleRoot);
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  const addCandidate = (raw: string) => {
+    const resolved = resolveBundleLinkTarget(raw, docDir, bundleRootResolved);
+    if (resolved && !seen.has(resolved)) {
+      seen.add(resolved);
+      out.push(resolved);
+    }
+  };
+
+  const mdLinkRegex = /\]\(([^)\s]+\.md(?:#[A-Za-z0-9_\-]*)?)\)/gi;
+  for (const m of body.matchAll(mdLinkRegex)) {
+    addCandidate(m[1]);
+  }
+
+  const pathCandidates: string[] = [];
+  if (typeof frontmatter?.resource === 'string') pathCandidates.push(frontmatter.resource);
+  if (typeof frontmatter?.computation === 'string') pathCandidates.push(frontmatter.computation);
+  if (typeof frontmatter?.executor?.resource === 'string') {
+    pathCandidates.push(frontmatter.executor.resource);
+  }
+  if (typeof frontmatter?.attester?.resource === 'string') {
+    pathCandidates.push(frontmatter.attester.resource);
+  }
+  if (Array.isArray(frontmatter?.sources)) {
+    for (const s of frontmatter.sources) {
+      if (s && typeof s.resource === 'string') {
+        pathCandidates.push(s.resource);
+      }
+    }
+  }
+
+  for (const candidate of pathCandidates) {
+    if (candidate.endsWith('.md') || candidate.startsWith('/') || candidate.startsWith('.')) {
+      addCandidate(candidate);
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Walks an OKF v0.2 bundle directory and returns all parsed Concept nodes (excluding both `index.md` and `log.md`).
+ */
+export function walkBundleConcepts(bundleRoot: string): OKFConceptNode[] {
+  const resolvedRoot = path.resolve(bundleRoot);
+  if (!fs.existsSync(resolvedRoot)) return [];
+
+  const mdFiles: string[] = [];
+  const collectMd = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        collectMd(full);
+      } else if (
+        entry.isFile() &&
+        entry.name.endsWith('.md') &&
+        !RESERVED_OKF_FILENAMES.has(entry.name)
+      ) {
+        mdFiles.push(full);
+      }
+    }
+  };
+  collectMd(resolvedRoot);
+  mdFiles.sort((a, b) => a.localeCompare(b));
+
+  const concepts: OKFConceptNode[] = [];
+  for (const mdPath of mdFiles) {
+    const conceptId = path
+      .relative(resolvedRoot, mdPath)
+      .replace(/\\/g, '/')
+      .replace(/\.md$/i, '');
+    let doc: OKFDocument;
+    try {
+      doc = parseOkfDocument(fs.readFileSync(mdPath, 'utf-8'));
+    } catch {
+      continue;
+    }
+
+    const fm = doc.frontmatter || {};
+    const rawTags = fm.tags || [];
+    const tags = Array.isArray(rawTags) ? rawTags.map(String) : [String(rawTags)];
+    const generated = fm.generated && typeof fm.generated === 'object' ? fm.generated : {};
+    const rawSources = fm.sources;
+    const sources: OKFSource[] = Array.isArray(rawSources)
+      ? rawSources.filter((s) => s && typeof s === 'object')
+      : rawSources && typeof rawSources === 'object'
+        ? [rawSources as OKFSource]
+        : [];
+
+    concepts.push({
+      id: conceptId,
+      type: String(fm.type || 'Unknown'),
+      title: String(fm.title || conceptId),
+      description: String(fm.description || ''),
+      resource: String(fm.resource || ''),
+      tags,
+      body: doc.body || '',
+      status: String(fm.status || 'stable'),
+      generated,
+      verified: normalizeVerified(fm),
+      stale_after: String(fm.stale_after || ''),
+      sources,
+      trust_tier: getOkfTrustTier(fm),
+      stale: isOkfStale(fm),
+      links_to: extractConceptLinks(doc.body || '', fm, path.dirname(mdPath), resolvedRoot),
+    });
+  }
+
+  return concepts;
+}
+
+const OKF_VIZ_CSS = `
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  color: #0f172a;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+.title strong { font-size: 16px; margin-right: 8px; }
+.muted { color: #64748b; font-size: 12px; }
+.controls { display: flex; gap: 8px; }
+.controls input, .controls select, .controls button {
+  font-size: 13px;
+  padding: 5px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #fff;
+}
+.controls input { width: 220px; }
+.controls button { cursor: pointer; background: #f1f5f9; }
+.controls button:hover { background: #e2e8f0; }
+main { display: flex; flex: 1; min-height: 0; }
+#graph {
+  flex: 1 1 60%;
+  background: #fff;
+  border-right: 1px solid #e2e8f0;
+  min-width: 0;
+  position: relative;
+}
+#detail {
+  flex: 0 0 40%;
+  overflow-y: auto;
+  padding: 18px 22px;
+  background: #fff;
+}
+#detail-empty { text-align: center; margin-top: 40px; }
+.detail-header { margin-bottom: 12px; }
+.detail-header h1 { font-size: 18px; margin: 4px 0 2px; font-weight: 600; }
+.type-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+dl.frontmatter {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  row-gap: 4px;
+  column-gap: 12px;
+  margin: 8px 0 12px;
+  font-size: 13px;
+}
+dl.frontmatter dt { color: #64748b; font-weight: 500; }
+dl.frontmatter dd { margin: 0; }
+dl.frontmatter a { color: #2563eb; word-break: break-all; }
+.tag {
+  display: inline-block;
+  padding: 1px 6px;
+  margin: 0 4px 2px 0;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 11px;
+}
+.badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.badge.status-stable { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+.badge.status-draft { background: #fefce8; color: #a16207; border-color: #fde68a; }
+.badge.status-deprecated { background: #f1f5f9; color: #64748b; border-color: #cbd5e1; text-decoration: line-through; }
+.badge.trust-unverified { background: #f1f5f9; color: #64748b; border-color: #cbd5e1; }
+.badge.trust-machine-confirmed { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+.badge.trust-human-reviewed { background: #f5f3ff; color: #6d28d9; border-color: #ddd6fe; }
+.badge.stale { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+.badge.fresh { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+.sources-list { padding-left: 18px; margin: 0; }
+.sources-list li { margin: 1px 0; }
+hr { border: none; border-top: 1px solid #e2e8f0; margin: 14px 0; }
+#detail-body { font-size: 13px; line-height: 1.55; }
+#detail-body h1 { font-size: 16px; margin: 18px 0 6px; padding-bottom: 4px; border-bottom: 1px solid #e2e8f0; }
+#detail-body h2 { font-size: 14px; margin: 14px 0 4px; }
+#detail-body h3 { font-size: 13px; margin: 12px 0 4px; }
+#detail-body p { margin: 6px 0; }
+#detail-body code {
+  background: #f1f5f9;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+}
+#detail-body pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+}
+#detail-body pre code { background: transparent; color: inherit; padding: 0; }
+#detail-body ul, #detail-body ol { padding-left: 22px; margin: 6px 0; }
+#detail-body li { margin: 2px 0; }
+#detail-body table { border-collapse: collapse; margin: 8px 0; }
+#detail-body th, #detail-body td { border: 1px solid #e2e8f0; padding: 4px 8px; font-size: 12px; }
+#detail-body a.internal { color: #2563eb; cursor: pointer; font-weight: 500; }
+#detail-body a.external { color: #2563eb; }
+#detail-body sup.fn-ref { font-size: 10px; margin-left: 2px; }
+#detail-body sup.fn-ref a { color: #2563eb; text-decoration: none; font-weight: 600; }
+#detail-body section.footnotes { margin-top: 16px; padding-top: 8px; border-top: 1px solid #e2e8f0; font-size: 12px; color: #475569; }
+#detail-body section.footnotes ul { padding-left: 18px; margin: 4px 0; }
+#detail-backlinks { margin-top: 18px; }
+#detail-backlinks h2 { font-size: 13px; color: #64748b; margin-bottom: 6px; }
+#detail-backlinks ul { padding-left: 18px; }
+#detail-backlinks a { color: #2563eb; cursor: pointer; }
+`.trim();
+
+const OKF_VIZ_JS = `
+(function () {
+  const bundle = window.BUNDLE;
+  const bundleName = window.BUNDLE_NAME;
+  document.title = bundleName + " — OKF v0.2 Viewer";
+  document.getElementById("bundle-name").textContent = bundleName;
+
+  const typeSelect = document.getElementById("filter-type");
+  for (const t of bundle.types) {
+    const opt = document.createElement("option");
+    opt.value = t;
+    opt.textContent = t;
+    typeSelect.appendChild(opt);
+  }
+
+  const backlinks = {};
+  for (const edge of bundle.edges) {
+    const { source, target } = edge.data;
+    (backlinks[target] ||= []).push(source);
+  }
+
+  const nodeIndex = {};
+  for (const n of bundle.nodes) nodeIndex[n.data.id] = n.data;
+
+  const cy = cytoscape({
+    container: document.getElementById("graph"),
+    elements: [...bundle.nodes, ...bundle.edges],
+    style: [
+      {
+        selector: "node",
+        style: {
+          "background-color": "data(color)",
+          "label": "data(label)",
+          "color": "#0f172a",
+          "font-size": 11,
+          "text-valign": "bottom",
+          "text-margin-y": 4,
+          "text-wrap": "wrap",
+          "text-max-width": 120,
+          "width": "data(size)",
+          "height": "data(size)",
+          "border-width": 1,
+          "border-color": "#0f172a",
+        },
+      },
+      {
+        selector: "node[?stale]",
+        style: {
+          "border-width": 2,
+          "border-color": "#b91c1c",
+          "border-style": "dashed",
+        },
+      },
+      {
+        selector: 'node[status = "deprecated"]',
+        style: { "opacity": 0.55 },
+      },
+      {
+        selector: "node:selected",
+        style: {
+          "border-width": 3,
+          "border-color": "#f59e0b",
+        },
+      },
+      {
+        selector: "edge",
+        style: {
+          "width": 1.5,
+          "line-color": "#cbd5e1",
+          "target-arrow-color": "#cbd5e1",
+          "target-arrow-shape": "triangle",
+          "curve-style": "bezier",
+          "arrow-scale": 0.9,
+        },
+      },
+      {
+        selector: "edge:selected",
+        style: {
+          "line-color": "#f59e0b",
+          "target-arrow-color": "#f59e0b",
+          "width": 2.5,
+        },
+      },
+      {
+        selector: ".dim",
+        style: { "opacity": 0.15 },
+      },
+    ],
+    layout: { name: "cose", animate: false, padding: 30 },
+    wheelSensitivity: 0.2,
+  });
+
+  cy.on("tap", "node", (evt) => showDetail(evt.target.id()));
+  cy.on("tap", (evt) => {
+    if (evt.target === cy) clearSelection();
+  });
+
+  document.getElementById("layout").addEventListener("change", (e) => {
+    cy.layout({ name: e.target.value, animate: false, padding: 30 }).run();
+  });
+
+  document.getElementById("reset").addEventListener("click", () => {
+    cy.fit(null, 30);
+    clearSelection();
+  });
+
+  document.getElementById("search").addEventListener("input", (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    if (!q) {
+      cy.elements().removeClass("dim");
+      return;
+    }
+    cy.nodes().forEach((n) => {
+      const d = n.data();
+      const hay =
+        (d.label || "").toLowerCase() + " " +
+        d.id.toLowerCase() + " " +
+        (d.tags || []).join(" ").toLowerCase();
+      n.toggleClass("dim", !hay.includes(q));
+    });
+    cy.edges().forEach((edge) => {
+      const src = edge.source();
+      const tgt = edge.target();
+      edge.toggleClass("dim", src.hasClass("dim") || tgt.hasClass("dim"));
+    });
+  });
+
+  document.getElementById("filter-type").addEventListener("change", (e) => {
+    const t = e.target.value;
+    if (!t) {
+      cy.elements().removeClass("dim");
+      return;
+    }
+    cy.nodes().forEach((n) => {
+      n.toggleClass("dim", n.data("type") !== t);
+    });
+    cy.edges().forEach((edge) => {
+      edge.toggleClass("dim", edge.source().hasClass("dim") || edge.target().hasClass("dim"));
+    });
+  });
+
+  function clearSelection() {
+    cy.elements().unselect();
+    document.getElementById("detail-empty").hidden = false;
+    document.getElementById("detail-content").hidden = true;
+  }
+
+  function resolveInternalConceptId(href, currentConceptId) {
+    if (!href || /^[a-z]+:\\/\\//i.test(href) || href.startsWith("mailto:") || href.startsWith("#")) {
+      return null;
+    }
+    const cleanHref = href.split("#")[0].trim();
+    if (!cleanHref.endsWith(".md")) return null;
+    if (cleanHref.startsWith("/")) {
+      return cleanHref.slice(1, -3);
+    }
+    const curParts = currentConceptId.split("/");
+    curParts.pop();
+    const relParts = cleanHref.slice(0, -3).split("/");
+    for (const seg of relParts) {
+      if (!seg || seg === ".") continue;
+      if (seg === "..") {
+        curParts.pop();
+      } else {
+        curParts.push(seg);
+      }
+    }
+    const relResolved = curParts.join("/");
+    if (nodeIndex[relResolved]) return relResolved;
+    const rootCandidate = cleanHref.slice(0, -3);
+    if (!cleanHref.startsWith("./") && !cleanHref.startsWith("../") && nodeIndex[rootCandidate]) {
+      return rootCandidate;
+    }
+    return relResolved;
+  }
+
+  function renderMarkdownWithOkfFootnotes(rawBody, sources) {
+    const srcById = {};
+    for (const s of sources || []) {
+      if (s && s.id) srcById[s.id] = s;
+    }
+    const fnDefs = [];
+    const bodyLines = [];
+    for (const line of String(rawBody || "").split(/\\r?\\n/)) {
+      const m = line.trim().match(/^\\[\\^([A-Za-z0-9_\\-]+)\\]:\\s*(.+)$/);
+      if (m) {
+        fnDefs.push({ id: m[1], label: m[2] });
+      } else {
+        bodyLines.push(line);
+      }
+    }
+    const bodyWithSup = bodyLines
+      .join("\\n")
+      .replace(/\\[\\^([A-Za-z0-9_\\-]+)\\]/g, '<sup class="fn-ref"><a href="#fn-$1">[$1]</a></sup>');
+    let html = marked.parse(bodyWithSup, { breaks: false, gfm: true });
+    if (fnDefs.length > 0) {
+      const items = fnDefs
+        .map((fn) => {
+          const src = srcById[fn.id];
+          const url = src && src.resource && /^https?:\\/\\//.test(src.resource) ? src.resource : null;
+          const text = url
+            ? '<a class="external" target="_blank" rel="noopener" href="' + url + '">' + fn.label + "</a>"
+            : fn.label;
+          return '<li id="fn-' + fn.id + '"><code>[' + fn.id + "]</code> " + text + "</li>";
+        })
+        .join("");
+      html += '<section class="footnotes"><ul>' + items + "</ul></section>";
+    }
+    return html;
+  }
+
+  function showDetail(conceptId) {
+    const data = nodeIndex[conceptId];
+    if (!data) return;
+    cy.elements().unselect();
+    const node = cy.getElementById(conceptId);
+    if (node) node.select();
+
+    document.getElementById("detail-empty").hidden = true;
+    const content = document.getElementById("detail-content");
+    content.hidden = false;
+
+    const chip = document.getElementById("detail-type");
+    chip.textContent = data.type;
+    chip.style.background = data.color;
+
+    document.getElementById("detail-title").textContent = data.label;
+    document.getElementById("detail-id").textContent = conceptId;
+    document.getElementById("detail-description").textContent = data.description || "—";
+
+    const resourceEl = document.getElementById("detail-resource");
+    resourceEl.innerHTML = "";
+    if (data.resource) {
+      const a = document.createElement("a");
+      a.href = data.resource;
+      a.textContent = data.resource;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.className = "external";
+      resourceEl.appendChild(a);
+    } else {
+      resourceEl.textContent = "—";
+    }
+
+    const tagsEl = document.getElementById("detail-tags");
+    tagsEl.innerHTML = "";
+    if (data.tags && data.tags.length) {
+      for (const t of data.tags) {
+        const span = document.createElement("span");
+        span.className = "tag";
+        span.textContent = t;
+        tagsEl.appendChild(span);
+      }
+    } else {
+      tagsEl.textContent = "—";
+    }
+
+    const badgesEl = document.getElementById("detail-badges");
+    badgesEl.innerHTML = "";
+    const status = data.status || "stable";
+    badgesEl.appendChild(makeBadge(status, "status-" + status));
+    const tier = data.trust_tier || "unverified";
+    badgesEl.appendChild(makeBadge(tier.replace(/-/g, " "), "trust-" + tier));
+    if (data.stale) {
+      const label = data.stale_after ? "stale (since " + data.stale_after + ")" : "stale";
+      badgesEl.appendChild(makeBadge(label, "stale"));
+    } else if (data.stale_after) {
+      badgesEl.appendChild(makeBadge("stale after " + data.stale_after, "fresh"));
+    }
+
+    document.getElementById("detail-generated").textContent = formatActorEvent(data.generated);
+
+    const verifiedEl = document.getElementById("detail-verified");
+    const verified = data.verified || [];
+    if (verified.length) {
+      verifiedEl.textContent = verified.map(formatActorEvent).join("; ");
+    } else {
+      verifiedEl.textContent = "—";
+    }
+
+    const sourcesEl = document.getElementById("detail-sources");
+    sourcesEl.innerHTML = "";
+    const sources = data.sources || [];
+    if (sources.length) {
+      const ul = document.createElement("ul");
+      ul.className = "sources-list";
+      for (const s of sources) {
+        const li = document.createElement("li");
+        const label = s.title || s.resource || s.id || "source";
+        const idPrefix = s.id ? "[" + s.id + "] " : "";
+        if (s.resource && /^https?:\\/\\//.test(s.resource)) {
+          const a = document.createElement("a");
+          a.href = s.resource;
+          a.textContent = idPrefix + label;
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.className = "external";
+          li.appendChild(a);
+        } else {
+          li.textContent = s.resource ? idPrefix + label + " (" + s.resource + ")" : idPrefix + label;
+        }
+        ul.appendChild(li);
+      }
+      sourcesEl.appendChild(ul);
+    } else {
+      sourcesEl.textContent = "—";
+    }
+
+    const body = bundle.bodies[conceptId] || "";
+    const html = renderMarkdownWithOkfFootnotes(body, sources);
+    const bodyEl = document.getElementById("detail-body");
+    bodyEl.innerHTML = html;
+    rewriteInternalLinks(bodyEl, conceptId);
+
+    const bl = backlinks[conceptId] || [];
+    const blSection = document.getElementById("detail-backlinks");
+    const blList = document.getElementById("backlinks-list");
+    blList.innerHTML = "";
+    if (bl.length) {
+      blSection.hidden = false;
+      for (const src of bl) {
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.textContent = nodeIndex[src]?.label || src;
+        a.dataset.target = src;
+        a.addEventListener("click", () => showDetail(src));
+        li.appendChild(a);
+        const muted = document.createElement("span");
+        muted.className = "muted";
+        muted.textContent = " (" + src + ")";
+        li.appendChild(muted);
+        blList.appendChild(li);
+      }
+    } else {
+      blSection.hidden = true;
+    }
+
+    cy.animate({ center: { eles: node }, zoom: Math.max(cy.zoom(), 1.0) }, { duration: 200 });
+  }
+
+  function makeBadge(text, cls) {
+    const span = document.createElement("span");
+    span.className = "badge " + cls;
+    span.textContent = text;
+    return span;
+  }
+
+  function formatActorEvent(event) {
+    if (!event || !event.by) return "—";
+    return event.at ? event.by + " · " + event.at : String(event.by);
+  }
+
+  function rewriteInternalLinks(root, currentConceptId) {
+    root.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.getAttribute("href");
+      if (!href || href.startsWith("#")) return;
+      const target = resolveInternalConceptId(href, currentConceptId);
+      if (target && nodeIndex[target]) {
+        a.className = "internal";
+        a.setAttribute("href", "javascript:void(0)");
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          showDetail(target);
+        });
+        return;
+      }
+      a.className = "external";
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener");
+    });
+  }
+
+  const initial =
+    bundle.nodes.find((n) => n.data.type === "Research Concept") ||
+    bundle.nodes.find((n) => n.data.type === "BigQuery Dataset") ||
+    bundle.nodes[0];
+  if (initial) showDetail(initial.data.id);
+})();
+`.trim();
+
+/**
+ * Generates a single-file interactive OKF v0.2 knowledge graph explorer (`viz.html`)
+ * powered by Cytoscape.js and Marked, with unified `/` and `../` link resolution and trust badges.
+ */
+export function generateBundleVisualization(
+  bundleRoot: string = './workspace/bundle',
+  outPath?: string,
+  options?: { bundleName?: string }
+): {
+  concepts: number;
+  edges: number;
+  bytes: number;
+  outputPath: string;
+} {
+  const resolvedRoot = path.resolve(bundleRoot);
+  if (!fs.existsSync(resolvedRoot) || !fs.statSync(resolvedRoot).isDirectory()) {
+    throw new Error(`OKF Bundle directory not found: ${resolvedRoot}`);
+  }
+
+  const resolvedOutPath = path.resolve(outPath || path.join(resolvedRoot, 'viz.html'));
+  const concepts = walkBundleConcepts(resolvedRoot);
+  const conceptIds = new Set(concepts.map((c) => c.id));
+
+  const nodes = concepts.map((c) => {
+    const color = OKF_TYPE_PALETTE[c.type] || DEFAULT_OKF_NODE_COLOR;
+    return {
+      data: {
+        id: c.id,
+        label: c.title || c.id,
+        type: c.type,
+        description: c.description,
+        resource: c.resource,
+        tags: c.tags,
+        status: c.status,
+        generated: c.generated,
+        verified: c.verified,
+        stale_after: c.stale_after,
+        sources: c.sources,
+        trust_tier: c.trust_tier,
+        stale: c.stale,
+        color,
+        size: 30 + Math.min(60, Math.floor(c.body.length / 200)),
+      },
+    };
+  });
+
+  const edges: Array<{ data: { id: string; source: string; target: string } }> = [];
+  const seenEdges = new Set<string>();
+  for (const c of concepts) {
+    for (const target of c.links_to) {
+      if (target === c.id || !conceptIds.has(target)) continue;
+      const key = `${c.id}__${target}`;
+      if (seenEdges.has(key)) continue;
+      seenEdges.add(key);
+      edges.push({
+        data: {
+          id: key,
+          source: c.id,
+          target,
+        },
+      });
+    }
+  }
+
+  const bodies: Record<string, string> = {};
+  for (const c of concepts) {
+    bodies[c.id] = c.body;
+  }
+  const types = Array.from(new Set(concepts.map((c) => c.type))).sort((a, b) =>
+    a.localeCompare(b)
+  );
+  const graphData = {
+    nodes,
+    edges,
+    bodies,
+    types,
+    palette: OKF_TYPE_PALETTE,
+  };
+
+  const bundleName = options?.bundleName || path.basename(resolvedRoot);
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OKF Bundle Viewer</title>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+<style>
+${OKF_VIZ_CSS}
+</style>
+</head>
+<body>
+<header>
+  <div class="title">
+    <strong id="bundle-name"></strong>
+    <span class="muted">OKF v0.2 bundle</span>
+  </div>
+  <div class="controls">
+    <input id="search" type="search" placeholder="Search title / id / tag">
+    <select id="filter-type">
+      <option value="">All types</option>
+    </select>
+    <select id="layout">
+      <option value="cose">cose (force)</option>
+      <option value="concentric">concentric</option>
+      <option value="breadthfirst">breadth-first</option>
+      <option value="circle">circle</option>
+      <option value="grid">grid</option>
+    </select>
+    <button id="reset">Reset view</button>
+  </div>
+</header>
+
+<main>
+  <section id="graph"></section>
+  <section id="detail">
+    <div id="detail-empty" class="muted">Click a node to see its details.</div>
+    <article id="detail-content" hidden>
+      <header class="detail-header">
+        <span class="type-chip" id="detail-type"></span>
+        <h1 id="detail-title"></h1>
+        <div class="muted" id="detail-id"></div>
+      </header>
+      <div class="badges" id="detail-badges"></div>
+      <dl class="frontmatter">
+        <dt>Description</dt><dd id="detail-description"></dd>
+        <dt>Resource</dt><dd id="detail-resource"></dd>
+        <dt>Tags</dt><dd id="detail-tags"></dd>
+        <dt>Generated</dt><dd id="detail-generated"></dd>
+        <dt>Verified</dt><dd id="detail-verified"></dd>
+        <dt>Sources</dt><dd id="detail-sources"></dd>
+      </dl>
+      <hr>
+      <div id="detail-body"></div>
+      <section id="detail-backlinks" hidden>
+        <h2>Cited by</h2>
+        <ul id="backlinks-list"></ul>
+      </section>
+    </article>
+  </section>
+</main>
+
+<script>
+window.BUNDLE_NAME = ${JSON.stringify(bundleName).replace(/<\//g, '<\\/')};
+window.BUNDLE = ${JSON.stringify(graphData).replace(/<\//g, '<\\/')};
+</script>
+<script>
+${OKF_VIZ_JS}
+</script>
+</body>
+</html>
+`;
+
+  fs.mkdirSync(path.dirname(resolvedOutPath), { recursive: true });
+  fs.writeFileSync(resolvedOutPath, html, 'utf-8');
+
+  return {
+    concepts: concepts.length,
+    edges: edges.length,
+    bytes: Buffer.byteLength(html, 'utf-8'),
+    outputPath: resolvedOutPath,
+  };
+}
+
 // 4. Headless CLI Entrypoint (Linux / macOS / Windows / SSH / Cron / Terminal execution)
 if (
   process.argv.includes('--cli') ||
   process.argv.includes('--stage1') ||
-  process.argv.includes('--stage2')
+  process.argv.includes('--stage2') ||
+  process.argv.includes('--verify') ||
+  process.argv.includes('--viz')
 ) {
   (async () => {
     const isStage1Only = process.argv.includes('--stage1');
     const isStage2Only = process.argv.includes('--stage2');
+    const isFullCli = process.argv.includes('--cli');
+    const hasVerify = process.argv.includes('--verify');
+    const hasViz = process.argv.includes('--viz');
     const isDryRun = process.argv.includes('--dry-run');
+
+    const byFlagIdx = process.argv.indexOf('--by');
+    const verifierBy =
+      byFlagIdx !== -1 && process.argv[byFlagIdx + 1] && !process.argv[byFlagIdx + 1].startsWith('--')
+        ? process.argv[byFlagIdx + 1]
+        : undefined;
+
+    // Standalone `--viz` execution
+    if (hasViz && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify) {
+      const vizIdx = process.argv.indexOf('--viz');
+      const vizArgs = process.argv
+        .slice(vizIdx + 1)
+        .filter((a) => !a.startsWith('--'));
+      const bundleDir = vizArgs[0] || './workspace/bundle';
+      const outPath = vizArgs[1] || path.join(bundleDir, 'viz.html');
+      const vizResult = generateBundleVisualization(bundleDir, outPath);
+      console.log('OKF Bundle Visualization Generated:', vizResult);
+      return;
+    }
+
+    // Standalone `--verify` execution
+    if (hasVerify && !isStage1Only && !isStage2Only && !isFullCli) {
+      const verifyIdx = process.argv.indexOf('--verify');
+      const rawArgs = process.argv.slice(verifyIdx + 1);
+      const filteredArgs: string[] = [];
+      for (let i = 0; i < rawArgs.length; i++) {
+        if (rawArgs[i] === '--by') {
+          i++;
+          continue;
+        }
+        if (rawArgs[i].startsWith('--')) continue;
+        filteredArgs.push(rawArgs[i]);
+      }
+      const target = filteredArgs[0];
+      if (!target) {
+        console.error('Usage: npm run cli:verify -- <runIdOrConceptPath> [--by human:<reviewer>]');
+        process.exit(1);
+      }
+      const verifyResult = verifyOkfConcept(target, {
+        workspaceRoot: './workspace',
+        by: verifierBy,
+      });
+      if (hasViz) {
+        const vizResult = generateBundleVisualization('./workspace/bundle');
+        console.log('OKF Bundle Visualization Generated:', vizResult);
+      }
+      console.log('OKF Verification Complete:', verifyResult);
+      return;
+    }
+
     const flag = isStage2Only ? '--stage2' : isStage1Only ? '--stage1' : '--cli';
     const flagIndex = process.argv.indexOf(flag);
-    const argValue = process.argv
-      .slice(flagIndex + 1)
-      .filter((a) => a !== '--dry-run')
-      .join(' ')
-      .trim();
+    const tailArgs = process.argv.slice(flagIndex + 1);
+    const cleanedPositional: string[] = [];
+    for (let i = 0; i < tailArgs.length; i++) {
+      const token = tailArgs[i];
+      if (token === '--by') {
+        i++;
+        continue;
+      }
+      if (token === '--dry-run' || token === '--verify' || token === '--viz') {
+        continue;
+      }
+      cleanedPositional.push(token);
+    }
+    const argValue = cleanedPositional.join(' ').trim();
 
     if (!argValue) {
       console.error(
         isStage2Only
-          ? 'Usage: npm run cli:stage2 -- [--dry-run] <runId>'
+          ? 'Usage: npm run cli:stage2 -- [--dry-run] [--verify] [--by human:<id>] <runId>'
           : isStage1Only
-            ? 'Usage: npm run cli:stage1 -- [--dry-run] "<Research Topic>"'
-            : 'Usage: npm run cli -- [--dry-run] "<Research Topic>"'
+            ? 'Usage: npm run cli:stage1 -- [--dry-run] [--viz] "<Research Topic>"'
+            : 'Usage: npm run cli -- [--dry-run] [--verify] [--viz] "<Research Topic>"'
       );
       process.exit(1);
     }
 
     if (isStage2Only) {
+      if (hasVerify) {
+        verifyOkfConcept(argValue, {
+          workspaceRoot: './workspace',
+          by: verifierBy,
+        });
+      }
       const runDir = path.resolve('./workspace/runs', argValue);
       const result = await runStage2Flow({
         workspaceRoot: './workspace',
@@ -1373,6 +4445,10 @@ if (
           meta.status = 'completed';
           fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
         }
+      }
+      if (hasViz) {
+        const vizResult = generateBundleVisualization('./workspace/bundle');
+        console.log('OKF Bundle Visualization Generated:', vizResult);
       }
       console.log('Stage 2 CLI Run Complete:', result);
     } else {
@@ -1424,6 +4500,16 @@ if (
             meta.status = 'stage1_completed';
             fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
           }
+          if (hasVerify) {
+            verifyOkfConcept(runId, {
+              workspaceRoot: './workspace',
+              by: verifierBy,
+            });
+          }
+        }
+        if (hasViz) {
+          const vizResult = generateBundleVisualization('./workspace/bundle');
+          console.log('OKF Bundle Visualization Generated:', vizResult);
         }
         console.log(
           `Stage 1 CLI ${isDryRun ? 'Dry-Run ' : 'Run '}Complete (${runId}):`,
@@ -1431,12 +4517,22 @@ if (
         );
       } else {
         console.log(`Starting headless full ICM run: ${runId}`);
-        const result = await icmOrchestratorFlow({
+        await runStage1Flow({
           workspaceRoot: './workspace',
           runId,
           topic: argValue,
-          researchThinkingLevel: 'HIGH',
-          scriptThinkingLevel: 'MEDIUM',
+          thinkingLevel: 'HIGH',
+        });
+        if (hasVerify) {
+          verifyOkfConcept(runId, {
+            workspaceRoot: './workspace',
+            by: verifierBy,
+          });
+        }
+        const stage2Result = await runStage2Flow({
+          workspaceRoot: './workspace',
+          runId,
+          thinkingLevel: 'MEDIUM',
         });
         const metaPath = path.join(runDir, 'meta.json');
         if (fs.existsSync(metaPath)) {
@@ -1444,7 +4540,16 @@ if (
           meta.status = 'completed';
           fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
         }
-        console.log(`Headless ICM Run Complete (${runId}):`, result);
+        if (hasViz) {
+          const vizResult = generateBundleVisualization('./workspace/bundle');
+          console.log('OKF Bundle Visualization Generated:', vizResult);
+        }
+        console.log(`Headless ICM Run Complete (${runId}):`, {
+          status: 'Pipeline executed successfully',
+          outputPath: stage2Result.outputPath,
+          trust_tier: stage2Result.trust_tier,
+          is_stale: stage2Result.is_stale,
+        });
       }
     }
   })().catch((err) => {
