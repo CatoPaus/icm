@@ -412,8 +412,116 @@ export async function streamGemini4ArgonInteraction(
     if (event.event_type === 'interaction.created' || event.event_type === 'interaction.completed') {
       const { steps, ...rest } = event.interaction || {};
       Object.assign(interaction, rest);
-      if (Array.isArray(steps) && steps.length > 0 && (!interaction.steps || interaction.steps.length === 0)) {
-        interaction.steps = steps;
+      if (Array.isArray(steps) && steps.length > 0) {
+        if (!Array.isArray(interaction.steps) || interaction.steps.length === 0) {
+          interaction.steps = steps;
+        } else {
+          const mergedExisting = new Set<any>();
+          for (let i = 0; i < steps.length; i++) {
+            const completedStep = steps[i];
+            if (!completedStep || typeof completedStep !== 'object') continue;
+
+            let targetStep: any = null;
+            const atIdx = interaction.steps[i];
+            if (
+              atIdx &&
+              typeof atIdx === 'object' &&
+              !mergedExisting.has(atIdx) &&
+              (!atIdx.type || !completedStep.type || atIdx.type === completedStep.type)
+            ) {
+              targetStep = atIdx;
+            } else {
+              targetStep = interaction.steps.find(
+                (s: any) =>
+                  s &&
+                  typeof s === 'object' &&
+                  !mergedExisting.has(s) &&
+                  s.type === completedStep.type &&
+                  (!completedStep.id || !s.id || s.id === completedStep.id) &&
+                  (!completedStep.call_id || !s.call_id || s.call_id === completedStep.call_id)
+              );
+            }
+
+            if (!targetStep) {
+              if (!interaction.steps[i]) {
+                interaction.steps[i] = completedStep;
+              } else {
+                interaction.steps.push(completedStep);
+              }
+              mergedExisting.add(completedStep);
+              targetStep = completedStep;
+            } else {
+              mergedExisting.add(targetStep);
+              for (const [k, v] of Object.entries(completedStep)) {
+                if (v === undefined || v === null) continue;
+                if (
+                  k === 'content' &&
+                  Array.isArray(v) &&
+                  Array.isArray(targetStep.content) &&
+                  targetStep.content.length > 0
+                ) {
+                  for (const cPart of v) {
+                    if (!cPart || typeof cPart !== 'object') continue;
+                    if (cPart.type === 'text') {
+                      let existingTextPart = [...targetStep.content]
+                        .reverse()
+                        .find((p: any) => p && p.type === 'text');
+                      if (!existingTextPart) {
+                        existingTextPart = { type: 'text', text: cPart.text || '' };
+                        targetStep.content.push(existingTextPart);
+                      } else if (
+                        typeof cPart.text === 'string' &&
+                        cPart.text.length > (existingTextPart.text || '').length
+                      ) {
+                        existingTextPart.text = cPart.text;
+                      }
+                      if (Array.isArray(cPart.annotations) && cPart.annotations.length > 0) {
+                        const existingAnns: any[] = Array.isArray(existingTextPart.annotations)
+                          ? existingTextPart.annotations
+                          : [];
+                        const seenAnnKeys = new Set(
+                          existingAnns.map(
+                            (a: any) =>
+                              `${a?.start_index ?? ''}:${a?.end_index ?? ''}:${a?.url ?? ''}`
+                          )
+                        );
+                        for (const ann of cPart.annotations) {
+                          const key = `${ann?.start_index ?? ''}:${ann?.end_index ?? ''}:${ann?.url ?? ''}`;
+                          if (!seenAnnKeys.has(key)) {
+                            seenAnnKeys.add(key);
+                            existingAnns.push(ann);
+                          }
+                        }
+                        existingTextPart.annotations = existingAnns;
+                      }
+                    } else {
+                      targetStep.content.push(cPart);
+                    }
+                  }
+                } else if (Array.isArray(v)) {
+                  if (v.length > 0 || !Array.isArray(targetStep[k])) {
+                    targetStep[k] = v;
+                  }
+                } else {
+                  targetStep[k] = v;
+                }
+              }
+            }
+
+            if (
+              completedStep.type === 'google_search_call' &&
+              Array.isArray(completedStep.arguments?.queries)
+            ) {
+              const newQueries = completedStep.arguments.queries.filter(
+                (q: any) => typeof q === 'string' && q.trim() && !searchQueries.includes(q)
+              );
+              if (newQueries.length > 0) {
+                searchQueries.push(...newQueries);
+                options.onSearchQuery?.(newQueries, searchQueries);
+              }
+            }
+          }
+        }
       }
       return;
     }
@@ -1425,11 +1533,14 @@ export const trust_tier = getOkfTrustTier;
 
 /**
  * Evaluates whether an OKF v0.2 concept is stale (`now >= stale_after` per `SPEC.md` §5.5).
- * Requires an ISO 8601 datetime with `T` and an explicit timezone offset (`Z` or `[+-]HH:MM`).
+ * Requires an ISO 8601 datetime with `T` and an explicit timezone offset (`Z` or `[+-]HH:MM`),
+ * or a date-only `YYYY-MM-DD` string normalized to `YYYY-MM-DDT00:00:00Z`.
  */
 export function isOkfStale(frontmatter: Record<string, any>, now?: Date): boolean {
-  const raw = String(frontmatter?.stale_after || '').trim();
-  if (!raw || !raw.includes('T')) return false;
+  const rawInput = String(frontmatter?.stale_after || '').trim();
+  if (!rawInput) return false;
+  const raw = /^\d{4}-\d{2}-\d{2}$/.test(rawInput) ? `${rawInput}T00:00:00Z` : rawInput;
+  if (!raw.includes('T')) return false;
   if (!/(Z|[+\-]\d{2}:?\d{2})$/i.test(raw)) return false;
   const staleAfterMs = Date.parse(raw);
   if (Number.isNaN(staleAfterMs)) return false;
@@ -1474,6 +1585,104 @@ function generateSourceSlugId(
   return candidate;
 }
 
+function isVertexRedirectUrl(url?: string): boolean {
+  return typeof url === 'string' && url.includes('vertexaisearch.cloud.google.com/grounding-api-redirect/');
+}
+
+function normalizeSourceMatchKey(input?: string): string {
+  return String(input || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s*\(alternativ indeks\)\s*$/i, '')
+    .replace(/^\*\*|\*\*$/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+const SOURCE_MATCH_STOPWORDS = new Set([
+  'http',
+  'https',
+  'www',
+  'com',
+  'org',
+  'net',
+  'html',
+  'htm',
+  'pdf',
+  'the',
+  'and',
+  'for',
+  'with',
+  'from',
+  'that',
+  'this',
+  'med',
+  'som',
+  'til',
+  'fra',
+  'over',
+  'under',
+  'ved',
+  'hos',
+  'alle',
+]);
+
+function extractSourceMatchTokens(input?: string): string[] {
+  return normalizeSourceMatchKey(input)
+    .split(/\s+/)
+    .filter((t) => t.length >= 3 && !SOURCE_MATCH_STOPWORDS.has(t));
+}
+
+function collectExistingBundleSources(bundleRoot: string): OKFSource[] {
+  const resolvedRoot = path.resolve(bundleRoot);
+  if (!fs.existsSync(resolvedRoot)) return [];
+  const out: OKFSource[] = [];
+  const scanDir = (dir: string) => {
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        scanDir(full);
+      } else if (
+        entry.isFile() &&
+        entry.name.endsWith('.md') &&
+        !RESERVED_OKF_FILENAMES.has(entry.name)
+      ) {
+        try {
+          const doc = parseOkfDocument(fs.readFileSync(full, 'utf-8'));
+          if (Array.isArray(doc.frontmatter?.sources)) {
+            for (const s of doc.frontmatter.sources) {
+              if (
+                s &&
+                typeof s === 'object' &&
+                typeof s.resource === 'string' &&
+                /^https?:\/\//i.test(s.resource) &&
+                !isVertexRedirectUrl(s.resource)
+              ) {
+                out.push({
+                  id: s.id ? String(s.id) : undefined,
+                  resource: s.resource.trim(),
+                  title: s.title ? String(s.title) : undefined,
+                });
+              }
+            }
+          }
+        } catch {
+          // Ignore unreadable concept files
+        }
+      }
+    }
+  };
+  scanDir(resolvedRoot);
+  return out;
+}
+
 export interface CleanGroundingOptions {
   topic?: string;
   model?: string;
@@ -1484,6 +1693,8 @@ export interface CleanGroundingOptions {
   type?: string;
   status?: 'draft' | 'stable' | 'deprecated';
   tags?: string[];
+  workspaceRoot?: string;
+  bundleRoot?: string;
 }
 
 /**
@@ -1498,7 +1709,7 @@ export async function cleanGroundingLinks(
   options?: CleanGroundingOptions
 ): Promise<string> {
   const redirectRegex =
-    /https:\/\/vertexaisearch\.cloud\.google\.com\/grounding-api-redirect\/[a-zA-Z0-9_\-\+=]+/g;
+    /https:\/\/vertexaisearch\.cloud\.google\.com\/grounding-api-redirect\/[a-zA-Z0-9_\-\+=%]+/g;
   const textMatches = text.match(redirectRegex) || [];
 
   const groundedSources: Array<{ title?: string; url: string }> = [];
@@ -1546,7 +1757,7 @@ export async function cleanGroundingLinks(
       ...textMatches,
       ...groundedSources
         .map((s) => s.url)
-        .filter((u) => u.includes('vertexaisearch.cloud.google.com/grounding-api-redirect/')),
+        .filter((u) => isVertexRedirectUrl(u)),
     ])
   );
 
@@ -1566,6 +1777,170 @@ export async function cleanGroundingLinks(
     }
   }
 
+  // Build candidate pool from groundedSources + existing workspace/bundle/ concepts to heal any
+  // frontmatter/body redirect URLs whose base64 token was corrupted or truncated by the LLM
+  interface HealingCandidate {
+    id: string;
+    slug: string;
+    title: string;
+    normTitle: string;
+    resource: string;
+    tokens: Set<string>;
+    searchableText: string;
+    originalRedirect?: string;
+  }
+  const healingCandidates: HealingCandidate[] = [];
+  const seenCandidateKeys = new Set<string>();
+
+  const addHealingCandidate = (
+    resourceUrl: string,
+    rawTitle?: string,
+    rawId?: string,
+    originalRedirect?: string
+  ) => {
+    const cleanUrl = (resourceUrl || '').trim();
+    if (!/^https?:\/\//i.test(cleanUrl) || isVertexRedirectUrl(cleanUrl)) return;
+    const key = `${(rawId || '').toLowerCase()}::${(rawTitle || '').toLowerCase()}::${cleanUrl}`;
+    if (seenCandidateKeys.has(key)) return;
+    seenCandidateKeys.add(key);
+
+    let urlTokensText = '';
+    try {
+      const parsed = new URL(cleanUrl);
+      urlTokensText = `${parsed.hostname.replace(/^www\./, '')} ${parsed.pathname}`;
+    } catch {
+      urlTokensText = cleanUrl;
+    }
+    const slug = generateSourceSlugId(rawTitle || rawId || '', cleanUrl, new Set());
+    const normTitle = normalizeSourceMatchKey(rawTitle);
+    const allTokens = extractSourceMatchTokens(`${rawId || ''} ${rawTitle || ''} ${urlTokensText}`);
+    healingCandidates.push({
+      id: (rawId || '').trim().toLowerCase(),
+      slug: slug.toLowerCase(),
+      title: (rawTitle || '').trim(),
+      normTitle,
+      resource: cleanUrl,
+      tokens: new Set(allTokens),
+      searchableText: `${normalizeSourceMatchKey(rawId)} ${normTitle} ${normalizeSourceMatchKey(urlTokensText)}`.trim(),
+      originalRedirect,
+    });
+  };
+
+  for (const gs of groundedSources) {
+    const resolved = (urlMap.get(gs.url) || gs.url).trim();
+    if (!isVertexRedirectUrl(resolved)) {
+      addHealingCandidate(
+        resolved,
+        gs.title,
+        undefined,
+        isVertexRedirectUrl(gs.url) ? gs.url : undefined
+      );
+    }
+  }
+
+  const bundleRootDir =
+    options?.bundleRoot || path.join(options?.workspaceRoot || './workspace', 'bundle');
+  for (const bs of collectExistingBundleSources(bundleRootDir)) {
+    addHealingCandidate(bs.resource, bs.title, bs.id);
+  }
+
+  const healRedirectUrl = (rawUrl: string, rawTitle?: string, preferredId?: string): string => {
+    const mapped = (urlMap.get(rawUrl) || rawUrl).trim();
+    if (!isVertexRedirectUrl(mapped)) return mapped;
+    if (healingCandidates.length === 0) return mapped;
+
+    const slugId = String(preferredId || '').trim().toLowerCase();
+    const normId = normalizeSourceMatchKey(preferredId);
+    const normTitle = normalizeSourceMatchKey(rawTitle);
+    const titleSlug = rawTitle
+      ? generateSourceSlugId(rawTitle, 'https://example.com', new Set()).toLowerCase()
+      : '';
+
+    // 1. Exact ID or generated slug match
+    for (const c of healingCandidates) {
+      if (slugId && (c.id === slugId || c.slug === slugId)) {
+        return c.resource;
+      }
+      if (titleSlug && titleSlug !== 'source' && (c.slug === titleSlug || c.id === titleSlug)) {
+        return c.resource;
+      }
+    }
+
+    // 2. Exact normalized title match
+    if (normTitle) {
+      for (const c of healingCandidates) {
+        if (c.normTitle && c.normTitle === normTitle) {
+          return c.resource;
+        }
+      }
+    }
+
+    // 3. Normalized title / ID substring containment match
+    let bestContainment: { resource: string; len: number } | null = null;
+    for (const c of healingCandidates) {
+      if (normTitle.length >= 4 && c.normTitle.length >= 4) {
+        if (c.normTitle.includes(normTitle) || normTitle.includes(c.normTitle)) {
+          const overlapLen = Math.min(normTitle.length, c.normTitle.length);
+          if (!bestContainment || overlapLen > bestContainment.len) {
+            bestContainment = { resource: c.resource, len: overlapLen };
+          }
+        }
+      }
+      if (normId.length >= 4 && c.normTitle.length >= 4) {
+        if (c.normTitle.includes(normId) || normId.includes(c.normTitle)) {
+          const overlapLen = Math.min(normId.length, c.normTitle.length);
+          if (!bestContainment || overlapLen > bestContainment.len) {
+            bestContainment = { resource: c.resource, len: overlapLen };
+          }
+        }
+      }
+    }
+    if (bestContainment) {
+      return bestContainment.resource;
+    }
+
+    // 4. Token overlap scoring across id, title, and URL domain/path
+    const queryTokens = extractSourceMatchTokens(`${preferredId || ''} ${rawTitle || ''}`);
+    if (queryTokens.length > 0) {
+      let bestCandidate: HealingCandidate | null = null;
+      let bestScore = 0;
+
+      for (const c of healingCandidates) {
+        let score = 0;
+        for (const qt of queryTokens) {
+          if (c.tokens.has(qt)) {
+            score += 3;
+          } else if (qt.length >= 4 && c.searchableText.includes(qt)) {
+            score += 2;
+          } else if (qt.length >= 5) {
+            for (const ct of c.tokens) {
+              if (ct.length >= 4 && (qt.includes(ct) || ct.includes(qt))) {
+                score += 2;
+                break;
+              }
+            }
+          }
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestCandidate = c;
+        }
+      }
+
+      if (bestCandidate && bestScore >= 2) {
+        return bestCandidate.resource;
+      }
+    }
+
+    // 5. Fallback if there is only a single unique resolved grounded URL
+    const uniqueUrls = Array.from(new Set(healingCandidates.map((c) => c.resource)));
+    if (uniqueUrls.length === 1) {
+      return uniqueUrls[0];
+    }
+
+    return mapped;
+  };
+
   // Pre-register any existing frontmatter sources so their IDs are preserved during byte-offset weaving
   const usedIds = new Set<string>();
   const sourcesByUrl = new Map<string, OKFSource>();
@@ -1578,7 +1953,15 @@ export async function cleanGroundingLinks(
     preferredId?: string,
     extra?: Partial<OKFSource>
   ): OKFSource => {
-    const resolvedUrl = (urlMap.get(rawUrl) || rawUrl).trim();
+    const initialResolved = (urlMap.get(rawUrl) || rawUrl).trim();
+    const resolvedUrl = isVertexRedirectUrl(initialResolved)
+      ? healRedirectUrl(initialResolved, rawTitle, preferredId)
+      : initialResolved;
+    if (resolvedUrl !== rawUrl && !isVertexRedirectUrl(resolvedUrl)) {
+      urlMap.set(rawUrl, resolvedUrl);
+      addHealingCandidate(resolvedUrl, rawTitle, preferredId);
+    }
+
     const cleanTitle = (rawTitle || '')
       .replace(/\s*\(Alternativ indeks\)\s*$/i, '')
       .replace(/^\*\*|\*\*$/g, '')
@@ -1586,6 +1969,15 @@ export async function cleanGroundingLinks(
 
     if (preferredId && sourcesById.has(preferredId)) {
       const existingById = sourcesById.get(preferredId)!;
+      if (
+        isVertexRedirectUrl(existingById.resource) &&
+        resolvedUrl &&
+        !isVertexRedirectUrl(resolvedUrl)
+      ) {
+        sourcesByUrl.delete(existingById.resource);
+        existingById.resource = resolvedUrl;
+        sourcesByUrl.set(resolvedUrl, existingById);
+      }
       if (cleanTitle && (!existingById.title || existingById.title === existingById.resource)) {
         existingById.title = cleanTitle;
       }
@@ -1820,7 +2212,22 @@ export async function cleanGroundingLinks(
 
   // 6. Register any remaining groundedSources from the Interactions API steps
   for (const src of groundedSources) {
-    registerSource(src.url, src.title);
+    const candidateResolved = (urlMap.get(src.url) || src.url).trim();
+    if (!isVertexRedirectUrl(candidateResolved) || orderedSources.length === 0) {
+      registerSource(src.url, src.title);
+    }
+  }
+
+  // Final healing pass on orderedSources in case body links introduced new candidate URLs
+  for (const entry of orderedSources) {
+    if (isVertexRedirectUrl(entry.resource)) {
+      const healed = healRedirectUrl(entry.resource, entry.title, entry.id);
+      if (healed && !isVertexRedirectUrl(healed)) {
+        sourcesByUrl.delete(entry.resource);
+        entry.resource = healed;
+        sourcesByUrl.set(healed, entry);
+      }
+    }
   }
 
   // 7. Append OKF v0.2 footnote definitions (`[^id]: Title`) at the bottom of the body (SPEC.md §5.1)
@@ -1906,12 +2313,13 @@ export async function cleanGroundingLinks(
     options?.generatedAt || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const existingGen =
     fm.generated && typeof fm.generated === 'object' ? fm.generated : ({} as OKFActorEvent);
+  const rawGenAt = String(existingGen.at || nowIso).trim();
   fm.generated = {
     by:
       existingGen.by ||
       options?.generatedBy ||
       `icm-stage1/${options?.model || GEMINI_4_ARGON_MODEL}`,
-    at: existingGen.at || nowIso,
+    at: /^\d{4}-\d{2}-\d{2}$/.test(rawGenAt) ? `${rawGenAt}T00:00:00Z` : rawGenAt,
   };
 
   if (!fm.stale_after) {
@@ -1923,6 +2331,9 @@ export async function cleanGroundingLinks(
       const staleDate = new Date(baseMs + days * 24 * 60 * 60 * 1000);
       fm.stale_after = staleDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
     }
+  }
+  if (typeof fm.stale_after === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(fm.stale_after.trim())) {
+    fm.stale_after = `${fm.stale_after.trim()}T00:00:00Z`;
   }
 
   fm.sources = orderedSources;
@@ -2909,6 +3320,7 @@ export async function runStage1Flow(input: {
   const cleanedText = await cleanGroundingLinks(stage1Response.text, stage1Response.steps, {
     topic: input.topic,
     model: GEMINI_4_ARGON_MODEL,
+    workspaceRoot: workspacePath,
   });
   fs.writeFileSync(researchFileTarget, cleanedText, 'utf-8');
   if (fs.existsSync(researchStreamTarget)) {
@@ -2957,6 +3369,14 @@ export async function runStage1Flow(input: {
           createdAt: new Date().toISOString(),
           status: 'stage1_completed',
         };
+    if (
+      !meta.status ||
+      meta.status === 'running' ||
+      meta.status === 'stage1_running' ||
+      meta.status === 'stage1_dry_run'
+    ) {
+      meta.status = 'stage1_completed';
+    }
     const trustTier = getOkfTrustTier(stage1Doc.frontmatter);
     const stale = isOkfStale(stage1Doc.frontmatter);
     const sourcesCount = Array.isArray(stage1Doc.frontmatter.sources)
@@ -3103,7 +3523,12 @@ export function verifyOkfConcept(
       const sourcesCount = Array.isArray(doc.frontmatter.sources)
         ? doc.frontmatter.sources.length
         : 0;
-      if (meta.status === 'stage1_completed') {
+      if (
+        !meta.status ||
+        meta.status === 'running' ||
+        meta.status === 'stage1_running' ||
+        meta.status === 'stage1_completed'
+      ) {
         meta.status = 'stage1_verified';
       }
       meta.okf = {
@@ -3181,6 +3606,27 @@ export function sanitizeSpokenScript(text: string): string {
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\s+([.,;!?])/g, '$1')
     .trim();
+}
+
+/**
+ * Recursively applies `sanitizeSpokenScript()` across all string values in a parsed Stage 2 JSON
+ * payload (including nested objects and arrays like `modules[].spokenNarration`).
+ */
+export function sanitizeSpokenJson<T>(value: T): T {
+  if (typeof value === 'string') {
+    return sanitizeSpokenScript(value) as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeSpokenJson(item)) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = sanitizeSpokenJson(v);
+    }
+    return out as T;
+  }
+  return value;
 }
 
 function formatResearchForStage2Prompt(doc: OKFDocument, rawText: string): string {
@@ -3298,6 +3744,18 @@ export async function runStage2Flow(input: {
             createdAt: new Date().toISOString(),
             status: input.dryRun ? 'stage2_dry_run' : 'completed',
           };
+      if (
+        !input.dryRun &&
+        telemetryExtra &&
+        (!meta.status ||
+          meta.status === 'running' ||
+          meta.status === 'stage1_completed' ||
+          meta.status === 'stage1_verified' ||
+          meta.status === 'stage2_running' ||
+          meta.status === 'stage2_dry_run')
+      ) {
+        meta.status = 'completed';
+      }
       meta.okf = {
         ...(meta.okf || {}),
         type: researchDoc.frontmatter.type || 'Research Concept',
@@ -3361,13 +3819,7 @@ export async function runStage2Flow(input: {
   );
 
   if (contract.outputFormat === 'json') {
-    const parsedJson = JSON.parse(stage2Response.text);
-    if (typeof parsedJson.title === 'string') {
-      parsedJson.title = sanitizeSpokenScript(parsedJson.title);
-    }
-    if (typeof parsedJson.scriptBody === 'string') {
-      parsedJson.scriptBody = sanitizeSpokenScript(parsedJson.scriptBody);
-    }
+    const parsedJson = sanitizeSpokenJson(JSON.parse(stage2Response.text));
     fs.writeFileSync(scriptOutputTarget, JSON.stringify(parsedJson, null, 2), 'utf-8');
   } else {
     fs.writeFileSync(scriptOutputTarget, sanitizeSpokenScript(stage2Response.text), 'utf-8');
@@ -3452,7 +3904,37 @@ const OKF_TYPE_PALETTE: Record<string, string> = {
   Playbook: '#d97706',
   'Attested Computation': '#7c3aed',
 };
+const OKF_FALLBACK_TYPE_COLORS: readonly string[] = [
+  '#0284c7',
+  '#e11d48',
+  '#059669',
+  '#ea580c',
+  '#4f46e5',
+  '#0891b2',
+  '#c026d3',
+  '#65a30d',
+  '#dc2626',
+  '#9333ea',
+  '#ca8a04',
+  '#0f766e',
+];
 const DEFAULT_OKF_NODE_COLOR = '#64748b';
+
+export function getOkfTypeColor(type?: string): string {
+  const cleanType = String(type || '').trim();
+  if (!cleanType || cleanType.toLowerCase() === 'unknown') {
+    return DEFAULT_OKF_NODE_COLOR;
+  }
+  if (OKF_TYPE_PALETTE[cleanType]) {
+    return OKF_TYPE_PALETTE[cleanType];
+  }
+  let hash = 2166136261;
+  for (let i = 0; i < cleanType.length; i++) {
+    hash ^= cleanType.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return OKF_FALLBACK_TYPE_COLORS[(hash >>> 0) % OKF_FALLBACK_TYPE_COLORS.length];
+}
 
 export interface OKFConceptNode {
   id: string;
@@ -3997,6 +4479,19 @@ const OKF_VIZ_JS = `
     return html;
   }
 
+  const fallbackPalette = ["#0284c7", "#e11d48", "#059669", "#ea580c", "#4f46e5", "#0891b2", "#c026d3", "#65a30d", "#dc2626", "#9333ea", "#ca8a04", "#0f766e"];
+  function getTypeColor(type) {
+    const clean = String(type || "").trim();
+    if (!clean || clean.toLowerCase() === "unknown") return "#64748b";
+    if (bundle.palette && bundle.palette[clean]) return bundle.palette[clean];
+    let hash = 2166136261;
+    for (let i = 0; i < clean.length; i++) {
+      hash ^= clean.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return fallbackPalette[(hash >>> 0) % fallbackPalette.length];
+  }
+
   function showDetail(conceptId) {
     const data = nodeIndex[conceptId];
     if (!data) return;
@@ -4010,7 +4505,7 @@ const OKF_VIZ_JS = `
 
     const chip = document.getElementById("detail-type");
     chip.textContent = data.type;
-    chip.style.background = data.color;
+    chip.style.background = data.color || getTypeColor(data.type);
 
     document.getElementById("detail-title").textContent = data.label;
     document.getElementById("detail-id").textContent = conceptId;
@@ -4189,8 +4684,16 @@ export function generateBundleVisualization(
   const concepts = walkBundleConcepts(resolvedRoot);
   const conceptIds = new Set(concepts.map((c) => c.id));
 
+  const types = Array.from(new Set(concepts.map((c) => c.type))).sort((a, b) =>
+    a.localeCompare(b)
+  );
+  const resolvedPalette: Record<string, string> = { ...OKF_TYPE_PALETTE };
+  for (const t of types) {
+    resolvedPalette[t] = getOkfTypeColor(t);
+  }
+
   const nodes = concepts.map((c) => {
-    const color = OKF_TYPE_PALETTE[c.type] || DEFAULT_OKF_NODE_COLOR;
+    const color = getOkfTypeColor(c.type);
     return {
       data: {
         id: c.id,
@@ -4234,15 +4737,12 @@ export function generateBundleVisualization(
   for (const c of concepts) {
     bodies[c.id] = c.body;
   }
-  const types = Array.from(new Set(concepts.map((c) => c.type))).sort((a, b) =>
-    a.localeCompare(b)
-  );
   const graphData = {
     nodes,
     edges,
     bodies,
     types,
-    palette: OKF_TYPE_PALETTE,
+    palette: resolvedPalette,
   };
 
   const bundleName = options?.bundleName || path.basename(resolvedRoot);
