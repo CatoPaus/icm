@@ -8303,7 +8303,7 @@ const A2UI_STUDIO_JS = `
         const rawUrl = src.url || src.resource || "";
         const safeTitle = escapeHtml(src.title || rawUrl || "");
         const safeUrl = rawUrl ? escapeHtml(rawUrl) : "";
-        const strippedUrl = rawUrl ? rawUrl.replace(/^https?:\/\/(www\\.)?/i, "") : "";
+        const strippedUrl = rawUrl ? rawUrl.replace(/^https?:[/][/](www[.])?/i, "") : "";
         const shortUrl = strippedUrl
           ? escapeHtml(strippedUrl.slice(0, 68) + (strippedUrl.length > 68 ? "…" : ""))
           : "";
@@ -9668,6 +9668,17 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     },
   ]);
   assert(invalidRes.valid === false && invalidRes.errors.length > 0, 'Missing root component is rejected by validator');
+
+  // Verify embedded A2UI_STUDIO_JS has zero JavaScript syntax errors
+  let studioJsSyntaxValid = false;
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(A2UI_STUDIO_JS);
+    studioJsSyntaxValid = true;
+  } catch (err: any) {
+    throw new Error(`[ICM Self-Test FAILED] A2UI_STUDIO_JS syntax error: ${err?.message || String(err)}`);
+  }
+  assert(studioJsSyntaxValid, 'A2UI_STUDIO_JS parses with zero JavaScript syntax errors');
 
   console.log(`[ICM Self-Test] ✅ All ${assertions} assertions passed (0 tokens, including tsc --noEmit).`);
   return { passed: assertions };
