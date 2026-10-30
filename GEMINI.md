@@ -43,11 +43,13 @@ Activate the **`icm-co-architect`** skill (`.agents/skills/icm-co-architect/SKIL
 ## 2. Codebase Map & Editing Discipline
 
 - **Exact File Locations (Do Not Guess Paths):**
-  - `src/index.ts`: Pure zero-dependency ICM + OKF v0.2 + A2UI v0.9.1 engine (`runStage1Flow`, `runStage2Flow`, `icmOrchestratorFlow`), `streamGemini4ArgonInteraction()`, `loadStagePromptContract()`, `parseFrontmatterOutputSchema()`, `parseOkfDocument()`, `serializeOkfDocument()`, `getOkfTrustTier()`, `isOkfStale()`, `cleanGroundingLinks()`, `writeBundleConcept()`, `regenerateBundleIndexes()`, `appendBundleLog()`, `verifyOkfConcept()`, `generateBundleVisualization()`, `generateA2uiSurface()`, `validateA2uiSurfaceMessages()`, and the headless CLI entrypoint (`--cli`, `--stage1`, `--stage2`, `--verify`, `--viz`, `--a2ui`, `--dry-run`). *(There is no `src/cli.ts`.)*
+  - `src/index.ts`: Pure zero-dependency ICM + OKF v0.2 + A2UI v0.9.1 engine (`runStage1Flow`, `runStage2Flow`, `icmOrchestratorFlow`), `streamGemini4ArgonInteraction()`, `loadStagePromptContract()`, `parseFrontmatterOutputSchema()`, `parseOkfDocument()`, `serializeOkfDocument()`, `getOkfTrustTier()`, `isOkfStale()`, `cleanGroundingLinks()`, `writeBundleConcept()`, `regenerateBundleIndexes()`, `appendBundleLog()`, `verifyOkfConcept()`, `generateBundleVisualization()`, `generateA2uiSurface()`, `validateA2uiSurfaceMessages()`, `runIcmSelfTests()`, and the headless CLI entrypoint (`--test`, `--cli`, `--stage1`, `--stage2`, `--verify`, `--viz`, `--a2ui`, `--dry-run`). *(There is no `src/cli.ts`.)*
   - `SPEC.md`: Upstream Open Knowledge Format (`OKF v0.2`) specification (`GoogleCloudPlatform/open-knowledge-format`).
   - `A2UI_SPEC.md` & `specification/v0_9_1/`: Upstream Agent-to-UI (`A2UI v0.9.1`) protocol specification and Basic Catalog JSON Schema (`a2ui-project/a2ui`).
   - `prompts/01_research.md` & `prompts/02_script.md`: Layer 2 stage contracts (YAML frontmatter + Handlebars-style template).
   - `workspace/GEMINI.md`, `workspace/CONTEXT.md`, `workspace/_config/voice_guide.md`, `workspace/bundle/` (`index.md`, `log.md`): Layers 0, 1, and 3 context & persistent knowledge bundle files.
+- **Zero-Token Self-Test & Typecheck (`npm test`):**
+  - Run `npm test` (`npx tsc --noEmit && npx tsx src/index.ts --test`) after modifying `src/index.ts` to verify TypeScript compilation, OKF v0.2 round-trip serialization, `cleanGroundingLinks()` multi-byte UTF-8 byte-offset snapping, and A2UI v0.9.1 schema validation at zero token cost.
 - **Targeted Edits Over Full-File Overwrites:**
   - When modifying large files (`src/index.ts`), use `edit_file` sequentially rather than firing parallel overlapping `edit_file` calls on the same file.
 

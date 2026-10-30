@@ -28,6 +28,7 @@ In ICM, Stage 2 (`prompts/02_script.md`) consumes the physical file produced by 
    - `stages/<stage>/output/thinking_trace.md`
    - `stages/<stage>/output/<artifact>`
 5. Apply the **Edit-Source Principle**: if something needs adjustment, fix the Layer 2/3 contract (`prompts/` or `_config/`) before moving to the next stage.
+6. Whenever you modify [`src/index.ts`](../../src/index.ts), run `npm test` (`npx tsc --noEmit && npx tsx src/index.ts --test`) to execute the zero-token TypeScript + OKF v0.2 + UTF-8 grounding + A2UI v0.9.1 self-test suite.
 
 ---
 

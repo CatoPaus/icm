@@ -1859,7 +1859,37 @@ export async function cleanGroundingLinks(
   }> = [];
 
   if (Array.isArray(steps)) {
-    for (const step of steps) {
+    const isModelTextStep = (s: any): boolean => {
+      if (s?.type === 'model_output' && Array.isArray(s.content)) {
+        return s.content.some((cp: any) => typeof cp?.text === 'string' && cp.text.trim().length > 0);
+      }
+      if (s?.type === 'text' && typeof s.text === 'string' && s.text.trim().length > 0) {
+        return true;
+      }
+      return false;
+    };
+
+    let finalModelOutputIdx = -1;
+    for (let i = steps.length - 1; i >= 0; i--) {
+      if (isModelTextStep(steps[i])) {
+        finalModelOutputIdx = i;
+        break;
+      }
+    }
+    if (finalModelOutputIdx === -1) {
+      for (let i = steps.length - 1; i >= 0; i--) {
+        if (
+          (steps[i]?.type === 'model_output' && Array.isArray(steps[i].content)) ||
+          (steps[i]?.type === 'text' && Array.isArray(steps[i].annotations))
+        ) {
+          finalModelOutputIdx = i;
+          break;
+        }
+      }
+    }
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
       if (step?.type === 'google_search_result' && Array.isArray(step.result)) {
         for (const resItem of step.result) {
           if (resItem?.url && typeof resItem.url === 'string') {
@@ -1868,19 +1898,30 @@ export async function cleanGroundingLinks(
         }
       }
 
-      if (step?.type === 'model_output' && Array.isArray(step.content)) {
-        for (const contentPart of step.content) {
+      const contentParts =
+        step?.type === 'model_output' && Array.isArray(step.content)
+          ? step.content
+          : step?.type === 'text' && Array.isArray(step.annotations)
+            ? [step]
+            : null;
+
+      if (contentParts) {
+        const isFinalStep =
+          finalModelOutputIdx !== -1 ? i === finalModelOutputIdx : i === steps.length - 1;
+        for (const contentPart of contentParts) {
           if (Array.isArray(contentPart?.annotations)) {
             for (const ann of contentPart.annotations) {
               if (ann?.url && typeof ann.url === 'string') {
-                groundedSources.push({ title: ann.title, url: ann.url });
-                if (typeof ann.end_index === 'number' && ann.end_index > 0) {
-                  inlineAnnotations.push({
-                    start_index: ann.start_index,
-                    end_index: ann.end_index,
-                    title: ann.title,
-                    url: ann.url,
-                  });
+                if (isFinalStep) {
+                  groundedSources.push({ title: ann.title, url: ann.url });
+                  if (typeof ann.end_index === 'number' && ann.end_index > 0) {
+                    inlineAnnotations.push({
+                      start_index: ann.start_index,
+                      end_index: ann.end_index,
+                      title: ann.title,
+                      url: ann.url,
+                    });
+                  }
                 }
               }
             }
@@ -2312,14 +2353,68 @@ export async function cleanGroundingLinks(
   let workingText = text;
   if (inlineAnnotations.length > 0) {
     const buf = Buffer.from(workingText, 'utf8');
+    const snapSafeEndIndex = (rawIdx: number): number | null => {
+      let idx = rawIdx;
+      // Never split a multi-byte UTF-8 character sequence (continuation bytes 10xxxxxx)
+      while (idx < buf.length && (buf[idx] & 0b11000000) === 0b10000000) {
+        idx++;
+      }
+      if (idx > buf.length || idx <= frontmatterEndByteOffset) return null;
+
+      // Inspect surrounding text on the current line
+      let lineStart = idx;
+      while (lineStart > frontmatterEndByteOffset && buf[lineStart - 1] !== 0x0a) {
+        lineStart--;
+      }
+      let lineEnd = idx;
+      while (lineEnd < buf.length && buf[lineEnd] !== 0x0a && buf[lineEnd] !== 0x0d) {
+        lineEnd++;
+      }
+      const lineStr = buf.subarray(lineStart, lineEnd).toString('utf8');
+      // Never weave byte-offset footnotes inside Markdown headings (`## ...`) or Markdown table rows (`| ... |`)
+      if (/^\s*#{1,6}\s/.test(lineStr) || /^\s*\|/.test(lineStr)) {
+        return null;
+      }
+
+      const beforeStr = buf.subarray(lineStart, idx).toString('utf8');
+      let afterStr = buf.subarray(idx, lineEnd).toString('utf8');
+
+      // Advance to the end of the current word/token (or short section/parenthetical token like `§ 11-2` / `(RK 1)`)
+      if (/(?:§|\([*_`]*[\p{L}\p{N}_\-]{1,12})\s*$/u.test(beforeStr)) {
+        const clauseMatch = afterStr.match(/^(?:[\p{L}\p{N}_\-]+|\s+(?:§\s*)?[\p{L}\p{N}_\-]+)+/u);
+        if (clauseMatch) {
+          const advanceBytes = Buffer.byteLength(clauseMatch[0], 'utf8');
+          idx += advanceBytes;
+          afterStr = buf.subarray(idx, lineEnd).toString('utf8');
+        }
+      } else {
+        const wordMatch = afterStr.match(/^[\p{L}\p{N}_\-]+/u);
+        if (wordMatch) {
+          const advanceBytes = Buffer.byteLength(wordMatch[0], 'utf8');
+          idx += advanceBytes;
+          afterStr = buf.subarray(idx, lineEnd).toString('utf8');
+        }
+      }
+
+      // Advance past any immediately following closing emphasis or bracket characters (`*`, `_`, `` ` ``, `)`, `]`)
+      const closingMatch = afterStr.match(/^[*_`)\]]+/);
+      if (closingMatch) {
+        idx += Buffer.byteLength(closingMatch[0], 'utf8');
+      }
+
+      return idx;
+    };
+
     const byEndIndex = new Map<number, OKFSource[]>();
     for (const ann of inlineAnnotations) {
       if (ann.end_index > buf.length || ann.end_index <= frontmatterEndByteOffset) continue;
+      const safeIdx = snapSafeEndIndex(ann.end_index);
+      if (safeIdx === null) continue;
       const srcEntry = registerSource(ann.url, ann.title, undefined, undefined, true);
-      if (!byEndIndex.has(ann.end_index)) {
-        byEndIndex.set(ann.end_index, []);
+      if (!byEndIndex.has(safeIdx)) {
+        byEndIndex.set(safeIdx, []);
       }
-      const group = byEndIndex.get(ann.end_index)!;
+      const group = byEndIndex.get(safeIdx)!;
       if (!group.some((item) => item.id === srcEntry.id)) {
         group.push(srcEntry);
       }
@@ -2338,7 +2433,10 @@ export async function cleanGroundingLinks(
       const neededFootnotes = sourcesAtSpan
         .filter(
           (s) =>
-            !precedingSlice.endsWith(`[^${s.id}]`) && !followingSlice.startsWith(`[^${s.id}]`)
+            !precedingSlice.endsWith(`[^${s.id}]`) &&
+            !followingSlice.startsWith(`[^${s.id}]`) &&
+            !followingSlice.startsWith(`.^${s.id}`) &&
+            !followingSlice.startsWith(`?^${s.id}`)
         )
         .map((s) => `[^${s.id}]`)
         .join('');
@@ -2529,6 +2627,26 @@ export async function cleanGroundingLinks(
   }
   orderedSources.length = 0;
   orderedSources.push(...dedupedSources);
+  // Convert bare `.^id` typos (`/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/g`) to `.[^$1]`
+  bodyText = bodyText.replace(/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/gi, '.[^$1]');
+  bodyText = bodyText.replace(
+    /([.?!:;]?)(?<!\[)\^([A-Za-z0-9_\-]+)(?!\])/g,
+    (fullMatch, punct: string, rawId: string) => {
+      const mapped = sourcesById.get(rawId);
+      if (!mapped) return fullMatch;
+      const canonicalId = mapped.id || rawId;
+      return `[^${canonicalId}]${punct || ''}`;
+    }
+  );
+  // Normalize trailing sentence punctuation (`word.[^id]` -> `word[^id].` and `[^a].[^b]` -> `[^a] [^b].`)
+  bodyText = bodyText.replace(
+    /((?:\[\^[A-Za-z0-9_\-]+\][ \t]*)+)([.?!:;])((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)/g,
+    '$1 $3$2'
+  );
+  bodyText = bodyText.replace(
+    /([^\s.?!:;])([.?!])((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)/g,
+    (_m, before: string, punct: string, fns: string) => `${before}${fns.trimStart()}${punct}`
+  );
   bodyText = bodyText.replace(/(?:\[\^[A-Za-z0-9_\-]+\][ \t]*){2,}/g, (cluster) => {
     const trailingSpace = /[ \t]+$/.exec(cluster)?.[0] || '';
     const seenFn = new Set<string>();
@@ -2543,15 +2661,13 @@ export async function cleanGroundingLinks(
   });
 
   // 7. Append OKF v0.2 footnote definitions (`[^id]: Title`) at the bottom of the body (SPEC.md §5.1)
+  // Only emit definitions for footnote IDs actually cited (`[^id]`) in the body (`citedFootnoteIds`).
   const citedFootnoteIds = Array.from(
     new Set(Array.from(bodyText.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1]))
   );
-  const allFootnoteIds = Array.from(
-    new Set([...citedFootnoteIds, ...existingFootnoteDefs.keys()])
-  );
 
   const footnoteLines: string[] = [];
-  for (const fnId of allFootnoteIds) {
+  for (const fnId of citedFootnoteIds) {
     const src = sourcesById.get(fnId);
     const label = src?.title || existingFootnoteDefs.get(fnId) || src?.resource || fnId;
     footnoteLines.push(`[^${fnId}]: ${label}`);
@@ -2815,11 +2931,17 @@ function mergeMarkdownSectionsAndSchema(existingBody: string, incomingBody: stri
     }
   }
 
-  const mergedFootnotes = new Map<string, string>(oldParsed.footnotes);
-  for (const [fnId, fnLine] of newParsed.footnotes.entries()) {
-    mergedFootnotes.set(fnId, fnLine);
+  const mergedProse = outBlocks.join('\n\n');
+  const citedInMerged = Array.from(
+    new Set(Array.from(mergedProse.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1]))
+  );
+  const allFootnotes: string[] = [];
+  for (const fnId of citedInMerged) {
+    const fnLine = newParsed.footnotes.get(fnId) || oldParsed.footnotes.get(fnId);
+    if (fnLine) {
+      allFootnotes.push(fnLine);
+    }
   }
-  const allFootnotes = Array.from(mergedFootnotes.values());
   if (allFootnotes.length > 0) {
     outBlocks.push(allFootnotes.join('\n'));
   }
@@ -5687,8 +5809,11 @@ export function cleanChecklistLabel(rawText: string): string {
   text = text.replace(/\$(?!\s)([^$]*?\S)\$/g, '$1');
   // Convert markdown links [label](url) -> label
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-  // Strip inline code backticks and bold markers
-  text = text.replace(/`([^`]+)`/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1');
+  // Strip inline code backticks, bold, and italic markers
+  text = text
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1');
   // Normalize whitespace and trailing punctuation spacing
   text = text.replace(/\s+/g, ' ').replace(/\s+([.,;:?!])/g, '$1').trim();
   return text;
@@ -5946,14 +6071,48 @@ export function normalizeStage2ForA2ui(
       });
     }
 
-    // If module has a boardActionItem (like icm-brannvern-studio), also populate a scenario case
-    if (actionItem) {
+    // If module has a boardActionItem (or explicit caseScenario), populate a concise situational scenario case
+    const explicitCaseScenario = String(rawMod.caseScenario || rawMod.scenario || '').trim();
+    if (actionItem || explicitCaseScenario) {
+      let synthesizedScenario = explicitCaseScenario;
+      if (!synthesizedScenario) {
+        const scenarioParts: string[] = [];
+        const firstPara = narration
+          .split(/\r?\n\r?\n/)
+          .map((p) => p.trim())
+          .find(Boolean) || '';
+        const quizQ = typeof rawMod.quizQuestion === 'string' ? rawMod.quizQuestion.trim() : '';
+        if (quizQ) {
+          scenarioParts.push(`Situasjonsbeskrivelse / Dilemma:\n${quizQ}`);
+        } else if (firstPara) {
+          scenarioParts.push(firstPara);
+        }
+        if (bullets.length > 0) {
+          const contextHeader = subtitleOrBasis
+            ? `Sentrale kontrollpunkter (${subtitleOrBasis}):`
+            : 'Sentrale kontrollpunkter:';
+          scenarioParts.push(
+            `${contextHeader}\n${bullets.slice(0, 4).map((b: string) => `• ${b}`).join('\n')}`
+          );
+        } else if (quizQ && firstPara) {
+          scenarioParts.unshift(firstPara);
+        }
+        synthesizedScenario = scenarioParts.join('\n\n') || firstPara || narration;
+      }
+
+      const quizExpl =
+        typeof rawMod.quizExplanation === 'string' ? rawMod.quizExplanation.trim() : '';
+      const enrichedRecommendation =
+        actionItem && quizExpl
+          ? `${actionItem}\n\n📌 Faglig begrunnelse: ${quizExpl}`
+          : actionItem || quizExpl;
+
       cases.push({
         id: `case_mod_${idx + 1}`,
         title: `${modTitle}`,
         basisOrContext: subtitleOrBasis,
-        scenario: narration,
-        recommendedAction: actionItem,
+        scenario: synthesizedScenario,
+        recommendedAction: enrichedRecommendation,
       });
     }
   });
@@ -6823,7 +6982,10 @@ const A2UI_STUDIO_JS = `
       .replace(/\\%/g, "%");
     text = text.replace(/\\$(?!\\s)([^$]*?\\S)\\$/g, "$1");
     text = text.replace(/\\[([^\\]]+)\\]\\([^)]+\\)/g, "$1");
-    text = text.replace(/\\x60([^\\x60]+)\\x60/g, "$1").replace(/\\*\\*([^*]+)\\*\\*/g, "$1");
+    text = text
+      .replace(/\\x60([^\\x60]+)\\x60/g, "$1")
+      .replace(/\\*\\*([^*]+)\\*\\*/g, "$1")
+      .replace(/\\*([^*]+)\\*/g, "$1");
     text = text.replace(/\\s+/g, " ").replace(/\\s+([.,;:?!])/g, "$1").trim();
     return text;
   }
@@ -7044,6 +7206,9 @@ const A2UI_STUDIO_JS = `
 
   function formatInlineLatexAndFootnotes(md, sources) {
     let out = String(md || "");
+    // Strip standalone bottom footnote definitions ([^id]: Title) so they don't render as raw lines below prose
+    out = out.replace(/^\\s*\\[\\^([A-Za-z0-9_\\-]+)\\]:\\s*(.+)$/gm, "");
+    out = out.replace(/\\n+---\\s*$/g, "").trim();
     // Format inline TeX math spans ($...$)
     out = out.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_, inner) {
       let cleaned = String(inner)
@@ -7593,11 +7758,23 @@ const A2UI_STUDIO_JS = `
       h2.className = "a2ui-h2";
       h2.textContent = "Modul " + (mod.number || idx + 1) + ": " + mod.title;
       headRow.appendChild(h2);
+      const badgeWrap = document.createElement("div");
+      badgeWrap.className = "a2ui-row";
+      if (mod.durationOrMeta) {
+        const durBadge = document.createElement("span");
+        durBadge.className = "a2ui-badge neutral";
+        const durTxt = String(mod.durationOrMeta).trim();
+        durBadge.textContent = durTxt.startsWith("⏱") ? durTxt : "⏱️ " + durTxt;
+        badgeWrap.appendChild(durBadge);
+      }
       if (mod.subtitleOrBasis) {
         const basisBadge = document.createElement("span");
         basisBadge.className = "a2ui-badge accent";
         basisBadge.textContent = mod.subtitleOrBasis;
-        headRow.appendChild(basisBadge);
+        badgeWrap.appendChild(basisBadge);
+      }
+      if (badgeWrap.childNodes.length > 0) {
+        headRow.appendChild(badgeWrap);
       }
       card.appendChild(headRow);
 
@@ -7646,7 +7823,7 @@ const A2UI_STUDIO_JS = `
         actBox.style.border = "1px solid var(--success-border)";
         actBox.style.borderRadius = "8px";
         actBox.innerHTML =
-          "<strong>⚡ Tiltak / Styrets handlingspunkt:</strong><div style='margin-top:4px'>" +
+          "<strong>⚡ Praktisk tiltak / Handlingspunkt:</strong><div style='margin-top:4px'>" +
           escapeHtml(mod.actionItem) +
           "</div>";
         card.appendChild(actBox);
@@ -7716,10 +7893,19 @@ const A2UI_STUDIO_JS = `
       questions.forEach((q, qIdx) => {
         const qCard = document.createElement("div");
         qCard.className = "a2ui-card a2ui-col";
+        const qHeadRow = document.createElement("div");
+        qHeadRow.className = "a2ui-row justify-between";
         const qHead = document.createElement("h3");
         qHead.className = "a2ui-h3";
         qHead.textContent = (qIdx + 1) + ". " + q.question;
-        qCard.appendChild(qHead);
+        qHeadRow.appendChild(qHead);
+        if (q.sourceModule) {
+          const srcModBadge = document.createElement("span");
+          srcModBadge.className = "a2ui-badge neutral";
+          srcModBadge.textContent = q.sourceModule;
+          qHeadRow.appendChild(srcModBadge);
+        }
+        qCard.appendChild(qHeadRow);
 
         const picker = renderComponent(surface, {
           id: comp.id + "_q_" + q.id,
@@ -7785,8 +7971,8 @@ const A2UI_STUDIO_JS = `
           id: comp.id + "_input_" + c.id,
           component: "TextField",
           variant: "longText",
-          label: "Ditt vedtak / handlingsplan (lagres i A2UI Data Model):",
-          placeholder: "Beskriv hvordan styret eller ansvarlig bør håndtere dette...",
+          label: "Ditt løsningsforslag / handlingsplan (lagres i A2UI Data Model):",
+          placeholder: "Beskriv din vurdering og foreslåtte tiltak her...",
           value: { path: responsesPath + "/" + c.id },
         });
         card.appendChild(tf);
@@ -7809,7 +7995,7 @@ const A2UI_STUDIO_JS = `
             rec.style.border = "1px solid var(--success-border)";
             rec.style.borderRadius = "8px";
             rec.innerHTML =
-              "<strong>Anbefalt vedtak / tiltak:</strong><div>" +
+              "<strong>⚡ Anbefalt tiltak & Løsning:</strong><div style='margin-top:6px;white-space:pre-wrap'>" +
               escapeHtml(c.recommendedAction) +
               "</div>";
             card.appendChild(rec);
@@ -7922,7 +8108,7 @@ const A2UI_STUDIO_JS = `
       sideCard.className = "a2ui-card a2ui-col";
       const sHead = document.createElement("h3");
       sHead.className = "a2ui-h3";
-      sHead.textContent = "Verifiserte Kilder (" + sources.length + ")";
+      sHead.textContent = "Kilder & Sporbarhet (" + sources.length + ")";
       sideCard.appendChild(sHead);
 
       const srcList = document.createElement("div");
@@ -7930,20 +8116,30 @@ const A2UI_STUDIO_JS = `
         const sc = document.createElement("div");
         sc.className = "okf-source-card";
         const safeId = escapeHtml(src.id || "src");
-        const safeTitle = escapeHtml(src.title || src.url || src.resource || "");
-        const safeUrl = src.url ? escapeHtml(src.url) : "";
+        const rawUrl = src.url || src.resource || "";
+        const safeTitle = escapeHtml(src.title || rawUrl || "");
+        const safeUrl = rawUrl ? escapeHtml(rawUrl) : "";
+        const shortUrl = rawUrl
+          ? escapeHtml(rawUrl.replace(/^https?:\\/\\/(www\\.)?/i, "").slice(0, 68) + (rawUrl.length > 76 ? "…" : ""))
+          : "";
         sc.id = "okf-src-" + (src.id || "src");
         sc.innerHTML =
           "<div><strong>[^" +
           safeId +
           "]</strong> " +
-          safeTitle +
+          (safeUrl
+            ? '<a href="' +
+              safeUrl +
+              '" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-weight:600;text-decoration:none">' +
+              safeTitle +
+              " ↗</a>"
+            : safeTitle) +
           "</div>" +
           (safeUrl
-            ? '<div style="margin-top:2px;word-break:break-all"><a href="' +
+            ? '<div style="margin-top:2px;font-size:11px;word-break:break-all"><a href="' +
               safeUrl +
-              '" target="_blank" rel="noopener" style="color:var(--primary)">' +
-              safeUrl +
+              '" target="_blank" rel="noopener noreferrer" style="color:var(--text-muted)">' +
+              shortUrl +
               "</a></div>"
             : "") +
           "<div>" +
@@ -7972,6 +8168,36 @@ const A2UI_STUDIO_JS = `
       split.appendChild(canvas);
       split.appendChild(detail);
       wrap.appendChild(split);
+
+      function renderGraphNodeDetail(d) {
+        if (!d) return;
+        const rawBody = (bundleGraph.bodies && bundleGraph.bodies[d.id]) || "";
+        const formattedBody = formatInlineLatexAndFootnotes(rawBody, []);
+        detail.innerHTML =
+          '<span class="a2ui-badge primary">' +
+          escapeHtml(d.type || "Concept") +
+          "</span>" +
+          '<h3 class="a2ui-h3" style="margin-top:8px">' +
+          escapeHtml(d.label || d.id) +
+          "</h3>" +
+          '<p class="a2ui-caption">' +
+          escapeHtml(d.description || "") +
+          "</p><hr class='a2ui-divider'>" +
+          '<div class="okf-md-body">' +
+          (window.marked ? window.marked.parse(formattedBody) : escapeHtml(rawBody)) +
+          "</div>";
+        detail.querySelectorAll("a[href^='http']").forEach((a) => {
+          a.setAttribute("target", "_blank");
+          a.setAttribute("rel", "noopener noreferrer");
+        });
+      }
+
+      const nodesList = bundleGraph.nodes || [];
+      const initialNodeWrapper =
+        nodesList.find((n) => n.group === "concept" || (n.data && n.data.group === "concept")) || nodesList[0];
+      if (initialNodeWrapper && initialNodeWrapper.data) {
+        renderGraphNodeDetail(initialNodeWrapper.data);
+      }
 
       setTimeout(() => {
         if (!window.cytoscape) {
@@ -8011,22 +8237,7 @@ const A2UI_STUDIO_JS = `
           layout: { name: (bundleGraph.nodes || []).length > 1 ? "cose" : "grid", padding: 40 },
         });
         cy.on("tap", "node", (evt) => {
-          const d = evt.target.data();
-          const rawBody = (bundleGraph.bodies && bundleGraph.bodies[d.id]) || "";
-          const formattedBody = formatInlineLatexAndFootnotes(rawBody, []);
-          detail.innerHTML =
-            '<span class="a2ui-badge primary">' +
-            escapeHtml(d.type || "Concept") +
-            "</span>" +
-            '<h3 class="a2ui-h3" style="margin-top:8px">' +
-            escapeHtml(d.label || d.id) +
-            "</h3>" +
-            '<p class="a2ui-caption">' +
-            escapeHtml(d.description || "") +
-            "</p><hr class='a2ui-divider'>" +
-            '<div class="okf-md-body">' +
-            (window.marked ? window.marked.parse(formattedBody) : escapeHtml(rawBody)) +
-            "</div>";
+          renderGraphNodeDetail(evt.target.data());
         });
       }, 30);
 
@@ -8227,6 +8438,7 @@ export function generateA2uiSurface(
   const graphNodes = concepts.map((c) => ({
     data: {
       id: c.id,
+      group: 'concept',
       label: c.title || c.id,
       type: c.type,
       description: c.description,
@@ -8255,6 +8467,7 @@ export function generateA2uiSurface(
         graphNodes.push({
           data: {
             id: target,
+            group: 'concept',
             label: shortLabel,
             type: 'Linked Concept',
             description: `Referert OKF-konsept fra ${c.id}`,
@@ -8281,6 +8494,7 @@ export function generateA2uiSurface(
         graphNodes.push({
           data: {
             id: srcNodeId,
+            group: 'source',
             label: `[^${src.id}] ${String(src.title || srcUrl).slice(0, 42)}`,
             type: 'Verified Source',
             description: srcUrl,
@@ -8292,7 +8506,7 @@ export function generateA2uiSurface(
           },
         });
         graphBodies[srcNodeId] = [
-          `# [^${src.id}] ${src.title || srcUrl}`,
+          `# Kilde [${src.id}]: ${src.title || srcUrl}`,
           srcUrl ? `- **Kilde-URL:** [${srcUrl}](${srcUrl})` : '',
           src.retrieved_at ? `- **Hentet (\`retrieved_at\`):** \`${src.retrieved_at}\`` : '',
           src.last_modified ? `- **Sist endret (\`last_modified\`):** \`${src.last_modified}\`` : '',
@@ -8784,8 +8998,321 @@ ${A2UI_STUDIO_JS}
   };
 }
 
+/**
+ * Runs a zero-token, zero-network self-test suite covering:
+ * 1. OKF v0.2 parser/serializer round-trip, trust tiers, and staleness detection (`retrieved_at`, `last_modified`).
+ * 2. `cleanGroundingLinks()` multi-byte UTF-8 byte-offset snapping (`æ`, `ø`, `å`, `§`, `—`), Markdown heading/table guards,
+ *    closing emphasis/bracket snapping (`**bold**`, `(RK 1)`), `.^id` / `.[^id]` normalization, `isFinalStep` filtering,
+ *    and cited-only footnote definitions (`citedFootnoteIds`).
+ * 3. A2UI v0.9.1 `validateA2uiSurfaceMessages()`, `cleanChecklistLabel()` (`**bold**`, `*italic*`, `` `code` ``, `[^id]`),
+ *    and `normalizeStage2ForA2ui()` concise `CaseSimulator` synthesis.
+ */
+export async function runIcmSelfTests(): Promise<{ passed: number }> {
+  let assertions = 0;
+  function assert(condition: unknown, message: string): void {
+    if (!condition) {
+      throw new Error(`[ICM Self-Test FAILED] ${message}`);
+    }
+    assertions++;
+  }
+
+  // 1. OKF v0.2 round-trip, trust tier, and staleness
+  const rawOkfSample = [
+    '---',
+    'type: Research Concept',
+    'title: "Brannvernleders plikter — æøå § 11"',
+    'description: "Systematisk sikkerhetsarbeid i henhold til FOB og BPL."',
+    'tags: [brannvern, fob, kontroll]',
+    'status: draft',
+    'generated:',
+    '  by: agent:gemini-4-argon',
+    '  at: 2026-10-30T10:00:00Z',
+    'stale_after: 2099-01-01',
+    'sources:',
+    '  - id: lovdata-fob',
+    '    title: "Forskrift om brannforebygging (FOB)"',
+    '    resource: "https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710"',
+    '    retrieved_at: 2026-10-30',
+    '    last_modified: 2024-01-01',
+    '---',
+    '',
+    '# Oversikt',
+    '',
+    'Eier skal dokumentere brannsikkerhet[^lovdata-fob].',
+    '',
+    '[^lovdata-fob]: Forskrift om brannforebygging (FOB)',
+    '',
+  ].join('\n');
+
+  const parsedOkf = parseOkfDocument(rawOkfSample);
+  assert(parsedOkf.frontmatter.title === 'Brannvernleders plikter — æøå § 11', 'OKF title parsed');
+  assert(getOkfTrustTier(parsedOkf.frontmatter) === 'unverified', 'Draft status maps to unverified trust tier');
+  assert(isOkfStale(parsedOkf.frontmatter) === false, 'Future stale_after is fresh');
+  assert(
+    Array.isArray(parsedOkf.frontmatter.sources) &&
+      parsedOkf.frontmatter.sources[0]?.retrieved_at === '2026-10-30' &&
+      parsedOkf.frontmatter.sources[0]?.last_modified === '2024-01-01',
+    'OKF source retrieved_at and last_modified preserved on parse'
+  );
+
+  const serializedOkf = serializeOkfDocument(parsedOkf);
+  const reparsedOkf = parseOkfDocument(serializedOkf);
+  assert(
+    reparsedOkf.frontmatter.sources?.[0]?.retrieved_at === '2026-10-30T00:00:00Z' &&
+      reparsedOkf.frontmatter.sources?.[0]?.last_modified === '2024-01-01T00:00:00Z',
+    'OKF source retrieved_at and last_modified normalize to ISO 8601 UTC and survive serialize -> parse round-trip'
+  );
+  assert(
+    getOkfTrustTier({ status: 'stable', verified: [{ by: 'human:cato', at: '2026-10-30' }] }) === 'human-reviewed',
+    'Human verifier yields human-reviewed trust tier'
+  );
+  assert(
+    getOkfTrustTier({ status: 'stable', verified: [{ by: 'agent:gemini-4-argon', at: '2026-10-30' }] }) ===
+      'machine-confirmed',
+    'Agent verifier yields machine-confirmed trust tier'
+  );
+  assert(isOkfStale({ stale_after: '2020-01-01' }) === true, 'Past stale_after is detected as stale');
+
+  // 2. cleanGroundingLinks() UTF-8, heading/table skip, closing emphasis/paren snap, .^id typo, isFinalStep, citedFootnoteIds
+  const lineHeading = '## 1. Hovedkrav for særskilte brannobjekter (§ 13)';
+  const lineTable = '| Risikoklasse | Krav til rømningsvei | Kontroll |';
+  const lineProse =
+    'Brannvernleder må påse at **rømningsveier** og (RK 1) er frie. Kravet gjelder også næringsbygg.^dibk-no Dette er påbudt.[^lovdata-fob]';
+  const bodyMd = [
+    lineHeading,
+    '',
+    lineTable,
+    '',
+    lineProse,
+    '',
+    '[^lovdata-fob]: Forskrift om brannforebygging',
+    '[^dibk-no]: Direktoratet for byggkvalitet',
+    '[^uncited-dangling]: Dangling Uncited Source',
+  ].join('\n');
+
+  const fmPrefix = [
+    '---',
+    'type: Research Concept',
+    'title: "Test UTF-8 Grounding"',
+    'status: draft',
+    'sources:',
+    '  - id: lovdata-fob',
+    '    title: "Forskrift om brannforebygging"',
+    '    resource: "https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710"',
+    '  - id: dibk-no',
+    '    title: "Direktoratet for byggkvalitet"',
+    '    resource: "https://dibk.no/regelverk/byggteknisk-forskrift-tek17/"',
+    '---',
+    '',
+  ].join('\n');
+  const rawTestMarkdown = `${fmPrefix}${bodyMd}`;
+  const fmBytePrefix = Buffer.byteLength(fmPrefix, 'utf-8');
+
+  const bodyBuf = Buffer.from(bodyMd, 'utf-8');
+  // Byte offset inside the heading (should be skipped)
+  const headingByteOffset = fmBytePrefix + Buffer.from('## 1. Hovedkrav for sær', 'utf-8').length;
+  // Byte offset inside the table row (should be skipped)
+  const tableStartByte =
+    fmBytePrefix + Buffer.from(lineHeading + '\n\n| Risikoklasse | Krav til røm', 'utf-8').length;
+  // Byte offset landing mid-word and mid-UTF8 on 'rømningsveier' inside **rømningsveier**
+  const prosePrefixBeforeRomning =
+    lineHeading + '\n\n' + lineTable + '\n\nBrannvernleder må påse at **r';
+  // +1 byte into 'ø' (0xC3 0xB8) to test mid-codepoint UTF-8 continuation byte safety + snapping past **
+  const midUtf8BoldByteOffset =
+    fmBytePrefix + Buffer.from(prosePrefixBeforeRomning, 'utf-8').length + 1;
+  // Byte offset landing inside (RK 1) right before closing ')'
+  const prosePrefixBeforeParen =
+    lineHeading + '\n\n' + lineTable + '\n\nBrannvernleder må påse at **rømningsveier** og (RK 1';
+  const insideParenByteOffset = fmBytePrefix + Buffer.from(prosePrefixBeforeParen, 'utf-8').length;
+
+  const mockOutputs = [
+    // Intermediate draft step (should be ignored because a later model_output exists)
+    {
+      type: 'model_output',
+      content: [
+        {
+          type: 'text',
+          text: 'Draft step text',
+          annotations: [
+            {
+              type: 'url_citation',
+              url: 'https://example.com/draft-ignored',
+              title: 'Draft Ignored Source',
+              start_index: 0,
+              end_index: 10,
+            },
+          ],
+        },
+      ],
+    },
+    // Final model_output step
+    {
+      type: 'model_output',
+      content: [
+        {
+          type: 'text',
+          text: rawTestMarkdown,
+          annotations: [
+            {
+              type: 'url_citation',
+              url: 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710',
+              title: 'Forskrift om brannforebygging',
+              start_index: fmBytePrefix,
+              end_index: headingByteOffset,
+            },
+            {
+              type: 'url_citation',
+              url: 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710',
+              title: 'Forskrift om brannforebygging',
+              start_index: headingByteOffset + 5,
+              end_index: tableStartByte,
+            },
+            {
+              type: 'url_citation',
+              url: 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710',
+              title: 'Forskrift om brannforebygging',
+              start_index: tableStartByte + 5,
+              end_index: midUtf8BoldByteOffset,
+            },
+            {
+              type: 'url_citation',
+              url: 'https://dibk.no/regelverk/byggteknisk-forskrift-tek17/',
+              title: 'Direktoratet for byggkvalitet',
+              start_index: midUtf8BoldByteOffset + 5,
+              end_index: insideParenByteOffset,
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  assert(
+    fmBytePrefix + bodyBuf.length > insideParenByteOffset,
+    'UTF-8 buffer covers test byte offsets'
+  );
+  const cleanedMd = await cleanGroundingLinks(rawTestMarkdown, mockOutputs);
+  assert(!cleanedMd.includes('\uFFFD'), 'No UTF-8 replacement characters (U+FFFD) after byte-offset injection');
+  assert(
+    cleanedMd.includes('## 1. Hovedkrav for særskilte brannobjekter (§ 13)'),
+    'Heading was not corrupted by byte-offset citation injection'
+  );
+  assert(
+    cleanedMd.includes('| Risikoklasse | Krav til rømningsvei | Kontroll |'),
+    'Markdown table row was not corrupted by byte-offset citation injection'
+  );
+  assert(
+    cleanedMd.includes('**rømningsveier**[^lovdata-fob]'),
+    'Citation snapped cleanly past multi-byte ø and closing **bold** markers'
+  );
+  assert(
+    cleanedMd.includes('(RK 1)[^dibk-no]'),
+    'Citation snapped cleanly past closing parenthesis of (RK 1)'
+  );
+  assert(
+    cleanedMd.includes('næringsbygg[^dibk-no].'),
+    'Bare .^dibk-no typo normalized to [^dibk-no]. before period'
+  );
+  assert(
+    cleanedMd.includes('Dette er påbudt[^lovdata-fob].'),
+    'Trailing .[^lovdata-fob] normalized to [^lovdata-fob].'
+  );
+  assert(
+    !cleanedMd.includes('uncited-dangling') && !cleanedMd.includes('draft-ignored'),
+    'Uncited footnote definitions and non-final draft step sources are excluded'
+  );
+
+  // 3. A2UI v0.9.1 validation, checklist label cleaning, and concise CaseSimulator synthesis
+  const cleanedChkLabel = cleanChecklistLabel(
+    '**Brannvernleder** skal kontrollere *varme arbeider* (*FOB § 4*) og `internkontroll` [^lovdata-fob]'
+  );
+  assert(
+    cleanedChkLabel === 'Brannvernleder skal kontrollere varme arbeider (FOB § 4) og internkontroll',
+    `cleanChecklistLabel strips **bold**, *italic*, \`code\`, and [^id] (got: "${cleanedChkLabel}")`
+  );
+
+  const stage2Norm = normalizeStage2ForA2ui(
+    {
+      courseTitle: 'Testkurs i Brannvern',
+      executiveSummary: 'Kort sammendrag.',
+      trainingModules: [
+        {
+          moduleNumber: 1,
+          moduleTitle: 'Brannvernleders rolle',
+          durationMinutes: 15,
+          regulatoryBasis: 'FOB § 4–10',
+          spokenNarration:
+            'Første avsnitt beskriver den konkrete utfordringen i bygget.\n\nAndre avsnitt er lang forelesningstekst.\n\nTredje avsnitt er mer bakgrunn.\n\nFjerde avsnitt oppsummerer.',
+          slideCues: ['Kontroller rømningsveier', 'Dokumenter avvik'],
+          boardActionItem: 'Vedta årshjul for brannvern og utpek stedfortreder.',
+          quizQuestion: 'Hva må eier gjøre dersom leietaker blokkerer rømningsvei?',
+          quizOptions: ['Ingenting', 'Stanse bruken eller utbedre umiddelbart', 'Vente til neste år'],
+          correctOptionIndex: 1,
+          quizExplanation: 'Eier har det overordnede ansvaret etter FOB § 6.',
+        },
+      ],
+    },
+    'Fallback'
+  );
+  assert(stage2Norm.modules[0]?.durationOrMeta === '15 min', 'Module durationMinutes preserved as durationOrMeta');
+  assert(stage2Norm.cases.length === 1, 'Synthesized 1 case from trainingModule');
+  assert(
+    !stage2Norm.cases[0].scenario.includes('Andre avsnitt er lang forelesningstekst'),
+    'Synthesized case scenario does NOT dump the entire multi-paragraph lecture narration'
+  );
+  assert(
+    stage2Norm.cases[0].recommendedAction.includes('📌 Faglig begrunnelse:'),
+    'Synthesized case recommendedAction includes quizExplanation rationale'
+  );
+
+  const validMessages: A2uiEnvelopeMessage[] = [
+    {
+      version: 'v0.9.1',
+      createSurface: {
+        surfaceId: 'test_surface',
+        catalogId: A2UI_ICM_CATALOG_ID,
+      },
+    },
+    {
+      version: 'v0.9.1',
+      updateComponents: {
+        surfaceId: 'test_surface',
+        components: [
+          { id: 'root', component: 'Column', children: ['title_txt'] },
+          { id: 'title_txt', component: 'Text', text: 'Hei A2UI', variant: 'h1' },
+        ],
+      },
+    },
+    {
+      version: 'v0.9.1',
+      updateDataModel: {
+        surfaceId: 'test_surface',
+        path: '/',
+        value: { okf: { title: 'Test' } },
+      },
+    },
+  ];
+  const validationRes = validateA2uiSurfaceMessages(validMessages);
+  assert(validationRes.valid === true, `Valid A2UI v0.9.1 messages pass validation (${validationRes.errors.join('; ')})`);
+
+  const invalidRes = validateA2uiSurfaceMessages([
+    {
+      version: 'v0.9.1',
+      updateComponents: {
+        surfaceId: 'broken',
+        components: [{ id: 'not_root', component: 'Text', text: 'Missing root' }],
+      },
+    },
+  ]);
+  assert(invalidRes.valid === false && invalidRes.errors.length > 0, 'Missing root component is rejected by validator');
+
+  console.log(`[ICM Self-Test] ✅ All ${assertions} assertions passed (0 tokens).`);
+  return { passed: assertions };
+}
+
 // 4. Headless CLI Entrypoint (Linux / macOS / Windows / SSH / Cron / Terminal execution)
 if (
+  process.argv.includes('--test') ||
   process.argv.includes('--cli') ||
   process.argv.includes('--stage1') ||
   process.argv.includes('--stage2') ||
@@ -8794,6 +9321,11 @@ if (
   process.argv.includes('--a2ui')
 ) {
   (async () => {
+    if (process.argv.includes('--test')) {
+      await runIcmSelfTests();
+      return;
+    }
+
     const isStage1Only = process.argv.includes('--stage1');
     const isStage2Only = process.argv.includes('--stage2');
     const isFullCli = process.argv.includes('--cli');
@@ -9063,4 +9595,5 @@ if (
     process.exit(1);
   });
 }
+
 
