@@ -5569,6 +5569,7 @@ export interface A2uiSurfaceGenerationResult {
  */
 export const A2UI_ICM_CATALOG_SCHEMA = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $id: A2UI_ICM_CATALOG_ID,
   catalogId: A2UI_ICM_CATALOG_ID,
   extendsCatalogId: A2UI_BASIC_CATALOG_ID,
   version: A2UI_PROTOCOL_VERSION,
@@ -5638,17 +5639,33 @@ function escapeA2uiHtml(str: string): string {
 }
 
 /**
- * Strips OKF footnote markers (`[^id]`), inline LaTeX math (`$\text{EI } 60$`),
- * and excess Markdown formatting from extracted checklist items for clean UI labels.
+ * Strips OKF footnote markers (`[^id]`), inline LaTeX math (`$\text{EI } 60$`, `$30 \text{ min}$`, `$\rightarrow$`),
+ * and excess Markdown formatting from extracted checklist items for clean UI labels while preserving currency `$`.
  */
 export function cleanChecklistLabel(rawText: string): string {
   let text = String(rawText || '').trim();
   // Remove footnote references like [^lovdata-brann], [^1]
   text = text.replace(/\[\^[^\]]+\]/g, '');
-  // Convert $\text{...}$ or $\mathrm{...}$ inside math blocks
-  text = text.replace(/\$(?:\\text|\\mathrm)\{([^}]*)\}\s*([^$]*)\$/g, '$1$2');
-  // Strip remaining inline math delimiters $...$
-  text = text.replace(/\$([^$]+)\$/g, '$1');
+  // Unwrap LaTeX text/font macros anywhere in the string (\text{...}, \mathrm{...}, \textbf{...}, \textit{...}, \emph{...})
+  text = text.replace(/\\(?:text|mathrm|textbf|textit|emph)\{([^}]*)\}/g, '$1');
+  // Replace common LaTeX symbol macros with clean Unicode equivalents
+  text = text
+    .replace(/\\leftrightarrow/g, '↔')
+    .replace(/\\Leftrightarrow/g, '⇔')
+    .replace(/\\rightarrow|\\to\b/g, '→')
+    .replace(/\\Rightarrow/g, '⇒')
+    .replace(/\\leftarrow/g, '←')
+    .replace(/\\(?:ge|geq)\b/g, '≥')
+    .replace(/\\(?:le|leq)\b/g, '≤')
+    .replace(/\\(?:neq|ne)\b/g, '≠')
+    .replace(/\\approx\b/g, '≈')
+    .replace(/\\times\b/g, '×')
+    .replace(/\\pm\b/g, '±')
+    .replace(/\\cdot\b/g, '·')
+    .replace(/\\(?:circ|degree)\b/g, '°')
+    .replace(/\\%/g, '%');
+  // Strip inline TeX math delimiters $...$ only when valid math (no whitespace immediately after opening $ or before closing $)
+  text = text.replace(/\$(?!\s)([^$]*?\S)\$/g, '$1');
   // Convert markdown links [label](url) -> label
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
   // Strip inline code backticks and bold markers
@@ -5660,17 +5677,19 @@ export function cleanChecklistLabel(rawText: string): string {
 
 /**
  * Extracts structured checklist groups and items (`- [ ] ...` or `- [x] ...`) from OKF Markdown,
- * supporting both Markdown headings (`### ...`) and nested top-level category bullets (`- [ ] **Category**:`).
+ * supporting Markdown headings (`### ...`), nested category bullets (`- [ ] **Category**:`),
+ * and multi-level (2-level / 3-level+) hierarchical task lists.
  */
 export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChecklistGroup[] {
   const lines = String(rawMarkdown || '').split(/\r?\n/);
   const groups: A2uiChecklistGroup[] = [];
   let currentHeading = 'Sjekkliste / Action Items';
-  let currentCategoryHeader: string | null = null;
+  const categoryStack: Array<{ indent: number; title: string }> = [];
   let itemCounter = 0;
 
   const getOrCreateGroup = (title: string): A2uiChecklistGroup => {
-    const cleanTitle = cleanChecklistLabel(title.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:$/, '')) || 'Generelt';
+    const cleanTitle =
+      cleanChecklistLabel(title.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:+\s*$/, '')) || 'Generelt';
     let existing = groups.find((g) => g.title === cleanTitle);
     if (!existing) {
       existing = {
@@ -5688,7 +5707,7 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
     const headingMatch = line.match(/^(#{2,4})\s+(.+?)\s*$/);
     if (headingMatch) {
       currentHeading = headingMatch[2].replace(/^\d+(\.\d+)*\.?\s*/, '').trim();
-      currentCategoryHeader = null;
+      categoryStack.length = 0;
       continue;
     }
 
@@ -5699,8 +5718,12 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
     const isChecked = checkboxMatch[2].toLowerCase() === 'x';
     const rawContent = checkboxMatch[3].trim();
 
-    // Check if this is a parent category line followed by indented sub-checkboxes
-    // e.g. `- [ ] **Dokumentasjon og internkontroll**:`
+    // Pop any category headers at the same or deeper indentation level
+    while (categoryStack.length > 0 && categoryStack[categoryStack.length - 1].indent >= indent) {
+      categoryStack.pop();
+    }
+
+    // Check if this is a parent category line followed by deeper-indented sub-checkboxes
     let hasIndentedSubItems = false;
     for (let j = i + 1; j < lines.length; j++) {
       const nextLine = lines[j];
@@ -5712,13 +5735,25 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
       break;
     }
 
-    if (indent === 0 && (hasIndentedSubItems || (/^\*\*[^*]+\*\*:?\s*$/.test(rawContent)))) {
-      currentCategoryHeader = rawContent.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:$/, '').trim();
+    const contentWithoutFootnotes = rawContent.replace(/\[\^[^\]]+\]/g, '').trim();
+    const isBoldColonHeader = /^\*\*[^*]+\*\*:?\s*$/.test(contentWithoutFootnotes);
+    const endsWithColon = /:\s*$/.test(contentWithoutFootnotes);
+
+    if (isBoldColonHeader || (hasIndentedSubItems && (endsWithColon || indent === 0))) {
+      const headerTitle = cleanChecklistLabel(
+        contentWithoutFootnotes.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:+\s*$/, '').trim()
+      );
+      if (headerTitle) {
+        categoryStack.push({ indent, title: headerTitle });
+      }
       continue;
     }
 
     itemCounter++;
-    const groupTitle = indent > 0 && currentCategoryHeader ? currentCategoryHeader : currentHeading;
+    const groupTitle =
+      categoryStack.length > 0
+        ? categoryStack.map((c) => c.title).join(' — ')
+        : currentHeading;
     const group = getOrCreateGroup(groupTitle);
     const cleanedLabel = cleanChecklistLabel(rawContent);
     if (!cleanedLabel) continue;
@@ -5995,9 +6030,15 @@ export function resolveJsonPointer(rootModel: unknown, pointer: string, scopeMod
 
 /**
  * Updates an RFC 6901 JSON Pointer path (`/a/b/0`) on a root data model object in-place.
+ * Follows A2UI v0.9.1 upsert & delete semantics:
+ * - If pointer is omitted or `'/'`, replaces the entire root data model in-place.
+ * - If `value === undefined`, deletes the key on objects (or sets index to `undefined` on arrays, preserving length).
  */
 export function setJsonPointer(rootModel: Record<string, any>, pointer: string, value: unknown): void {
   if (!pointer || pointer === '/') {
+    for (const k of Object.keys(rootModel)) {
+      delete rootModel[k];
+    }
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       Object.assign(rootModel, value);
     }
@@ -6015,13 +6056,23 @@ export function setJsonPointer(rootModel: Record<string, any>, pointer: string, 
     current = current[seg];
   }
   const lastSeg = segments[segments.length - 1];
-  current[lastSeg] = value;
+  if (value === undefined) {
+    if (Array.isArray(current) && /^\d+$/.test(lastSeg)) {
+      current[Number(lastSeg)] = undefined;
+    } else if (current && typeof current === 'object') {
+      delete current[lastSeg];
+    }
+  } else {
+    current[lastSeg] = value;
+  }
 }
 
 /**
  * Validates an array of A2UI v0.9.1 server-to-client messages for protocol structural integrity:
  * - Envelope version === 'v0.9.1'
- * - `createSurface` precedes `updateComponents` for the same `surfaceId`
+ * - Exactly one of `createSurface`, `updateComponents`, `updateDataModel`, or `deleteSurface` per message
+ * - `createSurface` precedes `updateComponents`, `updateDataModel`, and `deleteSurface` for the same `surfaceId`,
+ *   and duplicate `createSurface` without an intervening `deleteSurface` is rejected
  * - Component adjacency list contains a `root` component (`id: "root"`), no duplicate IDs,
  *   all child component ID references exist, and there are no circular parent-child references.
  */
@@ -6042,11 +6093,42 @@ export function validateA2uiSurfaceMessages(messages: A2uiEnvelopeMessage[]): {
       errors.push(`Message[${i}] has invalid version "${(msg as any).version}", expected "${A2UI_PROTOCOL_VERSION}"`);
     }
 
+    const msgKeys = ['createSurface', 'updateComponents', 'updateDataModel', 'deleteSurface'].filter(
+      (k) => k in msg
+    );
+    if (msgKeys.length !== 1) {
+      errors.push(
+        `Message[${i}] must contain exactly one envelope action (createSurface | updateComponents | updateDataModel | deleteSurface), found ${msgKeys.length}`
+      );
+      continue;
+    }
+
     if ('createSurface' in msg) {
       const { surfaceId, catalogId } = msg.createSurface;
       if (!surfaceId) errors.push(`Message[${i}] createSurface missing surfaceId`);
       if (!catalogId) errors.push(`Message[${i}] createSurface missing catalogId`);
-      createdSurfaces.add(surfaceId);
+      if (surfaceId && createdSurfaces.has(surfaceId)) {
+        errors.push(
+          `Message[${i}] duplicate createSurface for active surface "${surfaceId}" without prior deleteSurface`
+        );
+      }
+      if (surfaceId) createdSurfaces.add(surfaceId);
+    } else if ('updateDataModel' in msg) {
+      const { surfaceId } = msg.updateDataModel;
+      if (!surfaceId) {
+        errors.push(`Message[${i}] updateDataModel missing surfaceId`);
+      } else if (!createdSurfaces.has(surfaceId)) {
+        errors.push(`Message[${i}] updateDataModel references uncreated surface "${surfaceId}"`);
+      }
+    } else if ('deleteSurface' in msg) {
+      const { surfaceId } = msg.deleteSurface;
+      if (!surfaceId) {
+        errors.push(`Message[${i}] deleteSurface missing surfaceId`);
+      } else if (!createdSurfaces.has(surfaceId)) {
+        errors.push(`Message[${i}] deleteSurface references uncreated surface "${surfaceId}"`);
+      } else {
+        createdSurfaces.delete(surfaceId);
+      }
     } else if ('updateComponents' in msg) {
       const { surfaceId, components } = msg.updateComponents;
       if (!createdSurfaces.has(surfaceId)) {
@@ -6508,6 +6590,15 @@ const A2UI_STUDIO_JS = `
   const actionLog = [];
   let activeSurfaceId = payload.surfaceId || "icm_run_studio";
 
+  function escapeHtml(str) {
+    return String(str == null ? "" : str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   function resolvePointer(root, pointer, scopeData) {
     if (pointer === undefined || pointer === null) return undefined;
     if (typeof pointer !== "string") return pointer;
@@ -6537,7 +6628,12 @@ const A2UI_STUDIO_JS = `
       fullPointer = scopePath.replace(/\\/$/, "") + "/" + pointer;
     }
     if (!fullPointer || fullPointer === "/") {
-      if (value && typeof value === "object") Object.assign(root, value);
+      for (const k of Object.keys(root)) {
+        delete root[k];
+      }
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        Object.assign(root, value);
+      }
       return;
     }
     const clean = fullPointer.startsWith("/") ? fullPointer.slice(1) : fullPointer;
@@ -6551,7 +6647,87 @@ const A2UI_STUDIO_JS = `
       }
       cur = cur[k];
     }
-    cur[parts[parts.length - 1]] = value;
+    const lastPart = parts[parts.length - 1];
+    if (value === undefined) {
+      if (Array.isArray(cur) && /^\\d+$/.test(lastPart)) {
+        cur[Number(lastPart)] = undefined;
+      } else if (cur && typeof cur === "object") {
+        delete cur[lastPart];
+      }
+    } else {
+      cur[lastPart] = value;
+    }
+  }
+
+  function stringifyInterpolated(val) {
+    if (val === null || val === undefined) return "";
+    if (typeof val === "object") return JSON.stringify(val);
+    return String(val);
+  }
+
+  function evaluateFunctionCall(fnObj, surface, scopeData) {
+    const callName = fnObj.call;
+    const args = fnObj.args || {};
+    if (callName === "formatString") {
+      const rawTemplate = String(args.value ?? "");
+      return rawTemplate.replace(/(\\\\?)\\$\\{([^}]+)\\}/g, function (match, esc, expr) {
+        if (esc === "\\\\") return match.slice(1);
+        const trimmed = String(expr || "").trim();
+        const resolved = resolvePointer(surface.dataModel, trimmed, scopeData);
+        return stringifyInterpolated(resolved);
+      });
+    }
+    if (callName === "required") {
+      const v = resolveDynamic(args.value, surface, scopeData);
+      if (v === null || v === undefined) return false;
+      if (typeof v === "string") return v.trim().length > 0;
+      if (Array.isArray(v)) return v.length > 0;
+      return Boolean(v);
+    }
+    if (callName === "regex") {
+      const v = String(resolveDynamic(args.value, surface, scopeData) ?? "");
+      try {
+        return new RegExp(String(args.pattern || "")).test(v);
+      } catch {
+        return false;
+      }
+    }
+    if (callName === "length") {
+      const v = String(resolveDynamic(args.value, surface, scopeData) ?? "");
+      if (typeof args.min === "number" && v.length < args.min) return false;
+      if (typeof args.max === "number" && v.length > args.max) return false;
+      return true;
+    }
+    if (callName === "numeric") {
+      const n = Number(resolveDynamic(args.value, surface, scopeData));
+      if (Number.isNaN(n)) return false;
+      if (typeof args.min === "number" && n < args.min) return false;
+      if (typeof args.max === "number" && n > args.max) return false;
+      return true;
+    }
+    if (callName === "email") {
+      const v = String(resolveDynamic(args.value, surface, scopeData) ?? "");
+      return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(v);
+    }
+    if (callName === "and") {
+      const list = Array.isArray(args.values) ? args.values : [];
+      return list.every((item) => Boolean(resolveDynamic(item, surface, scopeData)));
+    }
+    if (callName === "or") {
+      const list = Array.isArray(args.values) ? args.values : [];
+      return list.some((item) => Boolean(resolveDynamic(item, surface, scopeData)));
+    }
+    if (callName === "not") {
+      return !Boolean(resolveDynamic(args.value, surface, scopeData));
+    }
+    if (callName === "openUrl") {
+      const url = String(resolveDynamic(args.url, surface, scopeData) || "");
+      if (url && typeof window !== "undefined" && window.open) {
+        window.open(url, "_blank", "noopener");
+      }
+      return true;
+    }
+    return "";
   }
 
   function resolveDynamic(val, surface, scopeData) {
@@ -6559,13 +6735,16 @@ const A2UI_STUDIO_JS = `
       if (typeof val.path === "string") {
         return resolvePointer(surface.dataModel, val.path, scopeData);
       }
+      if (typeof val.call === "string") {
+        return evaluateFunctionCall(val, surface, scopeData);
+      }
     }
     return val;
   }
 
   // Process A2UI v0.9.1 Server-to-Client Message Stream
   function processMessage(msg) {
-    if (!msg || msg.version !== "v0.9.1") return;
+    if (!msg || (msg.version !== "v0.9.1" && msg.version !== "v0.9")) return;
     if (msg.createSurface) {
       const s = msg.createSurface;
       surfaces[s.surfaceId] = {
@@ -6598,6 +6777,177 @@ const A2UI_STUDIO_JS = `
     processMessage(m);
   }
 
+  function stopActiveSpeech() {
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+  }
+
+  function cleanClientChecklistLabel(rawText) {
+    let text = String(rawText || "").trim();
+    text = text.replace(/\\[\\^[^\\]]+\\]/g, "");
+    text = text.replace(/\\\\(?:text|mathrm|textbf|textit|emph)\\{([^}]*)\\}/g, "$1");
+    text = text
+      .replace(/\\\\leftrightarrow/g, "↔")
+      .replace(/\\\\Leftrightarrow/g, "⇔")
+      .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
+      .replace(/\\\\Rightarrow/g, "⇒")
+      .replace(/\\\\leftarrow/g, "←")
+      .replace(/\\\\(?:ge|geq)\\b/g, "≥")
+      .replace(/\\\\(?:le|leq)\\b/g, "≤")
+      .replace(/\\\\(?:neq|ne)\\b/g, "≠")
+      .replace(/\\\\approx\\b/g, "≈")
+      .replace(/\\\\times\\b/g, "×")
+      .replace(/\\\\pm\\b/g, "±")
+      .replace(/\\\\cdot\\b/g, "·")
+      .replace(/\\\\(?:circ|degree)\\b/g, "°")
+      .replace(/\\%/g, "%");
+    text = text.replace(/\\$(?!\\s)([^$]*?\\S)\\$/g, "$1");
+    text = text.replace(/\\[([^\\]]+)\\]\\([^)]+\\)/g, "$1");
+    text = text.replace(/\\x60([^\\x60]+)\\x60/g, "$1").replace(/\\*\\*([^*]+)\\*\\*/g, "$1");
+    text = text.replace(/\\s+/g, " ").replace(/\\s+([.,;:?!])/g, "$1").trim();
+    return text;
+  }
+
+  function extractChecklistGroupsClient(rawMarkdown) {
+    const lines = String(rawMarkdown || "").split(/\\r?\\n/);
+    const groups = [];
+    let currentHeading = "Sjekkliste / Action Items";
+    const categoryStack = [];
+    let itemCounter = 0;
+
+    function getOrCreateGroup(title) {
+      const cleanTitle =
+        cleanClientChecklistLabel(title.replace(/\\*\\*([^*]+)\\*\\*/g, "$1").replace(/:+\\s*$/, "")) || "Generelt";
+      let existing = groups.find((g) => g.title === cleanTitle);
+      if (!existing) {
+        existing = {
+          id: "chk_grp_" + (groups.length + 1),
+          title: cleanTitle,
+          items: [],
+        };
+        groups.push(existing);
+      }
+      return existing;
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const headingMatch = line.match(/^(#{2,4})\\s+(.+?)\\s*$/);
+      if (headingMatch) {
+        currentHeading = headingMatch[2].replace(/^\\d+(\\.\\d+)*\\.?\\s*/, "").trim();
+        categoryStack.length = 0;
+        continue;
+      }
+      const checkboxMatch = line.match(/^(\\s*)[-*]\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
+      if (!checkboxMatch) continue;
+
+      const indent = checkboxMatch[1].length;
+      const isChecked = checkboxMatch[2].toLowerCase() === "x";
+      const rawContent = checkboxMatch[3].trim();
+
+      while (categoryStack.length > 0 && categoryStack[categoryStack.length - 1].indent >= indent) {
+        categoryStack.pop();
+      }
+
+      let hasIndentedSubItems = false;
+      for (let j = i + 1; j < lines.length; j++) {
+        const nextLine = lines[j];
+        if (!nextLine.trim()) continue;
+        const nextCheckbox = nextLine.match(/^(\\s*)[-*]\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
+        if (nextCheckbox && nextCheckbox[1].length > indent) {
+          hasIndentedSubItems = true;
+        }
+        break;
+      }
+
+      const contentWithoutFootnotes = rawContent.replace(/\\[\\^[^\\]]+\\]/g, "").trim();
+      const isBoldColonHeader = /^\\*\\*[^*]+\\*\\*:?\\s*$/.test(contentWithoutFootnotes);
+      const endsWithColon = /:\\s*$/.test(contentWithoutFootnotes);
+
+      if (isBoldColonHeader || (hasIndentedSubItems && (endsWithColon || indent === 0))) {
+        const headerTitle = cleanClientChecklistLabel(
+          contentWithoutFootnotes.replace(/\\*\\*([^*]+)\\*\\*/g, "$1").replace(/:+\\s*$/, "").trim()
+        );
+        if (headerTitle) {
+          categoryStack.push({ indent: indent, title: headerTitle });
+        }
+        continue;
+      }
+
+      itemCounter++;
+      const groupTitle =
+        categoryStack.length > 0
+          ? categoryStack.map((c) => c.title).join(" — ")
+          : currentHeading;
+      const group = getOrCreateGroup(groupTitle);
+      const cleanedLabel = cleanClientChecklistLabel(rawContent);
+      if (!cleanedLabel) continue;
+
+      group.items.push({
+        id: "chk_item_" + itemCounter,
+        label: cleanedLabel,
+        checked: isChecked,
+        category: group.title,
+      });
+    }
+
+    return groups.filter((g) => g.items.length > 0);
+  }
+
+  function syncChecklistToOkfBody(surface) {
+    const body = resolvePointer(surface.dataModel, "/okf/body");
+    if (typeof body !== "string" || !body) return;
+    const groups = resolvePointer(surface.dataModel, "/checklist/groups") || [];
+    const flatChecked = [];
+    for (const g of groups) {
+      for (const it of g.items || []) {
+        flatChecked.push(Boolean(it.checked));
+      }
+    }
+    if (flatChecked.length === 0) return;
+
+    const lines = body.split(/\\r?\\n/);
+    let leafIdx = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(\\s*[-*]\\s+\\[)([ xX])(\\]\\s+)(.+?)\\s*$/);
+      if (!m) continue;
+      const indent = (lines[i].match(/^(\\s*)/) || ["", ""])[1].length;
+      const rawContent = m[4].trim();
+      let hasIndentedSubItems = false;
+      for (let j = i + 1; j < lines.length; j++) {
+        const nextLine = lines[j];
+        if (!nextLine.trim()) continue;
+        const nextCheckbox = nextLine.match(/^(\\s*)[-*]\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
+        if (nextCheckbox && nextCheckbox[1].length > indent) {
+          hasIndentedSubItems = true;
+        }
+        break;
+      }
+      const contentWithoutFootnotes = rawContent.replace(/\\[\\^[^\\]]+\\]/g, "").trim();
+      const isBoldColonHeader = /^\\*\\*[^*]+\\*\\*:?\\s*$/.test(contentWithoutFootnotes);
+      const endsWithColon = /:\\s*$/.test(contentWithoutFootnotes);
+      if (isBoldColonHeader || (hasIndentedSubItems && (endsWithColon || indent === 0))) {
+        continue;
+      }
+      if (leafIdx < flatChecked.length) {
+        lines[i] = m[1] + (flatChecked[leafIdx] ? "x" : " ") + m[3] + m[4];
+        leafIdx++;
+      }
+    }
+    setPointer(surface.dataModel, "/okf/body", lines.join("\\n"));
+  }
+
+  function syncOkfBodyToChecklist(surface) {
+    const body = resolvePointer(surface.dataModel, "/okf/body");
+    if (typeof body !== "string") return;
+    const newGroups = extractChecklistGroupsClient(body);
+    if (newGroups.length > 0) {
+      setPointer(surface.dataModel, "/checklist/groups", newGroups);
+      recomputeChecklistSummary(surface);
+    }
+  }
+
   function dispatchClientAction(surface, sourceComponentId, name, contextObj) {
     const evt = {
       version: "v0.9.1",
@@ -6614,17 +6964,19 @@ const A2UI_STUDIO_JS = `
       const groups = resolvePointer(surface.dataModel, "/checklist/groups") || [];
       groups.forEach((g) => (g.items || []).forEach((it) => { it.checked = false; }));
       recomputeChecklistSummary(surface);
+      syncChecklistToOkfBody(surface);
       renderSurface();
     } else if (name === "checkAllChecklist") {
       const groups = resolvePointer(surface.dataModel, "/checklist/groups") || [];
       groups.forEach((g) => (g.items || []).forEach((it) => { it.checked = true; }));
       recomputeChecklistSummary(surface);
+      syncChecklistToOkfBody(surface);
       renderSurface();
     } else if (name === "speakText") {
       const txt = (contextObj && contextObj.text) || "";
       speakNarration(txt);
     } else if (name === "stopSpeech") {
-      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      stopActiveSpeech();
     } else if (name === "exportSurfaceJson") {
       downloadJson(
         surface.surfaceId + "_state.json",
@@ -6673,10 +7025,34 @@ const A2UI_STUDIO_JS = `
 
   function formatInlineLatexAndFootnotes(md, sources) {
     let out = String(md || "");
-    out = out.replace(/\\$(?:\\\\text|\\\\mathrm)\\{([^}]*)\\}\\s*([^$]*)\\$/g, "<code>$1$2</code>");
+    // Format inline TeX math spans ($...$)
+    out = out.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_, inner) {
+      let cleaned = String(inner)
+        .replace(/\\\\(?:text|mathrm|textbf|textit|emph)\\{([^}]*)\\}/g, "$1")
+        .replace(/\\\\leftrightarrow/g, "↔")
+        .replace(/\\\\Leftrightarrow/g, "⇔")
+        .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
+        .replace(/\\\\Rightarrow/g, "⇒")
+        .replace(/\\\\leftarrow/g, "←")
+        .replace(/\\\\(?:ge|geq)\\b/g, "≥")
+        .replace(/\\\\(?:le|leq)\\b/g, "≤")
+        .replace(/\\\\(?:neq|ne)\\b/g, "≠")
+        .replace(/\\\\approx\\b/g, "≈")
+        .replace(/\\\\times\\b/g, "×")
+        .replace(/\\\\pm\\b/g, "±")
+        .replace(/\\\\cdot\\b/g, "·")
+        .replace(/\\\\(?:circ|degree)\\b/g, "°")
+        .replace(/\\%/g, "%")
+        .trim();
+      if (/^[↔⇔→⇒←≥≤≠≈×±·°]+$/.test(cleaned)) {
+        return cleaned;
+      }
+      return "<code>" + escapeHtml(cleaned) + "</code>";
+    });
     out = out.replace(/\\x60(\\/[A-Za-z0-9_\\-\\/]+\\.md)\\x60/g, '<a href="$1"><code>$1</code></a>');
-    out = out.replace(/\\[\\^([^\\]]+)\\]/g, function (_, id) {
-      return '<sup class="fn-ref"><a href="#okf-src-' + id + '" data-fn="' + id + '">[' + id + "]</a></sup>";
+    out = out.replace(/\\[\\^([^\\]]+)\\](?!:)/g, function (_, id) {
+      const safeId = escapeHtml(id);
+      return '<sup class="fn-ref"><a href="#okf-src-' + safeId + '" data-fn="' + safeId + '">[' + safeId + "]</a></sup>";
     });
     return out;
   }
@@ -6746,7 +7122,9 @@ const A2UI_STUDIO_JS = `
     }
 
     if (type === "Divider") {
-      return document.createElement("hr");
+      const hr = document.createElement("hr");
+      hr.className = "a2ui-divider";
+      return hr;
     }
 
     if (type === "Text") {
@@ -6778,7 +7156,7 @@ const A2UI_STUDIO_JS = `
       if (typeof comp.child === "string") {
         btn.appendChild(renderComponentById(surface, comp.child, scopeData, scopePath));
       } else {
-        btn.textContent = String(resolveDynamic(comp.label, surface, scopeData) || "Action");
+        btn.textContent = String(resolveDynamic(comp.label ?? comp.text, surface, scopeData) || "Action");
       }
       btn.addEventListener("click", () => {
         if (comp.action && comp.action.event) {
@@ -6788,6 +7166,8 @@ const A2UI_STUDIO_JS = `
             ctx[k] = resolveDynamic(rawCtx[k], surface, scopeData);
           }
           dispatchClientAction(surface, comp.id, comp.action.event.name, ctx);
+        } else if (comp.action && comp.action.functionCall) {
+          evaluateFunctionCall(comp.action.functionCall, surface, scopeData);
         }
       });
       return btn;
@@ -6806,6 +7186,7 @@ const A2UI_STUDIO_JS = `
         if (comp.value && typeof comp.value === "object" && comp.value.path) {
           setPointer(surface.dataModel, comp.value.path, input.checked, scopePath);
           recomputeChecklistSummary(surface);
+          syncChecklistToOkfBody(surface);
           dispatchClientAction(surface, comp.id, "checkboxChanged", {
             path: comp.value.path,
             checked: input.checked,
@@ -6829,12 +7210,21 @@ const A2UI_STUDIO_JS = `
       }
       const isLong = comp.variant === "longText";
       const input = document.createElement(isLong ? "textarea" : "input");
-      if (isLong) input.rows = 3;
+      if (isLong) {
+        input.rows = 3;
+      } else if (comp.variant === "number") {
+        input.type = "number";
+      } else if (comp.variant === "obscured") {
+        input.type = "password";
+      } else {
+        input.type = "text";
+      }
       input.value = String(resolveDynamic(comp.value, surface, scopeData) ?? "");
       if (comp.placeholder) input.placeholder = String(comp.placeholder);
       input.addEventListener("input", () => {
         if (comp.value && typeof comp.value === "object" && comp.value.path) {
-          setPointer(surface.dataModel, comp.value.path, input.value, scopePath);
+          const nextVal = comp.variant === "number" ? Number(input.value) : input.value;
+          setPointer(surface.dataModel, comp.value.path, nextVal, scopePath);
         }
       });
       wrap.appendChild(input);
@@ -6844,9 +7234,21 @@ const A2UI_STUDIO_JS = `
     if (type === "ChoicePicker") {
       const wrap = document.createElement("div");
       wrap.className = "a2ui-choice-group";
+      const lbl = resolveDynamic(comp.label, surface, scopeData);
+      if (lbl) {
+        const l = document.createElement("div");
+        l.className = "a2ui-h4";
+        l.textContent = String(lbl);
+        wrap.appendChild(l);
+      }
       const options = resolveDynamic(comp.options, surface, scopeData) || [];
       const currentVal = resolveDynamic(comp.value, surface, scopeData);
-      const selectedArr = Array.isArray(currentVal) ? currentVal : currentVal != null ? [String(currentVal)] : [];
+      const isMulti = comp.variant === "multipleSelection";
+      const selectedArr = Array.isArray(currentVal)
+        ? currentVal.map(String)
+        : currentVal != null && currentVal !== ""
+          ? [String(currentVal)]
+          : [];
 
       options.forEach((opt) => {
         const valStr = String(opt.value);
@@ -6854,16 +7256,28 @@ const A2UI_STUDIO_JS = `
         const row = document.createElement("label");
         row.className = "a2ui-choice-opt" + (isSel ? " selected" : "");
         const inp = document.createElement("input");
-        inp.type = comp.variant === "multipleSelection" ? "checkbox" : "radio";
+        inp.type = isMulti ? "checkbox" : "radio";
         inp.checked = isSel;
         inp.addEventListener("change", () => {
           if (comp.value && typeof comp.value === "object" && comp.value.path) {
-            setPointer(surface.dataModel, comp.value.path, valStr, scopePath);
+            if (isMulti) {
+              const nextSet = new Set(selectedArr);
+              if (inp.checked) {
+                nextSet.add(valStr);
+              } else {
+                nextSet.delete(valStr);
+              }
+              setPointer(surface.dataModel, comp.value.path, Array.from(nextSet), scopePath);
+            } else if (Array.isArray(currentVal)) {
+              setPointer(surface.dataModel, comp.value.path, [valStr], scopePath);
+            } else {
+              setPointer(surface.dataModel, comp.value.path, valStr, scopePath);
+            }
             renderSurface();
           }
         });
         const txt = document.createElement("span");
-        txt.textContent = String(opt.label ?? opt.value);
+        txt.textContent = String(resolveDynamic(opt.label, surface, scopeData) ?? opt.value);
         row.appendChild(inp);
         row.appendChild(txt);
         wrap.appendChild(row);
@@ -6890,9 +7304,7 @@ const A2UI_STUDIO_JS = `
         const stopBtn = document.createElement("button");
         stopBtn.className = "a2ui-btn";
         stopBtn.textContent = "⏹ Stopp";
-        stopBtn.addEventListener("click", () => {
-          if (window.speechSynthesis) window.speechSynthesis.cancel();
-        });
+        stopBtn.addEventListener("click", () => stopActiveSpeech());
         wrap.appendChild(playBtn);
         wrap.appendChild(stopBtn);
       }
@@ -6902,7 +7314,7 @@ const A2UI_STUDIO_JS = `
     if (type === "Image") {
       const img = document.createElement("img");
       img.src = String(resolveDynamic(comp.url, surface, scopeData) || "");
-      img.alt = String(resolveDynamic(comp.alt, surface, scopeData) || "");
+      img.alt = String(resolveDynamic(comp.description ?? comp.alt, surface, scopeData) || "");
       img.style.maxWidth = "100%";
       img.style.borderRadius = "8px";
       if (comp.fit) img.style.objectFit = String(comp.fit);
@@ -7024,6 +7436,7 @@ const A2UI_STUDIO_JS = `
         btn.className = "a2ui-tab-btn" + (idx === activeIdx ? " active" : "");
         btn.textContent = String(resolveDynamic(tab.title, surface, scopeData) || "Tab " + (idx + 1));
         btn.addEventListener("click", () => {
+          stopActiveSpeech();
           surface.uiState.activeTabs[comp.id] = idx;
           renderSurface();
         });
@@ -7144,6 +7557,7 @@ const A2UI_STUDIO_JS = `
         b.className = "a2ui-btn" + (mIdx === idx ? " primary" : "");
         b.textContent = (m.number || mIdx + 1) + ". " + m.title;
         b.addEventListener("click", () => {
+          stopActiveSpeech();
           setPointer(surface.dataModel, activeIdxPath, mIdx);
           renderSurface();
         });
@@ -7181,6 +7595,7 @@ const A2UI_STUDIO_JS = `
         const ttsPlayer = renderComponent(surface, {
           id: comp.id + "_tts_" + idx,
           component: "AudioPlayer",
+          url: "tts://web-speech/module/" + (idx + 1),
           description: mod.title,
           ttsText: mod.narration,
         });
@@ -7213,7 +7628,7 @@ const A2UI_STUDIO_JS = `
         actBox.style.borderRadius = "8px";
         actBox.innerHTML =
           "<strong>⚡ Tiltak / Styrets handlingspunkt:</strong><div style='margin-top:4px'>" +
-          mod.actionItem +
+          escapeHtml(mod.actionItem) +
           "</div>";
         card.appendChild(actBox);
       }
@@ -7226,6 +7641,7 @@ const A2UI_STUDIO_JS = `
       prevBtn.textContent = "← Forrige modul";
       prevBtn.addEventListener("click", () => {
         if (idx > 0) {
+          stopActiveSpeech();
           setPointer(surface.dataModel, activeIdxPath, idx - 1);
           renderSurface();
         }
@@ -7236,6 +7652,7 @@ const A2UI_STUDIO_JS = `
       nextBtn.textContent = "Neste modul →";
       nextBtn.addEventListener("click", () => {
         if (idx < modules.length - 1) {
+          stopActiveSpeech();
           setPointer(surface.dataModel, activeIdxPath, idx + 1);
           renderSurface();
         }
@@ -7260,7 +7677,8 @@ const A2UI_STUDIO_JS = `
       questions.forEach((q) => {
         if (answers[q.id] !== undefined) {
           answeredCount++;
-          if (String(answers[q.id]) === String(q.correctValue)) correctCount++;
+          const ansVal = Array.isArray(answers[q.id]) ? answers[q.id][0] : answers[q.id];
+          if (String(ansVal) === String(q.correctValue)) correctCount++;
         }
       });
 
@@ -7293,7 +7711,8 @@ const A2UI_STUDIO_JS = `
         });
         qCard.appendChild(picker);
 
-        const chosen = answers[q.id];
+        const rawChosen = answers[q.id];
+        const chosen = Array.isArray(rawChosen) ? rawChosen[0] : rawChosen;
         if (chosen !== undefined) {
           const isRight = String(chosen) === String(q.correctValue);
           const fb = document.createElement("div");
@@ -7305,7 +7724,7 @@ const A2UI_STUDIO_JS = `
             "<strong>" +
             (isRight ? "✓ Riktig svar!" : "✗ Ikke helt.") +
             "</strong> " +
-            (q.explanation || "");
+            escapeHtml(q.explanation || "");
           qCard.appendChild(fb);
         }
         wrap.appendChild(qCard);
@@ -7370,7 +7789,10 @@ const A2UI_STUDIO_JS = `
             rec.style.background = "var(--success-soft)";
             rec.style.border = "1px solid var(--success-border)";
             rec.style.borderRadius = "8px";
-            rec.innerHTML = "<strong>Anbefalt vedtak / tiltak:</strong><div>" + c.recommendedAction + "</div>";
+            rec.innerHTML =
+              "<strong>Anbefalt vedtak / tiltak:</strong><div>" +
+              escapeHtml(c.recommendedAction) +
+              "</div>";
             card.appendChild(rec);
           }
         }
@@ -7412,6 +7834,9 @@ const A2UI_STUDIO_JS = `
       editBtn.className = "a2ui-btn";
       editBtn.textContent = isEditing ? "👁 Forhåndsvis OKF Markdown" : "✏️ Rediger Layer 4 Markdown";
       editBtn.addEventListener("click", () => {
+        if (isEditing) {
+          syncOkfBodyToChecklist(surface);
+        }
         setPointer(surface.dataModel, editModePath, !isEditing);
         renderSurface();
       });
@@ -7424,11 +7849,16 @@ const A2UI_STUDIO_JS = `
           id: comp.id + "_editor",
           component: "TextField",
           variant: "longText",
-          label: "Redigerbar OKF v0.2 Markdown (oppdaterer A2UI Data Model direkte):",
+          label: "Redigerbar OKF v0.2 Markdown (oppdaterer A2UI Data Model og Sjekkliste direkte):",
           value: comp.body,
         });
         const ta = editor.querySelector("textarea");
-        if (ta) ta.rows = 22;
+        if (ta) {
+          ta.rows = 22;
+          ta.addEventListener("input", () => {
+            syncOkfBodyToChecklist(surface);
+          });
+        }
         mainCard.appendChild(editor);
       } else {
         const mdBody = document.createElement("div");
@@ -7460,6 +7890,7 @@ const A2UI_STUDIO_JS = `
                 e.preventDefault();
                 setPointer(surface.dataModel, "/okf/body", bundleGraph.bodies[conceptId]);
                 setPointer(surface.dataModel, "/okf/title", conceptId);
+                syncOkfBodyToChecklist(surface);
                 renderSurface();
               });
             }
@@ -7479,23 +7910,26 @@ const A2UI_STUDIO_JS = `
       sources.forEach((src) => {
         const sc = document.createElement("div");
         sc.className = "okf-source-card";
-        sc.id = "okf-src-" + src.id;
+        const safeId = escapeHtml(src.id || "src");
+        const safeTitle = escapeHtml(src.title || src.url || src.resource || "");
+        const safeUrl = src.url ? escapeHtml(src.url) : "";
+        sc.id = "okf-src-" + (src.id || "src");
         sc.innerHTML =
           "<div><strong>[^" +
-          (src.id || "src") +
+          safeId +
           "]</strong> " +
-          (src.title || src.url || src.resource || "") +
+          safeTitle +
           "</div>" +
-          (src.url
+          (safeUrl
             ? '<div style="margin-top:2px;word-break:break-all"><a href="' +
-              src.url +
+              safeUrl +
               '" target="_blank" rel="noopener" style="color:var(--primary)">' +
-              src.url +
+              safeUrl +
               "</a></div>"
             : "") +
           "<div>" +
-          (src.retrieved_at ? '<span class="src-chip retrieved">retrieved: ' + src.retrieved_at + "</span>" : "") +
-          (src.last_modified ? '<span class="src-chip modified">modified: ' + src.last_modified + "</span>" : "") +
+          (src.retrieved_at ? '<span class="src-chip retrieved">retrieved: ' + escapeHtml(src.retrieved_at) + "</span>" : "") +
+          (src.last_modified ? '<span class="src-chip modified">modified: ' + escapeHtml(src.last_modified) + "</span>" : "") +
           "</div>";
         srcList.appendChild(sc);
       });
@@ -7559,19 +7993,20 @@ const A2UI_STUDIO_JS = `
         });
         cy.on("tap", "node", (evt) => {
           const d = evt.target.data();
-          const body = (bundleGraph.bodies && bundleGraph.bodies[d.id]) || "";
+          const rawBody = (bundleGraph.bodies && bundleGraph.bodies[d.id]) || "";
+          const formattedBody = formatInlineLatexAndFootnotes(rawBody, []);
           detail.innerHTML =
             '<span class="a2ui-badge primary">' +
-            (d.type || "Concept") +
+            escapeHtml(d.type || "Concept") +
             "</span>" +
             '<h3 class="a2ui-h3" style="margin-top:8px">' +
-            (d.label || d.id) +
+            escapeHtml(d.label || d.id) +
             "</h3>" +
             '<p class="a2ui-caption">' +
-            (d.description || "") +
+            escapeHtml(d.description || "") +
             "</p><hr class='a2ui-divider'>" +
             '<div class="okf-md-body">' +
-            (window.marked ? window.marked.parse(body) : body) +
+            (window.marked ? window.marked.parse(formattedBody) : escapeHtml(rawBody)) +
             "</div>";
         });
       }, 30);
@@ -7588,13 +8023,17 @@ const A2UI_STUDIO_JS = `
   function renderSurface() {
     const mount = document.getElementById("a2ui-surface-root");
     if (!mount) return;
-    mount.innerHTML = "";
+    const prevScrollY = typeof window !== "undefined" ? window.scrollY : 0;
     const surface = surfaces[activeSurfaceId];
     if (!surface || !surface.components["root"]) {
       mount.textContent = "No active A2UI surface found.";
       return;
     }
-    mount.appendChild(renderComponentById(surface, "root", undefined, ""));
+    const nextTree = renderComponentById(surface, "root", undefined, "");
+    mount.replaceChildren(nextTree);
+    if (typeof window !== "undefined" && prevScrollY > 0) {
+      window.scrollTo(0, prevScrollY);
+    }
   }
 
   // Inspector Modal Wiring
@@ -7955,6 +8394,7 @@ export function generateA2uiSurface(
     {
       id: 'overview_tts_player',
       component: 'AudioPlayer',
+      url: 'tts://web-speech/stage2/scriptBody',
       description: { path: '/meta/title' },
       ttsText: { path: '/stage2/scriptBody' },
     },
