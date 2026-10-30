@@ -42,15 +42,16 @@ In ICM, Stage 2 (`prompts/02_script.md`) consumes the physical file produced by 
 
 ---
 
-## Phase 2: Stage 1 (`prompts/01_research.md`) & Standalone Verification
+## Phase 2: Stage 1 (`prompts/01_research.md`), OKF v0.2 Bundle Sync & Standalone Verification
 
-1. **Ask Question 2 (Stage 1 Output Structure):**
-   - Ask what specific sections, facts, or strategic angles Stage 1 should research and write into `research_summary.md`, and whether `thinkingLevel` should remain `HIGH` (`maxOutputTokens: 65536`).
+1. **Ask Question 2 (Stage 1 Output Structure & OKF Concept Type):**
+   - Ask what specific sections, facts, or strategic angles Stage 1 should research and write into `research_summary.md`, what OKF v0.2 `type` name fits best (e.g., `Research Concept`, `Forskriftsveileder`, `Playbook`, `Metric`), and whether `thinkingLevel` should remain `HIGH` (`maxOutputTokens: 65536`).
 2. **Edit Only `prompts/01_research.md`:**
-   - Keep `model: gemini-4-argon`, `maxOutputTokens: 65536`, and `{{#if globalIdentity}}` / `{{#if workspaceContext}}` blocks intact.
+   - Keep `model: gemini-4-argon`, `maxOutputTokens: 65536`, and `{{#if globalIdentity}}`, `{{#if workspaceContext}}`, and `{{#if bundleContext}}` blocks intact.
+   - Ensure the OKF v0.2 frontmatter instructions require `type`, `title`, `description`, `tags`, `stale_after` (in full ISO 8601 UTC format `YYYY-MM-DDTHH:MM:SSZ`), and `sources` (`id`, `resource`, `title`), with `[^source-id]` footnotes in the body.
 3. **Run & Audit Stage 1 Standalone (Do NOT Run Stage 2 Yet):**
    - **Important:** Do **not** run `npm run cli -- "<topic>"` here, because `npm run cli` also runs Stage 2 with the old uncustomized prompt and wastes tokens.
-   - First, run a **zero-token `--dry-run`** to verify how `Layer 0 + Layer 1 + Layer 2` assembled in `workspace/runs/_dry_run/stages/01_research/input/prompt_assembled.md`:
+   - First, run a **zero-token `--dry-run`** to verify how `Layer 0 + Layer 1 + Layer 2 + Layer 3 (OKF Bundle)` assembled in `workspace/runs/_dry_run/stages/01_research/input/prompt_assembled.md`:
      ```bash
      npm run cli:stage1 -- --dry-run "<topic>"
      ```
@@ -58,11 +59,15 @@ In ICM, Stage 2 (`prompts/02_script.md`) consumes the physical file produced by 
      ```bash
      npm run cli:stage1 -- "<topic>"
      ```
-   - Once completed, perform the **Stage 1 Pure ICM Filesystem Audit**:
-     1. **Telemetry & Search Query Check:** Read `workspace/runs/<runId>/meta.json` (`stage1Telemetry`: `inputTokens`, `thoughtsTokens`, `outputTokens`, `totalTokens`, `durationMs`, `thoughtSteps`, `searchQueries`) and `stages/01_research/output/thinking_trace.md`.
-     2. **Assembled Input Check:** Verify `stages/01_research/input/prompt_assembled.md` if you need to confirm how Layer 0 + Layer 1 + Layer 2 combined.
-     3. **Output Artifact:** Read `workspace/runs/<runId>/stages/01_research/output/research_summary.md` and review its sections and resolved citations with the user.
-   - If Stage 1 needs refinement, apply the **Edit-Source Principle** (update `prompts/01_research.md` for reusable changes, or `research_summary.md` for one-off edits) before moving to Phase 3.
+   - Once completed, perform the **Stage 1 Pure ICM + OKF v0.2 Filesystem Audit**:
+     1. **Telemetry, OKF & Search Query Check:** Read `workspace/runs/<runId>/meta.json` (`stage1Telemetry` and `okf`: `type`, `status`, `trust_tier`, `is_stale`, `stale_after`, `sourcesCount`, `bundleConceptId`) and `stages/01_research/output/thinking_trace.md`.
+     2. **Assembled Input Check:** Verify `stages/01_research/input/prompt_assembled.md` if you need to confirm how Layer 0 + Layer 1 + Layer 2 + Layer 3 combined.
+     3. **Output Artifact & Bundle Promotion:** Read `workspace/runs/<runId>/stages/01_research/output/research_summary.md` and `workspace/bundle/` (`index.md`, `log.md`, `research/<slug>.md`), verifying that every entry in `sources[]` has a resolved URL, `retrieved_at` UTC timestamp (plus `last_modified` when available), and matching `[^id]` footnotes in the body.
+   - **Intermission Verification (`npm run cli:verify`):** Once the user is happy with Stage 1's output (or after applying the **Edit-Source Principle**), stamp human verification at the Intermission gate via:
+     ```bash
+     npm run cli:verify -- <runId> --by human:<reviewer-id>
+     ```
+     *(Transitions `status: stable` and `trust_tier: human-reviewed` in both `research_summary.md` and `workspace/bundle/`.)*
 
 ---
 
@@ -129,7 +134,13 @@ If the user chooses to build a custom Domain Web Studio:
     - *Online Course & Lesson Studio*: Interactive 16:9 Slide Deck Carousel (`slides_deck.json` + rendered PNGs), synchronized HTML5 Instructor Audio Player (`lesson_voiceover.wav`), collapsible Module Syllabus & Speaker Notes drawer, interactive Formative Quiz check cards, and per-stage regenerate/edit controls.
     - *Podcast & Audio Studio*: Dual-host transcript timeline, inline voiceover player, and episode show notes editor.
     - *Executive / Legal / Competitor Intelligence*: Executive KPI summary cards, side-by-side source verification inspector, and interactive filterable tables.
-- **Zero-Dependency Native Node HTTP Server (`src/server.ts`):**
-  - You can build `src/server.ts` using Node's built-in `node:http` and `node:fs` modules (keeping **0 external npm dependencies**!) or install `express` if preferred.
+- **Zero-Dependency Native Node HTTP Server (`src/server.ts`) & OKF v0.2 UI Best Practices:**
+  - Generate the interactive OKF knowledge graph (`npm run cli:viz` → `workspace/bundle/viz.html`) so it is ready to embed or view alongside the studio.
+  - Build `src/server.ts` using Node's built-in `node:http` and `node:fs` modules (keeping **0 external npm dependencies**!) or install `express` if preferred.
+  - When rendering OKF v0.2 Markdown documents (`research_summary.md`) inside a custom Web Studio (`public/index.html`):
+    - Preprocess OKF `[^id]` footnotes and `[^id]: Title` footnote definitions before calling `marked.parse()` so inline `[^id]` citations render as clickable superscript links tied to `frontmatter.sources`, and display each source's `retrieved_at` (and `last_modified` if present) timestamp badge.
+    - Intercept clicks on internal OKF bundle links (e.g., `/research/<concept>.md`) inside the studio preview so clicking them selects the matching run/concept or opens the `viz.html` graph tab rather than navigating to a 404 URL.
+    - If extracting Markdown checklists (`- [ ] ...`) into a checklist UI tab, strip `[^id]` footnotes, backticks, and inline LaTeX (`$\text{...}$`), and render top-level `- [ ] **Category**:` lines that precede indented `  - [ ]` sub-items as group headers.
+    - In `src/server.ts`, whenever an endpoint saves edited Stage 1 Markdown (`PUT /api/runs/:id/research`) or verifies a run (`POST /api/runs/:id/verify`), also call `syncRunToBundle()` and `generateBundleVisualization()` so `workspace/bundle/` and `workspace/bundle/viz.html` stay automatically in sync.
   - Add `"server": "npx tsx --env-file=.env.local src/server.ts"` and `"dev": "npx tsx watch --clear-screen=false --ignore=.icm/** --ignore=workspace/** --env-file=.env.local src/server.ts"` to `package.json`, and run the server in development using `npm run dev` (`IsDaemon: true`) so edits to `src/server.ts` hot-reload automatically without manual task restarts.
   - Hydrate initial run data from `workspace/runs/` so the first browser paint at `http://localhost:3000` loads immediately with the user's verified run selected.
