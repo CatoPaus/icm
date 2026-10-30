@@ -1912,12 +1912,14 @@ export function enrichBareDomainSourceTitle(
       .replace(/\s+/g, ' ')
       .trim();
 
-    if (!humanized) {
+    if (!humanized || !/[a-zA-Z\u00C0-\u024F]/.test(humanized)) {
       return domain || cleanTitle;
     }
     humanized = humanized.charAt(0).toUpperCase() + humanized.slice(1);
-    if (humanized.length > 76) {
-      humanized = `${humanized.slice(0, 74).trimEnd()}…`;
+    if (humanized.length > 160) {
+      const cut = humanized.slice(0, 158);
+      const lastSpace = cut.lastIndexOf(' ');
+      humanized = `${(lastSpace > 80 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
     }
     return `${domain} — ${humanized}`;
   } catch {
@@ -6238,8 +6240,14 @@ export function normalizeStage2ForA2ui(
           .filter(Boolean);
         const firstPara = paragraphs[0] || '';
         const quizQ = typeof rawMod.quizQuestion === 'string' ? rawMod.quizQuestion.trim() : '';
-        if (firstPara && (paragraphs.length > 1 || !quizQ)) {
+        if (firstPara && paragraphs.length > 1) {
           scenarioParts.push(firstPara);
+        } else if (firstPara && !quizQ) {
+          const conciseOpening =
+            firstPara.length > 360
+              ? firstPara.split(/(?<=[.!?])\s+/).slice(0, 2).join(' ')
+              : firstPara;
+          scenarioParts.push(conciseOpening);
         }
         if (quizQ) {
           scenarioParts.push(`Utfordring / Spørsmål: ${quizQ}`);
@@ -8355,12 +8363,18 @@ const A2UI_STUDIO_JS = `
       wrap.appendChild(split);
 
       let cy = null;
+      let lastConceptData = null;
+      let currentSelectedNodeId = null;
 
       function renderGraphNodeDetail(d) {
         if (!d) return;
+        currentSelectedNodeId = d.id || null;
         const rawBody = (bundleGraph.bodies && bundleGraph.bodies[d.id]) || "";
         const formattedBody = formatInlineLatexAndFootnotes(rawBody, []);
         const isSource = d.group === "source";
+        if (!isSource) {
+          lastConceptData = d;
+        }
         const displayTitle = d.fullTitle || d.label || d.id;
 
         let headerHtml = "";
@@ -8431,10 +8445,16 @@ const A2UI_STUDIO_JS = `
         const backBtn = detail.querySelector("#okf-graph-back-btn");
         if (backBtn) {
           backBtn.addEventListener("click", () => {
-            const conceptWrapper = (bundleGraph.nodes || []).find(
+            const parentWrapper = d.parentConceptId
+              ? (bundleGraph.nodes || []).find((n) => (n.data && n.data.id === d.parentConceptId) || n.id === d.parentConceptId)
+              : null;
+            const fallbackWrapper = (bundleGraph.nodes || []).find(
               (n) => n.group === "concept" || (n.data && n.data.group === "concept")
             );
-            const conceptData = conceptWrapper ? conceptWrapper.data || conceptWrapper : null;
+            const conceptData =
+              lastConceptData ||
+              (parentWrapper ? parentWrapper.data || parentWrapper : null) ||
+              (fallbackWrapper ? fallbackWrapper.data || fallbackWrapper : null);
             if (conceptData) {
               if (cy) {
                 cy.elements().unselect();
@@ -8520,6 +8540,9 @@ const A2UI_STUDIO_JS = `
           ],
           layout: { name: (bundleGraph.nodes || []).length > 1 ? "cose" : "grid", padding: 40 },
         });
+        if (currentSelectedNodeId) {
+          cy.getElementById(currentSelectedNodeId).select();
+        }
         cy.on("tap", "node", (evt) => {
           renderGraphNodeDetail(evt.target.data());
         });
@@ -8772,6 +8795,7 @@ export function generateA2uiSurface(
     }
     for (const src of c.sources || []) {
       const srcNodeId = `source:${src.id || src.title || 'ref'}`;
+      const refLine = `- **Referert i konsept:** \`${c.id}\` (*${c.title || c.id}*)`;
       if (!conceptIds.has(srcNodeId)) {
         conceptIds.add(srcNodeId);
         const srcUrl = (src as any).url || (src as any).resource || '';
@@ -8786,6 +8810,7 @@ export function generateA2uiSurface(
             group: 'source',
             label: `[^${src.id}] ${shortTitleText}`,
             fullTitle: `[^${src.id}] ${fullTitleText}`,
+            parentConceptId: c.id,
             type: 'Verified Source',
             description: srcUrl,
             status: 'stable',
@@ -8798,10 +8823,12 @@ export function generateA2uiSurface(
         graphBodies[srcNodeId] = [
           src.retrieved_at ? `- **Hentet (\`retrieved_at\`):** \`${src.retrieved_at}\`` : '',
           src.last_modified ? `- **Sist endret (\`last_modified\`):** \`${src.last_modified}\`` : '',
-          `- **Referert i konsept:** \`${c.id}\` (*${c.title || c.id}*)`,
+          refLine,
         ]
           .filter(Boolean)
           .join('\n');
+      } else if (graphBodies[srcNodeId] && !graphBodies[srcNodeId].includes(refLine)) {
+        graphBodies[srcNodeId] = `${graphBodies[srcNodeId]}\n${refLine}`;
       }
       const edgeKey = `${c.id}__${srcNodeId}`;
       if (!seenEdgeKeys.has(edgeKey)) {
@@ -9320,19 +9347,37 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   }
 
   // 0. Programmatic TypeScript typecheck (tsc --noEmit) so `npm test` needs no shell `&&` chaining
-  const tscBin = path.resolve(process.cwd(), 'node_modules/typescript/bin/tsc');
-  if (fs.existsSync(tscBin)) {
-    try {
-      execFileSync(process.execPath, [tscBin, '--noEmit'], {
-        cwd: process.cwd(),
+  const pkgRootFromArgv = path.resolve(path.dirname(process.argv[1] || process.cwd()), '..');
+  const tscCandidates = [
+    path.resolve(process.cwd(), 'node_modules/typescript/bin/tsc'),
+    path.resolve(process.cwd(), 'node_modules/typescript/lib/tsc.js'),
+    path.resolve(pkgRootFromArgv, 'node_modules/typescript/bin/tsc'),
+    path.resolve(pkgRootFromArgv, 'node_modules/typescript/lib/tsc.js'),
+  ];
+  const resolvedTscBin = tscCandidates.find((p) => fs.existsSync(p));
+  const tscCwd = fs.existsSync(path.resolve(process.cwd(), 'tsconfig.json'))
+    ? process.cwd()
+    : pkgRootFromArgv;
+  try {
+    if (resolvedTscBin) {
+      execFileSync(process.execPath, [resolvedTscBin, '--noEmit'], {
+        cwd: tscCwd,
         stdio: 'pipe',
         encoding: 'utf-8',
       });
-      assertions++;
-    } catch (err: any) {
-      const stderr = err?.stderr || err?.stdout || err?.message || String(err);
-      throw new Error(`[ICM Self-Test FAILED] TypeScript typecheck (tsc --noEmit) failed:\n${stderr}`);
+    } else {
+      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+      execFileSync(npxCmd, ['tsc', '--noEmit'], {
+        cwd: tscCwd,
+        stdio: 'pipe',
+        encoding: 'utf-8',
+        shell: process.platform === 'win32',
+      });
     }
+    assertions++;
+  } catch (err: any) {
+    const stderr = err?.stderr || err?.stdout || err?.message || String(err);
+    throw new Error(`[ICM Self-Test FAILED] TypeScript typecheck (tsc --noEmit) failed:\n${stderr}`);
   }
 
   // 1. OKF v0.2 round-trip, trust tier, and staleness
@@ -9563,6 +9608,25 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     cleanedMd.includes('title: dibk.no — Byggteknisk forskrift tek17') &&
       cleanedMd.includes('[^dibk-no]: dibk.no — Byggteknisk forskrift tek17'),
     `Bare-domain title "dibk.no" enriched from URL slug in both frontmatter and footnote definition (got: "${cleanedMd}")`
+  );
+  assert(
+    enrichBareDomainSourceTitle('dsb.no', 'https://dsb.no/') === 'dsb.no' &&
+      enrichBareDomainSourceTitle('example.no', 'https://example.no/12345') === 'example.no',
+    'Root-only and numeric-only URL paths fall back to clean bare domain'
+  );
+  assert(
+    enrichBareDomainSourceTitle('snl.no', 'https://snl.no/brannvern_%C3%A6%C3%B8%C3%A5') ===
+      'snl.no — Brannvern æøå' &&
+      enrichBareDomainSourceTitle(
+        'stortinget.no',
+        'https://www.stortinget.no/no/Saker-og-publikasjoner/Vedtak/Beslutninger/Odelstinget/2008-2009/beso-200809-118/1'
+      ) === 'stortinget.no — Beso 200809-118' &&
+      enrichBareDomainSourceTitle(
+        'www.ha.no',
+        'https://www.ha.no/_f/p1/i71e106c5-9925-4d53-8efc-f5736e3ee5f0/veiledning-tilrettelegging-for-innsats-for-redning-og-slokkemannskaper-ha-kommune-uu.pdf'
+      ) ===
+        'ha.no — Veiledning tilrettelegging for innsats for redning og slokkemannskaper ha kommune uu',
+    'enrichBareDomainSourceTitle decodes UTF-8, handles legislative /1 paths, and preserves full descriptive slugs without mid-word truncation'
   );
 
   // 3. A2UI v0.9.1 validation, checklist label cleaning, totalEstimatedMinutes, synthesized highlights, and CaseSimulator synthesis
