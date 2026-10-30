@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 
 export const GEMINI_4_ARGON_MODEL = 'gemini-4-argon' as const;
 const INTERACTIONS_API_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
@@ -1831,6 +1832,99 @@ export interface CleanGroundingOptions {
   bundleRoot?: string;
 }
 
+function isBareDomainTitle(title?: string): boolean {
+  const t = String(title || '').trim();
+  if (!t) return true;
+  return /^(?:https?:\/\/)?(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}\/?$/i.test(t);
+}
+
+export function enrichBareDomainSourceTitle(
+  rawTitle: string | undefined,
+  resourceUrl: string
+): string {
+  const cleanTitle = String(rawTitle || '').trim();
+  const cleanUrl = String(resourceUrl || '').trim();
+  if (!isBareDomainTitle(cleanTitle) && cleanTitle !== cleanUrl) {
+    return cleanTitle;
+  }
+  if (!/^https?:\/\//i.test(cleanUrl) || isVertexRedirectUrl(cleanUrl)) {
+    return cleanTitle || cleanUrl;
+  }
+  try {
+    const parsed = new URL(cleanUrl);
+    const domain =
+      cleanTitle && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(cleanTitle)
+        ? cleanTitle.replace(/^www\./i, '')
+        : parsed.hostname.replace(/^www\./i, '');
+    const rawSegments = parsed.pathname
+      .split('/')
+      .map((s) => {
+        try {
+          return decodeURIComponent(s).trim();
+        } catch {
+          return s.trim();
+        }
+      })
+      .filter(
+        (s) =>
+          s.length > 0 &&
+          s !== '-' &&
+          !/^(?:index|default)\.(?:html?|aspx?|php)$/i.test(s)
+      );
+
+    const isOpaqueOrBucket = (seg: string): boolean => {
+      const noExt = seg.replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
+      if (/^(?:_f|p\d+|r|no|nb|nn|en|wiki|globalassets|wp-content|uploads)$/i.test(noExt)) {
+        return true;
+      }
+      if (/^i?[0-9a-f]{8,}(?:-[0-9a-f]{4,})*$/i.test(noExt) && /\d/.test(noExt)) {
+        return true;
+      }
+      return false;
+    };
+
+    const meaningful = rawSegments.filter((s) => !isOpaqueOrBucket(s));
+    if (meaningful.length === 0) {
+      return domain || cleanTitle;
+    }
+
+    const lastSeg = meaningful[meaningful.length - 1].replace(
+      /\.(?:pdf|html?|aspx?|php|md|docx?)$/i,
+      ''
+    );
+    const prevSeg =
+      meaningful.length >= 2
+        ? meaningful[meaningful.length - 2].replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '')
+        : '';
+
+    let chosenSlug = lastSeg;
+    if (prevSeg) {
+      if (lastSeg === '1' && /\d/.test(prevSeg)) {
+        chosenSlug = prevSeg;
+      } else if (/^[0-9-]+$/.test(lastSeg)) {
+        chosenSlug = `${prevSeg} ${lastSeg}`;
+      }
+    }
+
+    let humanized = chosenSlug
+      .replace(/[+_]+/g, ' ')
+      .replace(/(?<!\d)-|-(?!\d)|--+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!humanized) {
+      return domain || cleanTitle;
+    }
+    humanized = humanized.charAt(0).toUpperCase() + humanized.slice(1);
+    if (humanized.length > 76) {
+      humanized = `${humanized.slice(0, 74).trimEnd()}…`;
+    }
+    return `${domain} — ${humanized}`;
+  } catch {
+    return cleanTitle || cleanUrl;
+  }
+}
+
 /**
  * Parses markdown text and Interactions API grounding steps, resolves Vertex redirect URLs,
  * weaves inline `url_citation` annotations at their UTF-8 byte offsets as OKF v0.2 `[^id]` footnotes,
@@ -2237,8 +2331,15 @@ export async function cleanGroundingLinks(
         sourcesByUrl.set(resolvedUrl, existingById);
         existingById.retrieved_at = nowIso;
       }
-      if (cleanTitle && (!existingById.title || existingById.title === existingById.resource)) {
-        existingById.title = cleanTitle;
+      if (
+        cleanTitle &&
+        (!existingById.title ||
+          existingById.title === existingById.resource ||
+          isBareDomainTitle(existingById.title))
+      ) {
+        existingById.title = enrichBareDomainSourceTitle(cleanTitle, existingById.resource);
+      } else if (isBareDomainTitle(existingById.title)) {
+        existingById.title = enrichBareDomainSourceTitle(existingById.title, existingById.resource);
       }
       if (isFresh) {
         existingById.retrieved_at = nowIso;
@@ -2255,8 +2356,15 @@ export async function cleanGroundingLinks(
 
     if (sourcesByUrl.has(resolvedUrl)) {
       const existing = sourcesByUrl.get(resolvedUrl)!;
-      if (cleanTitle && (!existing.title || existing.title === existing.resource)) {
-        existing.title = cleanTitle;
+      if (
+        cleanTitle &&
+        (!existing.title ||
+          existing.title === existing.resource ||
+          isBareDomainTitle(existing.title))
+      ) {
+        existing.title = enrichBareDomainSourceTitle(cleanTitle, existing.resource);
+      } else if (isBareDomainTitle(existing.title)) {
+        existing.title = enrichBareDomainSourceTitle(existing.title, existing.resource);
       }
       if (isFresh) {
         existing.retrieved_at = nowIso;
@@ -2280,8 +2388,15 @@ export async function cleanGroundingLinks(
             sourcesByUrl.delete(existing.resource);
             existing.resource = resolvedUrl;
             sourcesByUrl.set(resolvedUrl, existing);
-            if (cleanTitle && (!existing.title || existing.title === existing.resource)) {
-              existing.title = cleanTitle;
+            if (
+              cleanTitle &&
+              (!existing.title ||
+                existing.title === existing.resource ||
+                isBareDomainTitle(existing.title))
+            ) {
+              existing.title = enrichBareDomainSourceTitle(cleanTitle, resolvedUrl);
+            } else if (isBareDomainTitle(existing.title)) {
+              existing.title = enrichBareDomainSourceTitle(existing.title, resolvedUrl);
             }
             existing.retrieved_at = nowIso;
             if (detectedLastModified && !existing.last_modified) {
@@ -2311,10 +2426,11 @@ export async function cleanGroundingLinks(
 
     const validExtraLm = parseValidIsoTimestamp(extra?.last_modified);
     const finalLm = detectedLastModified || validExtraLm;
+    const enrichedTitle = enrichBareDomainSourceTitle(cleanTitle || fallbackLabel, resolvedUrl);
     const entry: OKFSource = {
       id,
       resource: resolvedUrl,
-      title: cleanTitle || fallbackLabel,
+      title: enrichedTitle,
       ...extra,
       retrieved_at: isFresh ? nowIso : extraRetrievedAt || nowIso,
       ...(finalLm ? { last_modified: finalLm } : {}),
@@ -2604,9 +2720,15 @@ export async function cleanGroundingLinks(
   const dedupedSources: OKFSource[] = [];
   const canonicalByResource = new Map<string, OKFSource>();
   for (const entry of orderedSources) {
+    entry.title = enrichBareDomainSourceTitle(entry.title, entry.resource);
     const existingCanonical = canonicalByResource.get(entry.resource);
     if (existingCanonical && existingCanonical !== entry) {
-      if (entry.title && (!existingCanonical.title || existingCanonical.title === existingCanonical.resource)) {
+      if (
+        entry.title &&
+        (!existingCanonical.title ||
+          existingCanonical.title === existingCanonical.resource ||
+          isBareDomainTitle(existingCanonical.title))
+      ) {
         existingCanonical.title = entry.title;
       }
       if (entry.retrieved_at === nowIso || !existingCanonical.retrieved_at) {
@@ -2671,6 +2793,7 @@ export async function cleanGroundingLinks(
   const citedFootnoteIds = Array.from(
     new Set(Array.from(bodyText.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1]))
   );
+  const citedFootnoteIdSet = new Set(citedFootnoteIds);
 
   const footnoteLines: string[] = [];
   for (const fnId of citedFootnoteIds) {
@@ -2769,7 +2892,12 @@ export async function cleanGroundingLinks(
     fm.stale_after = normalizeIsoTimestamp(fm.stale_after);
   }
 
-  for (const s of orderedSources) {
+  const finalSources =
+    citedFootnoteIdSet.size > 0
+      ? orderedSources.filter((s) => s.id && citedFootnoteIdSet.has(s.id))
+      : orderedSources;
+
+  for (const s of finalSources) {
     s.retrieved_at = parseValidIsoTimestamp(s.retrieved_at) || finalGenAt;
     const validLm = parseValidIsoTimestamp(s.last_modified);
     if (validLm) {
@@ -2778,7 +2906,7 @@ export async function cleanGroundingLinks(
       delete s.last_modified;
     }
   }
-  fm.sources = orderedSources;
+  fm.sources = finalSources;
 
   return serializeOkfDocument({
     frontmatter: fm,
@@ -5707,6 +5835,7 @@ export interface A2uiSurfaceGenerationResult {
   surfaceJsonlPath: string;
   htmlOutputPath: string;
   bundleHtmlPath?: string;
+  bundleVizPath?: string;
   messages: A2uiEnvelopeMessage[];
 }
 
@@ -5989,10 +6118,26 @@ export function normalizeStage2ForA2ui(
   );
   const subtitle = String(scriptDraft.subtitle || scriptDraft.description || '');
   const targetAudience = String(scriptDraft.targetAudience || scriptDraft.audience || '');
-  const estimatedDuration =
-    typeof scriptDraft.estimatedDuration === 'number' || typeof scriptDraft.estimatedDuration === 'string'
-      ? scriptDraft.estimatedDuration
-      : '';
+
+  const rawMinField =
+    scriptDraft.totalEstimatedMinutes ??
+    scriptDraft.totalDurationMinutes ??
+    scriptDraft.durationMinutes;
+  const rawEstDur = scriptDraft.estimatedDuration;
+
+  let estimatedDuration: number | string = '';
+  if (typeof rawMinField === 'number' && rawMinField > 0) {
+    estimatedDuration = `${rawMinField} min`;
+  } else if (typeof rawMinField === 'string' && rawMinField.trim()) {
+    const trimmed = rawMinField.trim();
+    estimatedDuration = /[a-zA-Z]/.test(trimmed) ? trimmed : `${trimmed} min`;
+  } else if (typeof rawEstDur === 'number' && rawEstDur > 0) {
+    estimatedDuration = `${rawEstDur}s`;
+  } else if (typeof rawEstDur === 'string' && rawEstDur.trim()) {
+    const trimmed = rawEstDur.trim();
+    estimatedDuration = /[a-zA-Z]/.test(trimmed) ? trimmed : `${trimmed}s`;
+  }
+
   const scriptBody = String(
     scriptDraft.scriptBody || scriptDraft.executiveSummary || scriptDraft.narration || ''
   );
@@ -6029,7 +6174,7 @@ export function normalizeStage2ForA2ui(
       rawMod.moduleTitle || rawMod.lessonTitle || rawMod.title || `Module ${modNum}`
     );
     const subtitleOrBasis = String(
-      rawMod.regulatoryBasis || rawMod.coreConcept || rawMod.subtitle || ''
+      rawMod.regulatoryBasis || rawMod.lawReference || rawMod.coreConcept || rawMod.subtitle || ''
     );
     const durationOrMeta = rawMod.durationMinutes
       ? `${rawMod.durationMinutes} min`
@@ -6087,15 +6232,17 @@ export function normalizeStage2ForA2ui(
       let synthesizedScenario = explicitCaseScenario;
       if (!synthesizedScenario) {
         const scenarioParts: string[] = [];
-        const firstPara = narration
+        const paragraphs = narration
           .split(/\r?\n\r?\n/)
           .map((p) => p.trim())
-          .find(Boolean) || '';
+          .filter(Boolean);
+        const firstPara = paragraphs[0] || '';
         const quizQ = typeof rawMod.quizQuestion === 'string' ? rawMod.quizQuestion.trim() : '';
-        if (quizQ) {
-          scenarioParts.push(`Situasjonsbeskrivelse / Dilemma:\n${quizQ}`);
-        } else if (firstPara) {
+        if (firstPara && (paragraphs.length > 1 || !quizQ)) {
           scenarioParts.push(firstPara);
+        }
+        if (quizQ) {
+          scenarioParts.push(`Utfordring / Spørsmål: ${quizQ}`);
         }
         if (bullets.length > 0) {
           const contextHeader = subtitleOrBasis
@@ -6104,8 +6251,6 @@ export function normalizeStage2ForA2ui(
           scenarioParts.push(
             `${contextHeader}\n${bullets.slice(0, 4).map((b: string) => `• ${b}`).join('\n')}`
           );
-        } else if (quizQ && firstPara) {
-          scenarioParts.unshift(firstPara);
         }
         synthesizedScenario = scenarioParts.join('\n\n') || firstPara || narration;
       }
@@ -6126,6 +6271,34 @@ export function normalizeStage2ForA2ui(
       });
     }
   });
+
+  if (!estimatedDuration && rawModules.length > 0) {
+    const totalModMinutes = rawModules.reduce((acc: number, rm: any) => {
+      const dm = Number(rm?.durationMinutes);
+      return Number.isFinite(dm) && dm > 0 ? acc + dm : acc;
+    }, 0);
+    if (totalModMinutes > 0) {
+      estimatedDuration = `${totalModMinutes} min`;
+    } else {
+      const totalModSeconds = rawModules.reduce((acc: number, rm: any) => {
+        const ds = Number(rm?.estimatedDuration);
+        return Number.isFinite(ds) && ds > 0 ? acc + ds : acc;
+      }, 0);
+      if (totalModSeconds > 0) {
+        estimatedDuration = `${totalModSeconds}s`;
+      }
+    }
+  }
+
+  // Synthesize highlights from modules if top-level keyTakeaways / learningObjectives / highlights is empty
+  if (highlights.length === 0 && modules.length > 0) {
+    for (let idx = 0; idx < modules.length; idx++) {
+      const m = modules[idx];
+      const basisPart = m.subtitleOrBasis ? ` (${m.subtitleOrBasis})` : '';
+      const actionPart = m.actionItem ? ` — ${m.actionItem}` : '';
+      highlights.push(`Modul ${idx + 1}: ${m.title}${basisPart}${actionPart}`);
+    }
+  }
 
   // Top-level `quiz` or `questions` array
   const rawQuizList = Array.isArray(scriptDraft.quiz)
@@ -8130,8 +8303,9 @@ const A2UI_STUDIO_JS = `
         const rawUrl = src.url || src.resource || "";
         const safeTitle = escapeHtml(src.title || rawUrl || "");
         const safeUrl = rawUrl ? escapeHtml(rawUrl) : "";
-        const shortUrl = rawUrl
-          ? escapeHtml(rawUrl.replace(/^https?:\\/\\/(www\\.)?/i, "").slice(0, 68) + (rawUrl.length > 76 ? "…" : ""))
+        const strippedUrl = rawUrl ? rawUrl.replace(/^https?:\/\/(www\\.)?/i, "") : "";
+        const shortUrl = strippedUrl
+          ? escapeHtml(strippedUrl.slice(0, 68) + (strippedUrl.length > 68 ? "…" : ""))
           : "";
         sc.id = "okf-src-" + (src.id || "src");
         sc.innerHTML =
@@ -8180,23 +8354,98 @@ const A2UI_STUDIO_JS = `
       split.appendChild(detail);
       wrap.appendChild(split);
 
+      let cy = null;
+
       function renderGraphNodeDetail(d) {
         if (!d) return;
         const rawBody = (bundleGraph.bodies && bundleGraph.bodies[d.id]) || "";
         const formattedBody = formatInlineLatexAndFootnotes(rawBody, []);
+        const isSource = d.group === "source";
+        const displayTitle = d.fullTitle || d.label || d.id;
+
+        let headerHtml = "";
+        if (isSource) {
+          headerHtml =
+            '<div class="a2ui-row justify-between" style="margin-bottom:6px">' +
+            '<div class="a2ui-row" style="gap:6px">' +
+            '<span class="a2ui-badge success">' +
+            escapeHtml(d.type || "Verified Source") +
+            "</span>" +
+            (d.trust_tier
+              ? '<span class="a2ui-badge ' +
+                (d.trust_tier === "human-reviewed" ? "accent" : "primary") +
+                '">trust: ' +
+                escapeHtml(d.trust_tier) +
+                "</span>"
+              : "") +
+            "</div>" +
+            '<button type="button" class="a2ui-btn" id="okf-graph-back-btn" style="padding:4px 10px;font-size:12px">← Tilbake til konsept</button>' +
+            "</div>" +
+            '<h3 class="a2ui-h3" style="margin-top:6px">' +
+            escapeHtml(displayTitle) +
+            "</h3>" +
+            (d.description
+              ? '<p class="a2ui-caption" style="margin-top:4px;word-break:break-all"><a href="' +
+                escapeHtml(d.description) +
+                '" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-weight:600">' +
+                escapeHtml(d.description) +
+                " ↗</a></p>"
+              : "");
+        } else {
+          headerHtml =
+            '<div class="a2ui-row" style="gap:6px;margin-bottom:6px">' +
+            '<span class="a2ui-badge primary">' +
+            escapeHtml(d.type || "Concept") +
+            "</span>" +
+            '<span class="a2ui-badge ' +
+            (d.status === "stable" ? "success" : "warn") +
+            '">status: ' +
+            escapeHtml(d.status || "draft") +
+            "</span>" +
+            '<span class="a2ui-badge ' +
+            (d.trust_tier === "human-reviewed" ? "accent" : "primary") +
+            '">trust: ' +
+            escapeHtml(d.trust_tier || "unverified") +
+            "</span>" +
+            '<span class="a2ui-badge ' +
+            (d.stale ? "danger" : "success") +
+            '">' +
+            (d.stale ? "STALE" : "fresh") +
+            "</span>" +
+            "</div>" +
+            '<h3 class="a2ui-h3" style="margin-top:8px">' +
+            escapeHtml(displayTitle) +
+            "</h3>" +
+            '<p class="a2ui-caption" style="margin-top:4px">' +
+            escapeHtml(d.description || "") +
+            "</p>";
+        }
+
         detail.innerHTML =
-          '<span class="a2ui-badge primary">' +
-          escapeHtml(d.type || "Concept") +
-          "</span>" +
-          '<h3 class="a2ui-h3" style="margin-top:8px">' +
-          escapeHtml(d.label || d.id) +
-          "</h3>" +
-          '<p class="a2ui-caption">' +
-          escapeHtml(d.description || "") +
-          "</p><hr class='a2ui-divider'>" +
+          headerHtml +
+          "<hr class='a2ui-divider'>" +
           '<div class="okf-md-body">' +
           (window.marked ? window.marked.parse(formattedBody) : escapeHtml(rawBody)) +
           "</div>";
+
+        const backBtn = detail.querySelector("#okf-graph-back-btn");
+        if (backBtn) {
+          backBtn.addEventListener("click", () => {
+            const conceptWrapper = (bundleGraph.nodes || []).find(
+              (n) => n.group === "concept" || (n.data && n.data.group === "concept")
+            );
+            const conceptData = conceptWrapper ? conceptWrapper.data || conceptWrapper : null;
+            if (conceptData) {
+              if (cy) {
+                cy.elements().unselect();
+                cy.getElementById(conceptData.id).select();
+              }
+              renderGraphNodeDetail(conceptData);
+              detail.scrollTop = 0;
+            }
+          });
+        }
+
         detail.querySelectorAll("a[href^='http']").forEach((a) => {
           a.setAttribute("target", "_blank");
           a.setAttribute("rel", "noopener noreferrer");
@@ -8207,8 +8456,13 @@ const A2UI_STUDIO_JS = `
             const fnId = a.getAttribute("data-fn");
             const srcNodeId = "source:" + fnId;
             const found = (bundleGraph.nodes || []).find((n) => n.data && n.data.id === srcNodeId);
-            if (found && found.data) {
-              renderGraphNodeDetail(found.data);
+            const targetNode = found ? found.data : null;
+            if (targetNode) {
+              if (cy) {
+                cy.elements().unselect();
+                cy.getElementById(targetNode.id).select();
+              }
+              renderGraphNodeDetail(targetNode);
               detail.scrollTop = 0;
             }
           });
@@ -8227,7 +8481,7 @@ const A2UI_STUDIO_JS = `
           canvas.innerHTML = '<div style="padding:20px" class="a2ui-caption">Cytoscape.js ikke lastet (offline). Antall noder i bundle: ' + (bundleGraph.nodes || []).length + "</div>";
           return;
         }
-        const cy = window.cytoscape({
+        cy = window.cytoscape({
           container: canvas,
           elements: { nodes: bundleGraph.nodes || [], edges: bundleGraph.edges || [] },
           style: [
@@ -8244,6 +8498,13 @@ const A2UI_STUDIO_JS = `
                 "text-margin-y": 5,
                 "text-wrap": "wrap",
                 "text-max-width": 140,
+              },
+            },
+            {
+              selector: "node:selected",
+              style: {
+                "border-width": 3,
+                "border-color": "#1d4ed8",
               },
             },
             {
@@ -8458,7 +8719,7 @@ export function generateA2uiSurface(
     });
   }
   const conceptIds = new Set(concepts.map((c) => c.id));
-  const graphNodes = concepts.map((c) => ({
+  const graphNodes: Array<{ data: Record<string, any> }> = concepts.map((c) => ({
     data: {
       id: c.id,
       group: 'concept',
@@ -8514,11 +8775,17 @@ export function generateA2uiSurface(
       if (!conceptIds.has(srcNodeId)) {
         conceptIds.add(srcNodeId);
         const srcUrl = (src as any).url || (src as any).resource || '';
+        const fullTitleText = String(src.title || srcUrl).trim();
+        const shortTitleText =
+          fullTitleText.length > 42
+            ? `${fullTitleText.slice(0, 42).trimEnd()}…`
+            : fullTitleText;
         graphNodes.push({
           data: {
             id: srcNodeId,
             group: 'source',
-            label: `[^${src.id}] ${String(src.title || srcUrl).slice(0, 42)}`,
+            label: `[^${src.id}] ${shortTitleText}`,
+            fullTitle: `[^${src.id}] ${fullTitleText}`,
             type: 'Verified Source',
             description: srcUrl,
             status: 'stable',
@@ -8529,10 +8796,9 @@ export function generateA2uiSurface(
           },
         });
         graphBodies[srcNodeId] = [
-          `# Kilde [${src.id}]: ${src.title || srcUrl}`,
-          srcUrl ? `- **Kilde-URL:** [${srcUrl}](${srcUrl})` : '',
           src.retrieved_at ? `- **Hentet (\`retrieved_at\`):** \`${src.retrieved_at}\`` : '',
           src.last_modified ? `- **Sist endret (\`last_modified\`):** \`${src.last_modified}\`` : '',
+          `- **Referert i konsept:** \`${c.id}\` (*${c.title || c.id}*)`,
         ]
           .filter(Boolean)
           .join('\n');
@@ -8679,7 +8945,7 @@ export function generateA2uiSurface(
         id: 'overview_highlights_title',
         component: 'Text',
         variant: 'h3',
-        text: 'Nøkkelpunkter / Læringsmål',
+        text: 'Hovedpunkter & Læringsmål',
       },
       {
         id: 'overview_highlights_list',
@@ -8804,6 +9070,12 @@ export function generateA2uiSurface(
   const checklistPct =
     totalChecklistItems > 0 ? Math.round((completedChecklistCount / totalChecklistItems) * 100) : 0;
 
+  const formattedDuration = stage2Norm.estimatedDuration
+    ? /[a-zA-Z]/.test(String(stage2Norm.estimatedDuration))
+      ? String(stage2Norm.estimatedDuration)
+      : `${stage2Norm.estimatedDuration}s`
+    : '';
+
   const dataModel = {
     meta: {
       runId: resolvedRunId || 'workspace',
@@ -8814,7 +9086,7 @@ export function generateA2uiSurface(
       model: meta.model || GEMINI_4_ARGON_MODEL,
       subtitleLine: [
         stage2Norm.targetAudience ? `Målgruppe: ${stage2Norm.targetAudience}` : '',
-        stage2Norm.estimatedDuration ? `Varighet: ${stage2Norm.estimatedDuration}s` : '',
+        formattedDuration ? `Varighet: ${formattedDuration}` : '',
         `Modell: ${meta.model || GEMINI_4_ARGON_MODEL}`,
         `Run: ${resolvedRunId || 'workspace'}`,
       ]
@@ -8995,11 +9267,18 @@ ${A2UI_STUDIO_JS}
   fs.writeFileSync(htmlOutputPath, html, 'utf-8');
 
   let bundleHtmlPath: string | undefined;
+  let bundleVizPath: string | undefined;
   const shouldMirrorBundle =
     options.mirrorBundleHtml !== undefined ? options.mirrorBundleHtml : !options.outputDir;
   if (shouldMirrorBundle && fs.existsSync(bundleRoot)) {
     bundleHtmlPath = path.join(bundleRoot, 'a2ui.html');
     fs.writeFileSync(bundleHtmlPath, html, 'utf-8');
+    try {
+      const vizResult = generateBundleVisualization(bundleRoot);
+      bundleVizPath = vizResult.outputPath;
+    } catch {
+      // Non-fatal if bundle has no concepts yet
+    }
   }
 
   return {
@@ -9017,6 +9296,7 @@ ${A2UI_STUDIO_JS}
     surfaceJsonlPath,
     htmlOutputPath,
     bundleHtmlPath,
+    bundleVizPath,
     messages,
   };
 }
@@ -9037,6 +9317,22 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       throw new Error(`[ICM Self-Test FAILED] ${message}`);
     }
     assertions++;
+  }
+
+  // 0. Programmatic TypeScript typecheck (tsc --noEmit) so `npm test` needs no shell `&&` chaining
+  const tscBin = path.resolve(process.cwd(), 'node_modules/typescript/bin/tsc');
+  if (fs.existsSync(tscBin)) {
+    try {
+      execFileSync(process.execPath, [tscBin, '--noEmit'], {
+        cwd: process.cwd(),
+        stdio: 'pipe',
+        encoding: 'utf-8',
+      });
+      assertions++;
+    } catch (err: any) {
+      const stderr = err?.stderr || err?.stdout || err?.message || String(err);
+      throw new Error(`[ICM Self-Test FAILED] TypeScript typecheck (tsc --noEmit) failed:\n${stderr}`);
+    }
   }
 
   // 1. OKF v0.2 round-trip, trust tier, and staleness
@@ -9096,7 +9392,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   );
   assert(isOkfStale({ stale_after: '2020-01-01' }) === true, 'Past stale_after is detected as stale');
 
-  // 2. cleanGroundingLinks() UTF-8, heading/table skip, closing emphasis/paren/section snap, .^id typo, isFinalStep, citedFootnoteIds
+  // 2. cleanGroundingLinks() UTF-8, heading/table skip, closing emphasis/paren/section snap, .^id typo, isFinalStep, citedFootnoteIds, bare-domain enrichment & uncited fm.sources filtering
   const lineHeading = '## 1. Hovedkrav for særskilte brannobjekter (§ 13)';
   const lineTable = '| Risikoklasse | Krav til rømningsvei | Kontroll |';
   const lineProse =
@@ -9109,7 +9405,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     lineProse,
     '',
     '[^lovdata-fob]: Forskrift om brannforebygging',
-    '[^dibk-no]: Direktoratet for byggkvalitet',
+    '[^dibk-no]: dibk.no',
     '[^uncited-dangling]: Dangling Uncited Source',
   ].join('\n');
 
@@ -9123,8 +9419,11 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     '    title: "Forskrift om brannforebygging"',
     '    resource: "https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710"',
     '  - id: dibk-no',
-    '    title: "Direktoratet for byggkvalitet"',
+    '    title: "dibk.no"',
     '    resource: "https://dibk.no/regelverk/byggteknisk-forskrift-tek17/"',
+    '  - id: uncited-fm-source',
+    '    title: "Uncited Frontmatter Source"',
+    '    resource: "https://example.com/uncited-fm"',
     '---',
     '',
   ].join('\n');
@@ -9210,7 +9509,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
             {
               type: 'url_citation',
               url: 'https://dibk.no/regelverk/byggteknisk-forskrift-tek17/',
-              title: 'Direktoratet for byggkvalitet',
+              title: 'dibk.no',
               start_index: midUtf8BoldByteOffset + 5,
               end_index: insideParenByteOffset,
             },
@@ -9255,11 +9554,18 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     'Trailing .[^lovdata-fob] normalized to [^lovdata-fob].'
   );
   assert(
-    !cleanedMd.includes('uncited-dangling') && !cleanedMd.includes('draft-ignored'),
-    'Uncited footnote definitions and non-final draft step sources are excluded'
+    !cleanedMd.includes('uncited-dangling') &&
+      !cleanedMd.includes('draft-ignored') &&
+      !cleanedMd.includes('uncited-fm-source'),
+    'Uncited footnote definitions, uncited frontmatter sources, and non-final draft step sources are excluded'
+  );
+  assert(
+    cleanedMd.includes('title: dibk.no — Byggteknisk forskrift tek17') &&
+      cleanedMd.includes('[^dibk-no]: dibk.no — Byggteknisk forskrift tek17'),
+    `Bare-domain title "dibk.no" enriched from URL slug in both frontmatter and footnote definition (got: "${cleanedMd}")`
   );
 
-  // 3. A2UI v0.9.1 validation, checklist label cleaning, and concise CaseSimulator synthesis
+  // 3. A2UI v0.9.1 validation, checklist label cleaning, totalEstimatedMinutes, synthesized highlights, and CaseSimulator synthesis
   const cleanedChkLabel = cleanChecklistLabel(
     '***Viktig*** **Brannvernleder** skal kontrollere *varme arbeider* (*FOB § 4*), måle 2 * 3 * 4 meter og `internkontroll` [^lovdata-fob]'
   );
@@ -9272,6 +9578,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   const stage2Norm = normalizeStage2ForA2ui(
     {
       courseTitle: 'Testkurs i Brannvern',
+      totalEstimatedMinutes: 55,
       executiveSummary: 'Kort sammendrag.',
       trainingModules: [
         {
@@ -9293,9 +9600,25 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     'Fallback'
   );
   assert(stage2Norm.title === 'Testkurs i Brannvern', 'courseTitle extracted as normalized title');
+  assert(
+    stage2Norm.estimatedDuration === '55 min',
+    `totalEstimatedMinutes formatted with " min" unit (got: "${stage2Norm.estimatedDuration}")`
+  );
+  assert(
+    stage2Norm.highlights.length === 1 && stage2Norm.highlights[0].includes('Brannvernleders rolle'),
+    'When top-level keyTakeaways is omitted, highlights are synthesized from trainingModules'
+  );
   assert(stage2Norm.modules[0]?.durationOrMeta === '15 min', 'Module durationMinutes preserved as durationOrMeta');
   assert(stage2Norm.quiz[0]?.correctValue === '1', 'correctOptionIndex extracted as quiz correctValue');
   assert(stage2Norm.cases.length === 1, 'Synthesized 1 case from trainingModule');
+  assert(
+    stage2Norm.cases[0].scenario.includes('Første avsnitt beskriver den konkrete utfordringen i bygget.') &&
+      stage2Norm.cases[0].scenario.includes(
+        'Utfordring / Spørsmål: Hva må eier gjøre dersom leietaker blokkerer rømningsvei?'
+      ) &&
+      stage2Norm.cases[0].scenario.includes('Sentrale kontrollpunkter'),
+    `Synthesized case scenario includes firstPara context + Utfordring/Spørsmål + Sentrale kontrollpunkter (got: "${stage2Norm.cases[0].scenario}")`
+  );
   assert(
     !stage2Norm.cases[0].scenario.includes('Andre avsnitt er lang forelesningstekst'),
     'Synthesized case scenario does NOT dump the entire multi-paragraph lecture narration'
@@ -9346,7 +9669,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   ]);
   assert(invalidRes.valid === false && invalidRes.errors.length > 0, 'Missing root component is rejected by validator');
 
-  console.log(`[ICM Self-Test] ✅ All ${assertions} assertions passed (0 tokens).`);
+  console.log(`[ICM Self-Test] ✅ All ${assertions} assertions passed (0 tokens, including tsc --noEmit).`);
   return { passed: assertions };
 }
 
@@ -9406,6 +9729,7 @@ if (
         surfaceJsonlPath: a2uiResult.surfaceJsonlPath,
         htmlOutputPath: a2uiResult.htmlOutputPath,
         bundleHtmlPath: a2uiResult.bundleHtmlPath,
+        bundleVizPath: a2uiResult.bundleVizPath,
       });
       return;
     }

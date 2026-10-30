@@ -9,7 +9,7 @@
     "cli:verify": "npx tsx --env-file=.env.local src/index.ts --verify",
     "cli:viz": "npx tsx --env-file=.env.local src/index.ts --viz",
     "cli:a2ui": "npx tsx --env-file=.env.local src/index.ts --a2ui",
-    "test": "npx tsc --noEmit && npx tsx src/index.ts --test",
+    "test": "npx tsx src/index.ts --test",
     "typecheck": "npx tsc --noEmit",
     "clean": "node scripts/cleanup.js"
   },

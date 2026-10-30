@@ -28,7 +28,8 @@ In ICM, Stage 2 (`prompts/02_script.md`) consumes the physical file produced by 
    - `stages/<stage>/output/thinking_trace.md`
    - `stages/<stage>/output/<artifact>`
 5. Apply the **Edit-Source Principle**: if something needs adjustment, fix the Layer 2/3 contract (`prompts/` or `_config/`) before moving to the next stage.
-6. Whenever you modify [`src/index.ts`](../../src/index.ts), run `npm test` (`npx tsc --noEmit && npx tsx src/index.ts --test`) to execute the zero-token TypeScript + OKF v0.2 + UTF-8 grounding + A2UI v0.9.1 self-test suite.
+6. Whenever you modify [`src/index.ts`](../../src/index.ts), run `npm test` (`npx tsx src/index.ts --test`, which programmatically executes `tsc --noEmit` plus all self-test assertions in a single process) to execute the zero-token TypeScript + OKF v0.2 + UTF-8 grounding + A2UI v0.9.1 self-test suite.
+7. **Cross-Platform Shell Rule (Windows PowerShell Compatibility):** **Never** chain terminal commands with `&&` (which fails in Windows PowerShell 5.1 with `ParserError: The token '&&' is not a valid statement separator`). Always run CLI scripts as separate single commands.
 
 ---
 
@@ -126,7 +127,7 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
 ## Phase 5: A2UI v0.9.1 Declarative Surface (`npm run cli:a2ui`) or Optional Bespoke Domain Web Studio
 
 Once the pipeline's stages (`01_research`, `02_script`, `03_...`, `04_...`) and a real verified run in `workspace/runs/<runId>/` are complete on disk, ask the user via `ask_question` whether they want to:
-1. **(Recommended) Compile a Declarative A2UI v0.9.1 Surface & Bi-Directional Studio (`npm run cli:a2ui -- <runId>`)** generating `a2ui_surface.json`, `a2ui_surface.jsonl`, and `workspace/runs/<runId>/a2ui.html` (plus `workspace/bundle/a2ui.html`) with Tier 1 A2UI Basic Catalog Primitives + Tier 2 ICM/OKF Domain Components (`OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`),
+1. **(Recommended) Compile a Declarative A2UI v0.9.1 Surface & Bi-Directional Studio (`npm run cli:a2ui -- <runId>`)** generating `a2ui_surface.json`, `a2ui_surface.jsonl`, `workspace/runs/<runId>/a2ui.html`, `workspace/bundle/a2ui.html`, and automatically refreshing `workspace/bundle/viz.html` in a single command with Tier 1 A2UI Basic Catalog Primitives + Tier 2 ICM/OKF Domain Components (`OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`),
 2. **Build a Bespoke Domain Web Studio (`src/server.ts` + `public/`)** designed from scratch around their pipeline's *actual* filesystem artifacts, or
 3. **Keep the project as a 100% Pure Headless CLI Pipeline** (zero web server code).
 
@@ -137,7 +138,7 @@ If the user chooses to build a custom Domain Web Studio:
     - *Podcast & Audio Studio*: Dual-host transcript timeline, inline voiceover player, and episode show notes editor.
     - *Executive / Legal / Competitor Intelligence*: Executive KPI summary cards, side-by-side source verification inspector, and interactive filterable tables.
 - **Zero-Dependency Native Node HTTP Server (`src/server.ts`) & OKF v0.2 / A2UI v0.9.1 UI Best Practices:**
-  - Generate the interactive OKF knowledge graph (`npm run cli:viz` → `workspace/bundle/viz.html`) and A2UI v0.9.1 surface (`npm run cli:a2ui -- <runId>` → `a2ui.html`) so they are ready to embed or view alongside the studio.
+  - Generate the A2UI v0.9.1 surface and interactive OKF knowledge graph in a single command (`npm run cli:a2ui -- <runId>` → `a2ui.html`, `workspace/bundle/a2ui.html`, and `workspace/bundle/viz.html`) so they are ready to embed or view alongside the studio.
   - Build `src/server.ts` using Node's built-in `node:http` and `node:fs` modules (keeping **0 external npm dependencies**!) or install `express` if preferred.
   - When rendering OKF v0.2 Markdown documents (`research_summary.md`) inside a custom Web Studio (`public/index.html`):
     - Preprocess OKF `[^id]` footnotes and `[^id]: Title` footnote definitions before calling `marked.parse()` so inline `[^id]` citations render as clickable superscript links tied to `frontmatter.sources`, and display each source's `retrieved_at` (and `last_modified` if present) timestamp badge.
