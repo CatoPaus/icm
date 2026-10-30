@@ -4537,6 +4537,11 @@ export function extractConceptLinks(
     addCandidate(m[1]);
   }
 
+  const codePathRegex = /`(\/[A-Za-z0-9_\-\/]+\.md)`/gi;
+  for (const m of body.matchAll(codePathRegex)) {
+    addCandidate(m[1]);
+  }
+
   const pathCandidates: string[] = [];
   if (typeof frontmatter?.resource === 'string') pathCandidates.push(frontmatter.resource);
   if (typeof frontmatter?.computation === 'string') pathCandidates.push(frontmatter.computation);
@@ -5445,13 +5450,2889 @@ ${OKF_VIZ_JS}
   };
 }
 
+// ============================================================================
+// 3.9 A2UI v0.9.1 Catalog + Surface Compiler & Bi-Directional Studio Renderer
+// ============================================================================
+
+export const A2UI_PROTOCOL_VERSION = 'v0.9.1';
+export const A2UI_BASIC_CATALOG_ID =
+  'https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json';
+export const A2UI_ICM_CATALOG_ID =
+  'https://a2ui.org/specification/v0_9_1/catalogs/icm-okf-v0.2/catalog.json';
+
+export type A2uiDynamicValue<T = unknown> =
+  | T
+  | { path: string }
+  | { call: string; args?: Record<string, unknown>; returnType?: string };
+
+export type A2uiChildList = string[] | { path: string; componentId: string };
+
+export interface A2uiComponent {
+  id: string;
+  component: string;
+  weight?: number;
+  accessibility?: {
+    label?: A2uiDynamicValue<string>;
+    description?: A2uiDynamicValue<string>;
+  };
+  [key: string]: unknown;
+}
+
+export interface A2uiCreateSurfaceMessage {
+  version: typeof A2UI_PROTOCOL_VERSION;
+  createSurface: {
+    surfaceId: string;
+    catalogId: string;
+    theme?: {
+      primaryColor?: string;
+      iconUrl?: string;
+      agentDisplayName?: string;
+    };
+    sendDataModel?: boolean;
+  };
+}
+
+export interface A2uiUpdateComponentsMessage {
+  version: typeof A2UI_PROTOCOL_VERSION;
+  updateComponents: {
+    surfaceId: string;
+    components: A2uiComponent[];
+  };
+}
+
+export interface A2uiUpdateDataModelMessage {
+  version: typeof A2UI_PROTOCOL_VERSION;
+  updateDataModel: {
+    surfaceId: string;
+    path?: string;
+    value?: unknown;
+  };
+}
+
+export interface A2uiDeleteSurfaceMessage {
+  version: typeof A2UI_PROTOCOL_VERSION;
+  deleteSurface: {
+    surfaceId: string;
+  };
+}
+
+export type A2uiEnvelopeMessage =
+  | A2uiCreateSurfaceMessage
+  | A2uiUpdateComponentsMessage
+  | A2uiUpdateDataModelMessage
+  | A2uiDeleteSurfaceMessage;
+
+export interface A2uiChecklistItem {
+  id: string;
+  label: string;
+  checked: boolean;
+  category?: string;
+}
+
+export interface A2uiChecklistGroup {
+  id: string;
+  title: string;
+  items: A2uiChecklistItem[];
+}
+
+export interface A2uiSurfaceGenerationOptions {
+  workspaceRoot?: string;
+  bundleRoot?: string;
+  runId?: string;
+  surfaceId?: string;
+  outputHtmlPath?: string;
+  mirrorBundleHtml?: boolean;
+  outputDir?: string;
+}
+
+export interface A2uiSurfaceGenerationResult {
+  runId: string;
+  surfaceId: string;
+  catalogId: string;
+  componentCount: number;
+  tabCount: number;
+  checklistItemCount: number;
+  moduleCount: number;
+  quizCount: number;
+  caseCount: number;
+  conceptCount: number;
+  surfaceJsonPath: string;
+  surfaceJsonlPath: string;
+  htmlOutputPath: string;
+  bundleHtmlPath?: string;
+  messages: A2uiEnvelopeMessage[];
+}
+
+/**
+ * Two-Tier A2UI Catalog Schema combining Tier 1 (A2UI v0.9.1 Basic Catalog Primitives)
+ * and Tier 2 (ICM + OKF v0.2 Domain Custom Components).
+ */
+export const A2UI_ICM_CATALOG_SCHEMA = {
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  catalogId: A2UI_ICM_CATALOG_ID,
+  extendsCatalogId: A2UI_BASIC_CATALOG_ID,
+  version: A2UI_PROTOCOL_VERSION,
+  title: 'ICM + OKF v0.2 Two-Tier A2UI Component Catalog',
+  tier1BasicComponents: [
+    'Text',
+    'Image',
+    'Icon',
+    'Video',
+    'AudioPlayer',
+    'Row',
+    'Column',
+    'List',
+    'Card',
+    'Tabs',
+    'Divider',
+    'Modal',
+    'Button',
+    'CheckBox',
+    'TextField',
+    'DateTimeInput',
+    'ChoicePicker',
+    'Slider',
+    'Badge',
+  ],
+  tier2DomainComponents: {
+    OkfMarkdown: {
+      description:
+        'Renders OKF v0.2 Markdown with clickable [^id] footnotes, retrieved_at & last_modified source badges, trust-tier & staleness headers, Layer 4 raw Markdown editor, and internal /research/*.md concept navigation.',
+      properties: ['title', 'body', 'frontmatter', 'sources', 'trustTier', 'isStale', 'editablePath'],
+    },
+    OkfKnowledgeGraph: {
+      description:
+        'Embeds the interactive Cytoscape.js OKF Knowledge Graph (viz.html engine) directly inside an A2UI tab.',
+      properties: ['title', 'bundlePath'],
+    },
+    InteractiveChecklist: {
+      description:
+        'Renders extracted Markdown checklists (- [ ] ...) with nested category headers, [^id]/LaTeX stripping, and reactive CheckBox completion progress bound two-way to the A2UI data model.',
+      properties: ['title', 'subtitle', 'groupsPath'],
+    },
+    ModuleCarousel: {
+      description:
+        'Renders Stage 2 trainingModules, lessons, modules, or slides with step-by-step navigation, regulatory/concept metadata, slide cues, action items, and Web Speech TTS narration.',
+      properties: ['title', 'modulesPath', 'activeIndexPath'],
+    },
+    QuizRunner: {
+      description:
+        'Interactive assessment runner bound to Stage 2 quiz items or lesson quiz questions with ChoicePicker selection, explanation feedback, and live score calculation.',
+      properties: ['title', 'questionsPath', 'answersPath'],
+    },
+    CaseSimulator: {
+      description:
+        'Interactive scenario & board action simulator bound to Stage 2 cases or trainingModule action items with editable response notes and model resolution reveal.',
+      properties: ['title', 'casesPath', 'responsesPath'],
+    },
+  },
+} as const;
+
+function escapeA2uiHtml(str: string): string {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Strips OKF footnote markers (`[^id]`), inline LaTeX math (`$\text{EI } 60$`),
+ * and excess Markdown formatting from extracted checklist items for clean UI labels.
+ */
+export function cleanChecklistLabel(rawText: string): string {
+  let text = String(rawText || '').trim();
+  // Remove footnote references like [^lovdata-brann], [^1]
+  text = text.replace(/\[\^[^\]]+\]/g, '');
+  // Convert $\text{...}$ or $\mathrm{...}$ inside math blocks
+  text = text.replace(/\$(?:\\text|\\mathrm)\{([^}]*)\}\s*([^$]*)\$/g, '$1$2');
+  // Strip remaining inline math delimiters $...$
+  text = text.replace(/\$([^$]+)\$/g, '$1');
+  // Convert markdown links [label](url) -> label
+  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  // Strip inline code backticks and bold markers
+  text = text.replace(/`([^`]+)`/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1');
+  // Normalize whitespace and trailing punctuation spacing
+  text = text.replace(/\s+/g, ' ').replace(/\s+([.,;:?!])/g, '$1').trim();
+  return text;
+}
+
+/**
+ * Extracts structured checklist groups and items (`- [ ] ...` or `- [x] ...`) from OKF Markdown,
+ * supporting both Markdown headings (`### ...`) and nested top-level category bullets (`- [ ] **Category**:`).
+ */
+export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChecklistGroup[] {
+  const lines = String(rawMarkdown || '').split(/\r?\n/);
+  const groups: A2uiChecklistGroup[] = [];
+  let currentHeading = 'Sjekkliste / Action Items';
+  let currentCategoryHeader: string | null = null;
+  let itemCounter = 0;
+
+  const getOrCreateGroup = (title: string): A2uiChecklistGroup => {
+    const cleanTitle = cleanChecklistLabel(title.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:$/, '')) || 'Generelt';
+    let existing = groups.find((g) => g.title === cleanTitle);
+    if (!existing) {
+      existing = {
+        id: `chk_grp_${groups.length + 1}`,
+        title: cleanTitle,
+        items: [],
+      };
+      groups.push(existing);
+    }
+    return existing;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const headingMatch = line.match(/^(#{2,4})\s+(.+?)\s*$/);
+    if (headingMatch) {
+      currentHeading = headingMatch[2].replace(/^\d+(\.\d+)*\.?\s*/, '').trim();
+      currentCategoryHeader = null;
+      continue;
+    }
+
+    const checkboxMatch = line.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.+?)\s*$/);
+    if (!checkboxMatch) continue;
+
+    const indent = checkboxMatch[1].length;
+    const isChecked = checkboxMatch[2].toLowerCase() === 'x';
+    const rawContent = checkboxMatch[3].trim();
+
+    // Check if this is a parent category line followed by indented sub-checkboxes
+    // e.g. `- [ ] **Dokumentasjon og internkontroll**:`
+    let hasIndentedSubItems = false;
+    for (let j = i + 1; j < lines.length; j++) {
+      const nextLine = lines[j];
+      if (!nextLine.trim()) continue;
+      const nextCheckbox = nextLine.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.+?)\s*$/);
+      if (nextCheckbox && nextCheckbox[1].length > indent) {
+        hasIndentedSubItems = true;
+      }
+      break;
+    }
+
+    if (indent === 0 && (hasIndentedSubItems || (/^\*\*[^*]+\*\*:?\s*$/.test(rawContent)))) {
+      currentCategoryHeader = rawContent.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:$/, '').trim();
+      continue;
+    }
+
+    itemCounter++;
+    const groupTitle = indent > 0 && currentCategoryHeader ? currentCategoryHeader : currentHeading;
+    const group = getOrCreateGroup(groupTitle);
+    const cleanedLabel = cleanChecklistLabel(rawContent);
+    if (!cleanedLabel) continue;
+
+    group.items.push({
+      id: `chk_item_${itemCounter}`,
+      label: cleanedLabel,
+      checked: isChecked,
+      category: group.title,
+    });
+  }
+
+  return groups.filter((g) => g.items.length > 0);
+}
+
+export interface NormalizedA2uiModule {
+  id: string;
+  number: number;
+  title: string;
+  subtitleOrBasis: string;
+  durationOrMeta: string;
+  narration: string;
+  actionItem: string;
+  bullets: string[];
+}
+
+export interface NormalizedA2uiQuizQuestion {
+  id: string;
+  question: string;
+  options: Array<{ label: string; value: string }>;
+  correctValue: string;
+  explanation: string;
+  sourceModule?: string;
+}
+
+export interface NormalizedA2uiCaseItem {
+  id: string;
+  title: string;
+  basisOrContext: string;
+  scenario: string;
+  recommendedAction: string;
+}
+
+/**
+ * Normalizes any Stage 2 `script_draft.json` payload into A2UI data model structures.
+ * Works seamlessly across:
+ * - Generic Stage 2 output (`{ title, scriptBody, estimatedDuration }`)
+ * - Domain compliance studios (`trainingModules`, `keyTakeaways`, `boardActionItem`)
+ * - Course studios (`lessons`, `learningObjectives`, `slideCues`, `quizQuestion`/`quizOptions`)
+ * - Custom schemas with `modules`, `slides`, `cases`, `scenarios`, or `quiz`/`questions` arrays.
+ */
+export function normalizeStage2ForA2ui(
+  scriptDraft: Record<string, unknown> | null,
+  fallbackTitle: string
+): {
+  title: string;
+  subtitle: string;
+  targetAudience: string;
+  estimatedDuration: number | string;
+  scriptBody: string;
+  highlights: string[];
+  modules: NormalizedA2uiModule[];
+  quiz: NormalizedA2uiQuizQuestion[];
+  cases: NormalizedA2uiCaseItem[];
+} {
+  if (!scriptDraft || typeof scriptDraft !== 'object') {
+    return {
+      title: fallbackTitle,
+      subtitle: '',
+      targetAudience: '',
+      estimatedDuration: 0,
+      scriptBody: '',
+      highlights: [],
+      modules: [],
+      quiz: [],
+      cases: [],
+    };
+  }
+
+  const title = String(scriptDraft.title || fallbackTitle || 'ICM Run Studio');
+  const subtitle = String(scriptDraft.subtitle || scriptDraft.description || '');
+  const targetAudience = String(scriptDraft.targetAudience || scriptDraft.audience || '');
+  const estimatedDuration =
+    typeof scriptDraft.estimatedDuration === 'number' || typeof scriptDraft.estimatedDuration === 'string'
+      ? scriptDraft.estimatedDuration
+      : '';
+  const scriptBody = String(
+    scriptDraft.scriptBody || scriptDraft.executiveSummary || scriptDraft.narration || ''
+  );
+
+  // Extract highlights (`keyTakeaways` or `learningObjectives`)
+  const rawHighlights = Array.isArray(scriptDraft.keyTakeaways)
+    ? scriptDraft.keyTakeaways
+    : Array.isArray(scriptDraft.learningObjectives)
+      ? scriptDraft.learningObjectives
+      : Array.isArray(scriptDraft.highlights)
+        ? scriptDraft.highlights
+        : [];
+  const highlights = rawHighlights.map((h) => String(h || '').trim()).filter(Boolean);
+
+  // Extract modules from `trainingModules`, `lessons`, `modules`, or `slides`
+  const rawModules = Array.isArray(scriptDraft.trainingModules)
+    ? scriptDraft.trainingModules
+    : Array.isArray(scriptDraft.lessons)
+      ? scriptDraft.lessons
+      : Array.isArray(scriptDraft.modules)
+        ? scriptDraft.modules
+        : Array.isArray(scriptDraft.slides)
+          ? scriptDraft.slides
+          : [];
+
+  const modules: NormalizedA2uiModule[] = [];
+  const quiz: NormalizedA2uiQuizQuestion[] = [];
+  const cases: NormalizedA2uiCaseItem[] = [];
+
+  rawModules.forEach((rawMod: any, idx: number) => {
+    if (!rawMod || typeof rawMod !== 'object') return;
+    const modNum = Number(rawMod.moduleNumber ?? rawMod.lessonNumber ?? rawMod.slideNumber ?? idx + 1);
+    const modTitle = String(
+      rawMod.moduleTitle || rawMod.lessonTitle || rawMod.title || `Module ${modNum}`
+    );
+    const subtitleOrBasis = String(
+      rawMod.regulatoryBasis || rawMod.coreConcept || rawMod.subtitle || ''
+    );
+    const durationOrMeta = rawMod.durationMinutes
+      ? `${rawMod.durationMinutes} min`
+      : rawMod.estimatedDuration
+        ? `${rawMod.estimatedDuration}s`
+        : '';
+    const narration = String(
+      rawMod.spokenNarration || rawMod.narrationScript || rawMod.scriptBody || rawMod.content || ''
+    );
+    const actionItem = String(
+      rawMod.boardActionItem || rawMod.actionItem || rawMod.exercise || ''
+    );
+    const bulletsRaw = Array.isArray(rawMod.slideCues)
+      ? rawMod.slideCues
+      : Array.isArray(rawMod.keyTakeaways)
+        ? rawMod.keyTakeaways
+        : Array.isArray(rawMod.bullets)
+          ? rawMod.bullets
+          : [];
+    const bullets = bulletsRaw.map((b: unknown) => String(b || '').trim()).filter(Boolean);
+
+    modules.push({
+      id: `mod_${idx + 1}`,
+      number: modNum,
+      title: modTitle,
+      subtitleOrBasis,
+      durationOrMeta,
+      narration,
+      actionItem,
+      bullets,
+    });
+
+    // If module has an embedded quizQuestion (like icm-course-studio)
+    if (typeof rawMod.quizQuestion === 'string' && Array.isArray(rawMod.quizOptions)) {
+      const options = rawMod.quizOptions.map((opt: unknown, oIdx: number) => ({
+        label: String(opt),
+        value: String(oIdx),
+      }));
+      const correctIdx =
+        typeof rawMod.quizCorrectIndex === 'number' ? String(rawMod.quizCorrectIndex) : '0';
+      quiz.push({
+        id: `quiz_mod_${idx + 1}`,
+        question: rawMod.quizQuestion,
+        options,
+        correctValue: correctIdx,
+        explanation: String(rawMod.quizExplanation || ''),
+        sourceModule: modTitle,
+      });
+    }
+
+    // If module has a boardActionItem (like icm-brannvern-studio), also populate a scenario case
+    if (actionItem) {
+      cases.push({
+        id: `case_mod_${idx + 1}`,
+        title: `${modTitle}`,
+        basisOrContext: subtitleOrBasis,
+        scenario: narration,
+        recommendedAction: actionItem,
+      });
+    }
+  });
+
+  // Top-level `quiz` or `questions` array
+  const rawQuizList = Array.isArray(scriptDraft.quiz)
+    ? scriptDraft.quiz
+    : Array.isArray(scriptDraft.questions)
+      ? scriptDraft.questions
+      : [];
+  rawQuizList.forEach((q: any, idx: number) => {
+    if (!q || typeof q !== 'object') return;
+    const rawOpts = Array.isArray(q.options)
+      ? q.options
+      : Array.isArray(q.quizOptions)
+        ? q.quizOptions
+        : [];
+    const options = rawOpts.map((opt: any, oIdx: number) =>
+      typeof opt === 'object' && opt !== null
+        ? { label: String(opt.label || opt.text || oIdx), value: String(opt.value ?? oIdx) }
+        : { label: String(opt), value: String(oIdx) }
+    );
+    const correctValue = String(
+      q.correctValue ?? q.correctIndex ?? q.quizCorrectIndex ?? q.answer ?? '0'
+    );
+    quiz.push({
+      id: `quiz_${idx + 1}`,
+      question: String(q.question || q.quizQuestion || `Question ${idx + 1}`),
+      options,
+      correctValue,
+      explanation: String(q.explanation || q.quizExplanation || ''),
+      sourceModule: String(q.moduleTitle || ''),
+    });
+  });
+
+  // Top-level `cases` or `scenarios` array
+  const rawCasesList = Array.isArray(scriptDraft.cases)
+    ? scriptDraft.cases
+    : Array.isArray(scriptDraft.scenarios)
+      ? scriptDraft.scenarios
+      : [];
+  rawCasesList.forEach((c: any, idx: number) => {
+    if (!c || typeof c !== 'object') return;
+    cases.push({
+      id: `case_${idx + 1}`,
+      title: String(c.title || c.caseTitle || `Scenario ${idx + 1}`),
+      basisOrContext: String(c.regulatoryBasis || c.context || c.category || ''),
+      scenario: String(c.scenario || c.description || c.prompt || ''),
+      recommendedAction: String(c.recommendedAction || c.resolution || c.boardActionItem || ''),
+    });
+  });
+
+  return {
+    title,
+    subtitle,
+    targetAudience,
+    estimatedDuration,
+    scriptBody,
+    highlights,
+    modules,
+    quiz,
+    cases,
+  };
+}
+
+/**
+ * Resolves an RFC 6901 JSON Pointer path (`/a/b/0`) against a root data model object.
+ */
+export function resolveJsonPointer(rootModel: unknown, pointer: string, scopeModel?: unknown): unknown {
+  if (!pointer) return rootModel;
+  if (!pointer.startsWith('/')) {
+    // Relative path inside a template collection scope
+    const base = scopeModel !== undefined ? scopeModel : rootModel;
+    const segments = pointer.split('/').filter(Boolean);
+    let cur: any = base;
+    for (const seg of segments) {
+      if (cur === null || cur === undefined) return undefined;
+      const unescaped = seg.replace(/~1/g, '/').replace(/~0/g, '~');
+      cur = cur[unescaped];
+    }
+    return cur;
+  }
+  if (pointer === '/') return rootModel;
+  const segments = pointer.slice(1).split('/');
+  let current: any = rootModel;
+  for (const rawSeg of segments) {
+    if (current === null || current === undefined) return undefined;
+    const seg = rawSeg.replace(/~1/g, '/').replace(/~0/g, '~');
+    current = current[seg];
+  }
+  return current;
+}
+
+/**
+ * Updates an RFC 6901 JSON Pointer path (`/a/b/0`) on a root data model object in-place.
+ */
+export function setJsonPointer(rootModel: Record<string, any>, pointer: string, value: unknown): void {
+  if (!pointer || pointer === '/') {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      Object.assign(rootModel, value);
+    }
+    return;
+  }
+  const cleanPointer = pointer.startsWith('/') ? pointer.slice(1) : pointer;
+  const segments = cleanPointer.split('/').map((s) => s.replace(/~1/g, '/').replace(/~0/g, '~'));
+  let current: any = rootModel;
+  for (let i = 0; i < segments.length - 1; i++) {
+    const seg = segments[i];
+    const nextSeg = segments[i + 1];
+    if (current[seg] === undefined || current[seg] === null || typeof current[seg] !== 'object') {
+      current[seg] = /^\d+$/.test(nextSeg) ? [] : {};
+    }
+    current = current[seg];
+  }
+  const lastSeg = segments[segments.length - 1];
+  current[lastSeg] = value;
+}
+
+/**
+ * Validates an array of A2UI v0.9.1 server-to-client messages for protocol structural integrity:
+ * - Envelope version === 'v0.9.1'
+ * - `createSurface` precedes `updateComponents` for the same `surfaceId`
+ * - Component adjacency list contains a `root` component (`id: "root"`), no duplicate IDs,
+ *   all child component ID references exist, and there are no circular parent-child references.
+ */
+export function validateA2uiSurfaceMessages(messages: A2uiEnvelopeMessage[]): {
+  valid: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+  const createdSurfaces = new Set<string>();
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg || typeof msg !== 'object') {
+      errors.push(`Message[${i}] is not an object`);
+      continue;
+    }
+    if (msg.version !== A2UI_PROTOCOL_VERSION) {
+      errors.push(`Message[${i}] has invalid version "${(msg as any).version}", expected "${A2UI_PROTOCOL_VERSION}"`);
+    }
+
+    if ('createSurface' in msg) {
+      const { surfaceId, catalogId } = msg.createSurface;
+      if (!surfaceId) errors.push(`Message[${i}] createSurface missing surfaceId`);
+      if (!catalogId) errors.push(`Message[${i}] createSurface missing catalogId`);
+      createdSurfaces.add(surfaceId);
+    } else if ('updateComponents' in msg) {
+      const { surfaceId, components } = msg.updateComponents;
+      if (!createdSurfaces.has(surfaceId)) {
+        errors.push(`Message[${i}] updateComponents references uncreated surface "${surfaceId}"`);
+      }
+      if (!Array.isArray(components) || components.length === 0) {
+        errors.push(`Message[${i}] updateComponents.components must be a non-empty array`);
+        continue;
+      }
+
+      const byId = new Map<string, A2uiComponent>();
+      for (const comp of components) {
+        if (!comp.id || typeof comp.id !== 'string') {
+          errors.push(`Component missing string id`);
+          continue;
+        }
+        if (!comp.component || typeof comp.component !== 'string') {
+          errors.push(`Component "${comp.id}" missing component type name`);
+        }
+        if (byId.has(comp.id)) {
+          errors.push(`Duplicate component id "${comp.id}" in surface "${surfaceId}"`);
+        }
+        byId.set(comp.id, comp);
+      }
+
+      if (!byId.has('root')) {
+        errors.push(`Surface "${surfaceId}" is missing required component with id="root"`);
+      }
+
+      // Check child references & cycle detection
+      const getChildIds = (comp: A2uiComponent): string[] => {
+        const refs: string[] = [];
+        if (typeof comp.child === 'string') refs.push(comp.child);
+        if (typeof comp.trigger === 'string') refs.push(comp.trigger);
+        if (typeof comp.content === 'string') refs.push(comp.content);
+        if (Array.isArray(comp.children)) {
+          for (const c of comp.children) {
+            if (typeof c === 'string') refs.push(c);
+          }
+        } else if (comp.children && typeof comp.children === 'object' && typeof (comp.children as any).componentId === 'string') {
+          refs.push((comp.children as any).componentId);
+        }
+        if (Array.isArray(comp.tabs)) {
+          for (const tab of comp.tabs as any[]) {
+            if (tab && typeof tab.child === 'string') refs.push(tab.child);
+          }
+        }
+        return refs;
+      };
+
+      for (const [id, comp] of byId.entries()) {
+        for (const childId of getChildIds(comp)) {
+          if (!byId.has(childId)) {
+            errors.push(`Component "${id}" references non-existent child component "${childId}"`);
+          }
+        }
+      }
+
+      const visiting = new Set<string>();
+      const visited = new Set<string>();
+      const dfs = (nodeId: string) => {
+        if (visiting.has(nodeId)) {
+          errors.push(`Circular component reference detected involving "${nodeId}"`);
+          return;
+        }
+        if (visited.has(nodeId)) return;
+        visiting.add(nodeId);
+        const comp = byId.get(nodeId);
+        if (comp) {
+          for (const childId of getChildIds(comp)) {
+            if (byId.has(childId)) dfs(childId);
+          }
+        }
+        visiting.delete(nodeId);
+        visited.add(nodeId);
+      };
+      if (byId.has('root')) {
+        dfs('root');
+      }
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
+const A2UI_STUDIO_CSS = `
+:root {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --surface-subtle: #f1f5f9;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --text: #0f172a;
+  --text-muted: #475569;
+  --text-light: #64748b;
+  --primary: #1d4ed8;
+  --primary-soft: #eff6ff;
+  --primary-border: #bfdbfe;
+  --accent: #6d28d9;
+  --accent-soft: #f5f3ff;
+  --success: #047857;
+  --success-soft: #ecfdf5;
+  --success-border: #a7f3d0;
+  --warn: #b45309;
+  --warn-soft: #fffbeb;
+  --warn-border: #fde68a;
+  --danger: #b91c1c;
+  --danger-soft: #fef2f2;
+  --danger-border: #fecaca;
+  --radius: 10px;
+  --shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.a2ui-topbar {
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #1e293b;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+.a2ui-topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.a2ui-protocol-pill {
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.a2ui-topbar-title {
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.a2ui-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.a2ui-top-btn {
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  padding: 5px 11px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.a2ui-top-btn:hover { background: #334155; color: #fff; }
+.a2ui-root-Mount {
+  max-width: 1360px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 20px 24px 48px;
+  flex: 1;
+}
+/* Basic Catalog Primitives */
+.a2ui-col { display: flex; flex-direction: column; gap: 16px; }
+.a2ui-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.a2ui-row.justify-between { justify-content: space-between; }
+.a2ui-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  box-shadow: var(--shadow);
+}
+.a2ui-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
+}
+.a2ui-h1 { font-size: 22px; font-weight: 700; margin: 0; color: var(--text); letter-spacing: -0.01em; }
+.a2ui-h2 { font-size: 18px; font-weight: 650; margin: 0; color: var(--text); }
+.a2ui-h3 { font-size: 15px; font-weight: 600; margin: 0; color: var(--text); }
+.a2ui-h4 { font-size: 13.5px; font-weight: 600; margin: 0; color: var(--text-muted); }
+.a2ui-caption { font-size: 12px; color: var(--text-light); margin: 0; }
+.a2ui-body { font-size: 14px; color: var(--text); margin: 0; white-space: pre-wrap; }
+.a2ui-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.a2ui-badge.primary { background: var(--primary-soft); color: var(--primary); border-color: var(--primary-border); }
+.a2ui-badge.success { background: var(--success-soft); color: var(--success); border-color: var(--success-border); }
+.a2ui-badge.warn { background: var(--warn-soft); color: var(--warn); border-color: var(--warn-border); }
+.a2ui-badge.danger { background: var(--danger-soft); color: var(--danger); border-color: var(--danger-border); }
+.a2ui-badge.accent { background: var(--accent-soft); color: var(--accent); border-color: #ddd6fe; }
+.a2ui-badge.neutral { background: var(--surface-subtle); color: var(--text-muted); border-color: var(--border-strong); }
+
+.a2ui-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 7px;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  transition: all 0.12s ease;
+}
+.a2ui-btn:hover { background: var(--surface-subtle); }
+.a2ui-btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+.a2ui-btn.primary:hover { background: #1e40af; }
+.a2ui-btn.borderless { border-color: transparent; background: transparent; color: var(--primary); }
+.a2ui-btn.borderless:hover { background: var(--primary-soft); }
+
+/* Tabs */
+.a2ui-tabs-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 0;
+  margin-bottom: 18px;
+}
+.a2ui-tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  padding: 10px 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 6px 6px 0 0;
+}
+.a2ui-tab-btn:hover { color: var(--text); background: var(--surface-subtle); }
+.a2ui-tab-btn.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+/* Inputs */
+.a2ui-checkbox-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  padding: 8px 10px;
+  border-radius: 7px;
+  transition: background 0.12s;
+}
+.a2ui-checkbox-label:hover { background: var(--surface-subtle); }
+.a2ui-checkbox-label input[type="checkbox"] {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.a2ui-checkbox-label.checked span {
+  text-decoration: line-through;
+  color: var(--text-light);
+}
+.a2ui-textfield {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.a2ui-textfield label { font-size: 12.5px; font-weight: 600; color: var(--text-muted); }
+.a2ui-textfield input, .a2ui-textfield textarea {
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-family: inherit;
+}
+.a2ui-choice-group { display: flex; flex-direction: column; gap: 6px; }
+.a2ui-choice-opt {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+  background: var(--surface);
+}
+.a2ui-choice-opt:hover { background: var(--surface-subtle); }
+.a2ui-choice-opt.selected { border-color: var(--primary); background: var(--primary-soft); }
+
+/* Progress Bar */
+.a2ui-progress-wrap {
+  background: var(--surface-subtle);
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.a2ui-progress-fill {
+  background: linear-gradient(90deg, #2563eb, #10b981);
+  height: 100%;
+  transition: width 0.25s ease;
+}
+
+/* Tier 2: OkfMarkdown */
+.okf-md-container {
+  display: grid;
+  grid-template-columns: 1fr 330px;
+  gap: 20px;
+  align-items: start;
+}
+@media (max-width: 980px) {
+  .okf-md-container { grid-template-columns: 1fr; }
+}
+.okf-md-body {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text);
+}
+.okf-md-body h1 { font-size: 20px; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 20px; }
+.okf-md-body h2 { font-size: 17px; margin-top: 18px; color: #1e293b; }
+.okf-md-body h3 { font-size: 15px; margin-top: 14px; color: #334155; }
+.okf-md-body table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+.okf-md-body th, .okf-md-body td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; }
+.okf-md-body th { background: var(--surface-subtle); font-weight: 600; }
+.okf-md-body code { background: var(--surface-subtle); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+.okf-md-body pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; overflow-x: auto; }
+.okf-md-body pre code { background: transparent; color: inherit; padding: 0; }
+.okf-md-body sup.fn-ref a {
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 700;
+  padding: 0 2px;
+}
+.okf-source-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  background: var(--bg);
+  font-size: 12.5px;
+}
+.okf-source-card.highlight {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.src-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  margin-right: 4px;
+  margin-top: 4px;
+}
+.src-chip.retrieved { background: #e2e8f0; color: #334155; }
+.src-chip.modified { background: #dbeafe; color: #1e40af; }
+
+/* Tier 2: OkfKnowledgeGraph */
+.okf-graph-split {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  height: 580px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+.okf-graph-canvas { width: 100%; height: 100%; background: #fff; border-right: 1px solid var(--border); }
+.okf-graph-detail { padding: 16px; overflow-y: auto; height: 100%; background: var(--bg); }
+
+/* Inspector Modal */
+.a2ui-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+.a2ui-modal-backdrop[hidden] { display: none !important; }
+.a2ui-modal-dialog {
+  background: var(--surface);
+  border-radius: 12px;
+  max-width: 960px;
+  width: 100%;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+.a2ui-modal-header {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.a2ui-modal-body {
+  padding: 18px 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+`.trim();
+
+const A2UI_STUDIO_JS = `
+(function () {
+  const payload = window.A2UI_SURFACE_PAYLOAD;
+  const messages = payload.messages || [];
+  const bundleGraph = payload.bundleGraph || { nodes: [], edges: [], bodies: {}, types: [], palette: {} };
+
+  // A2UI Client Surface State (Adjacency List + RFC 6901 JSON Pointer Data Model)
+  const surfaces = {};
+  const actionLog = [];
+  let activeSurfaceId = payload.surfaceId || "icm_run_studio";
+
+  function resolvePointer(root, pointer, scopeData) {
+    if (pointer === undefined || pointer === null) return undefined;
+    if (typeof pointer !== "string") return pointer;
+    if (!pointer.startsWith("/")) {
+      const base = scopeData !== undefined ? scopeData : root;
+      const parts = pointer.split("/").filter(Boolean);
+      let cur = base;
+      for (const p of parts) {
+        if (cur == null) return undefined;
+        cur = cur[p.replace(/~1/g, "/").replace(/~0/g, "~")];
+      }
+      return cur;
+    }
+    if (pointer === "/") return root;
+    const parts = pointer.slice(1).split("/");
+    let cur = root;
+    for (const p of parts) {
+      if (cur == null) return undefined;
+      cur = cur[p.replace(/~1/g, "/").replace(/~0/g, "~")];
+    }
+    return cur;
+  }
+
+  function setPointer(root, pointer, value, scopePath) {
+    let fullPointer = pointer;
+    if (!pointer.startsWith("/") && scopePath) {
+      fullPointer = scopePath.replace(/\\/$/, "") + "/" + pointer;
+    }
+    if (!fullPointer || fullPointer === "/") {
+      if (value && typeof value === "object") Object.assign(root, value);
+      return;
+    }
+    const clean = fullPointer.startsWith("/") ? fullPointer.slice(1) : fullPointer;
+    const parts = clean.split("/").map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+    let cur = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const k = parts[i];
+      const nextK = parts[i + 1];
+      if (cur[k] == null || typeof cur[k] !== "object") {
+        cur[k] = /^\\d+$/.test(nextK) ? [] : {};
+      }
+      cur = cur[k];
+    }
+    cur[parts[parts.length - 1]] = value;
+  }
+
+  function resolveDynamic(val, surface, scopeData) {
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      if (typeof val.path === "string") {
+        return resolvePointer(surface.dataModel, val.path, scopeData);
+      }
+    }
+    return val;
+  }
+
+  // Process A2UI v0.9.1 Server-to-Client Message Stream
+  function processMessage(msg) {
+    if (!msg || msg.version !== "v0.9.1") return;
+    if (msg.createSurface) {
+      const s = msg.createSurface;
+      surfaces[s.surfaceId] = {
+        surfaceId: s.surfaceId,
+        catalogId: s.catalogId,
+        theme: s.theme || {},
+        sendDataModel: !!s.sendDataModel,
+        components: {},
+        dataModel: {},
+        uiState: { activeTabs: {} },
+      };
+      activeSurfaceId = s.surfaceId;
+    } else if (msg.updateComponents) {
+      const s = surfaces[msg.updateComponents.surfaceId];
+      if (!s) return;
+      for (const c of msg.updateComponents.components || []) {
+        s.components[c.id] = c;
+      }
+    } else if (msg.updateDataModel) {
+      const s = surfaces[msg.updateDataModel.surfaceId];
+      if (!s) return;
+      const p = msg.updateDataModel.path || "/";
+      setPointer(s.dataModel, p, msg.updateDataModel.value);
+    } else if (msg.deleteSurface) {
+      delete surfaces[msg.deleteSurface.surfaceId];
+    }
+  }
+
+  for (const m of messages) {
+    processMessage(m);
+  }
+
+  function dispatchClientAction(surface, sourceComponentId, name, contextObj) {
+    const evt = {
+      version: "v0.9.1",
+      action: {
+        name: name,
+        surfaceId: surface.surfaceId,
+        sourceComponentId: sourceComponentId,
+        timestamp: new Date().toISOString(),
+        context: contextObj || {},
+      },
+    };
+    actionLog.unshift(evt);
+    if (name === "resetChecklist") {
+      const groups = resolvePointer(surface.dataModel, "/checklist/groups") || [];
+      groups.forEach((g) => (g.items || []).forEach((it) => { it.checked = false; }));
+      recomputeChecklistSummary(surface);
+      renderSurface();
+    } else if (name === "checkAllChecklist") {
+      const groups = resolvePointer(surface.dataModel, "/checklist/groups") || [];
+      groups.forEach((g) => (g.items || []).forEach((it) => { it.checked = true; }));
+      recomputeChecklistSummary(surface);
+      renderSurface();
+    } else if (name === "speakText") {
+      const txt = (contextObj && contextObj.text) || "";
+      speakNarration(txt);
+    } else if (name === "stopSpeech") {
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+    } else if (name === "exportSurfaceJson") {
+      downloadJson(
+        surface.surfaceId + "_state.json",
+        JSON.stringify({ messages, currentDataModel: surface.dataModel, actionLog }, null, 2)
+      );
+    }
+  }
+
+  function recomputeChecklistSummary(surface) {
+    const groups = resolvePointer(surface.dataModel, "/checklist/groups") || [];
+    let total = 0;
+    let completed = 0;
+    for (const g of groups) {
+      for (const it of g.items || []) {
+        total++;
+        if (it.checked) completed++;
+      }
+    }
+    const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+    setPointer(surface.dataModel, "/checklist/completedCount", completed);
+    setPointer(surface.dataModel, "/checklist/totalCount", total);
+    setPointer(surface.dataModel, "/checklist/percent", pct);
+    setPointer(
+      surface.dataModel,
+      "/checklist/summaryText",
+      completed + " / " + total + " fullført (" + pct + "%)"
+    );
+  }
+
+  function speakNarration(text) {
+    if (!window.speechSynthesis || !text) return;
+    window.speechSynthesis.cancel();
+    const utter = new SpeechSynthesisUtterance(String(text));
+    const hasNorwegianChars = /[æøåÆØÅ]/.test(text) || /\\b(og|det|som|for|med|styret|brann)\\b/i.test(text);
+    utter.lang = hasNorwegianChars ? "nb-NO" : "en-US";
+    window.speechSynthesis.speak(utter);
+  }
+
+  function downloadJson(filename, content) {
+    const blob = new Blob([content], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+  }
+
+  function formatInlineLatexAndFootnotes(md, sources) {
+    let out = String(md || "");
+    out = out.replace(/\\$(?:\\\\text|\\\\mathrm)\\{([^}]*)\\}\\s*([^$]*)\\$/g, "<code>$1$2</code>");
+    out = out.replace(/\\x60(\\/[A-Za-z0-9_\\-\\/]+\\.md)\\x60/g, '<a href="$1"><code>$1</code></a>');
+    out = out.replace(/\\[\\^([^\\]]+)\\]/g, function (_, id) {
+      return '<sup class="fn-ref"><a href="#okf-src-' + id + '" data-fn="' + id + '">[' + id + "]</a></sup>";
+    });
+    return out;
+  }
+
+  // Component Renderer (Tier 1 Basic Catalog + Tier 2 ICM/OKF Domain Catalog)
+  function renderComponentById(surface, compId, scopeData, scopePath) {
+    const comp = surface.components[compId];
+    if (!comp) {
+      const missing = document.createElement("div");
+      missing.className = "a2ui-caption";
+      missing.textContent = "[Missing component: " + compId + "]";
+      return missing;
+    }
+    return renderComponent(surface, comp, scopeData, scopePath);
+  }
+
+  function renderChildList(surface, childrenSpec, containerEl, scopeData, scopePath) {
+    if (Array.isArray(childrenSpec)) {
+      for (const childId of childrenSpec) {
+        containerEl.appendChild(renderComponentById(surface, childId, scopeData, scopePath));
+      }
+    } else if (childrenSpec && typeof childrenSpec === "object" && childrenSpec.path && childrenSpec.componentId) {
+      const listData = resolvePointer(surface.dataModel, childrenSpec.path, scopeData);
+      if (Array.isArray(listData)) {
+        listData.forEach((itemData, idx) => {
+          const itemScopePath = (childrenSpec.path.startsWith("/") ? childrenSpec.path : (scopePath || "") + "/" + childrenSpec.path) + "/" + idx;
+          containerEl.appendChild(renderComponentById(surface, childrenSpec.componentId, itemData, itemScopePath));
+        });
+      }
+    }
+  }
+
+  function renderComponent(surface, comp, scopeData, scopePath) {
+    const type = comp.component;
+
+    // --- TIER 1: A2UI v0.9.1 BASIC CATALOG PRIMITIVES ---
+    if (type === "Column") {
+      const el = document.createElement("div");
+      el.className = "a2ui-col";
+      renderChildList(surface, comp.children, el, scopeData, scopePath);
+      return el;
+    }
+
+    if (type === "Row") {
+      const el = document.createElement("div");
+      el.className = "a2ui-row" + (comp.justify === "spaceBetween" ? " justify-between" : "");
+      renderChildList(surface, comp.children, el, scopeData, scopePath);
+      return el;
+    }
+
+    if (type === "List") {
+      const el = document.createElement("div");
+      el.className = comp.direction === "horizontal" ? "a2ui-row" : "a2ui-col";
+      renderChildList(surface, comp.children, el, scopeData, scopePath);
+      return el;
+    }
+
+    if (type === "Card") {
+      const el = document.createElement("div");
+      el.className = "a2ui-card";
+      if (typeof comp.child === "string") {
+        el.appendChild(renderComponentById(surface, comp.child, scopeData, scopePath));
+      } else if (comp.children) {
+        renderChildList(surface, comp.children, el, scopeData, scopePath);
+      }
+      return el;
+    }
+
+    if (type === "Divider") {
+      return document.createElement("hr");
+    }
+
+    if (type === "Text") {
+      const variant = resolveDynamic(comp.variant, surface, scopeData) || "body";
+      const rawText = String(resolveDynamic(comp.text, surface, scopeData) ?? "");
+      const tagMap = { h1: "h1", h2: "h2", h3: "h3", h4: "h4", h5: "h5", caption: "p", body: "div" };
+      const el = document.createElement(tagMap[variant] || "div");
+      el.className = "a2ui-" + (tagMap[variant] ? variant : "body");
+      if (comp.markdown && window.marked) {
+        el.innerHTML = window.marked.parse(rawText);
+      } else {
+        el.textContent = rawText;
+      }
+      return el;
+    }
+
+    if (type === "Badge") {
+      const el = document.createElement("span");
+      const tone = resolveDynamic(comp.tone, surface, scopeData) || "neutral";
+      el.className = "a2ui-badge " + tone;
+      el.textContent = String(resolveDynamic(comp.text, surface, scopeData) ?? "");
+      return el;
+    }
+
+    if (type === "Button") {
+      const btn = document.createElement("button");
+      const variant = comp.variant || "default";
+      btn.className = "a2ui-btn " + variant;
+      if (typeof comp.child === "string") {
+        btn.appendChild(renderComponentById(surface, comp.child, scopeData, scopePath));
+      } else {
+        btn.textContent = String(resolveDynamic(comp.label, surface, scopeData) || "Action");
+      }
+      btn.addEventListener("click", () => {
+        if (comp.action && comp.action.event) {
+          const ctx = {};
+          const rawCtx = comp.action.event.context || {};
+          for (const k of Object.keys(rawCtx)) {
+            ctx[k] = resolveDynamic(rawCtx[k], surface, scopeData);
+          }
+          dispatchClientAction(surface, comp.id, comp.action.event.name, ctx);
+        }
+      });
+      return btn;
+    }
+
+    if (type === "CheckBox") {
+      const labelEl = document.createElement("label");
+      const checkedVal = Boolean(resolveDynamic(comp.value, surface, scopeData));
+      labelEl.className = "a2ui-checkbox-label" + (checkedVal ? " checked" : "");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = checkedVal;
+      const span = document.createElement("span");
+      span.textContent = String(resolveDynamic(comp.label, surface, scopeData) ?? "");
+      input.addEventListener("change", () => {
+        if (comp.value && typeof comp.value === "object" && comp.value.path) {
+          setPointer(surface.dataModel, comp.value.path, input.checked, scopePath);
+          recomputeChecklistSummary(surface);
+          dispatchClientAction(surface, comp.id, "checkboxChanged", {
+            path: comp.value.path,
+            checked: input.checked,
+          });
+          renderSurface();
+        }
+      });
+      labelEl.appendChild(input);
+      labelEl.appendChild(span);
+      return labelEl;
+    }
+
+    if (type === "TextField") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-textfield";
+      const lbl = resolveDynamic(comp.label, surface, scopeData);
+      if (lbl) {
+        const l = document.createElement("label");
+        l.textContent = String(lbl);
+        wrap.appendChild(l);
+      }
+      const isLong = comp.variant === "longText";
+      const input = document.createElement(isLong ? "textarea" : "input");
+      if (isLong) input.rows = 3;
+      input.value = String(resolveDynamic(comp.value, surface, scopeData) ?? "");
+      if (comp.placeholder) input.placeholder = String(comp.placeholder);
+      input.addEventListener("input", () => {
+        if (comp.value && typeof comp.value === "object" && comp.value.path) {
+          setPointer(surface.dataModel, comp.value.path, input.value, scopePath);
+        }
+      });
+      wrap.appendChild(input);
+      return wrap;
+    }
+
+    if (type === "ChoicePicker") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-choice-group";
+      const options = resolveDynamic(comp.options, surface, scopeData) || [];
+      const currentVal = resolveDynamic(comp.value, surface, scopeData);
+      const selectedArr = Array.isArray(currentVal) ? currentVal : currentVal != null ? [String(currentVal)] : [];
+
+      options.forEach((opt) => {
+        const valStr = String(opt.value);
+        const isSel = selectedArr.includes(valStr);
+        const row = document.createElement("label");
+        row.className = "a2ui-choice-opt" + (isSel ? " selected" : "");
+        const inp = document.createElement("input");
+        inp.type = comp.variant === "multipleSelection" ? "checkbox" : "radio";
+        inp.checked = isSel;
+        inp.addEventListener("change", () => {
+          if (comp.value && typeof comp.value === "object" && comp.value.path) {
+            setPointer(surface.dataModel, comp.value.path, valStr, scopePath);
+            renderSurface();
+          }
+        });
+        const txt = document.createElement("span");
+        txt.textContent = String(opt.label ?? opt.value);
+        row.appendChild(inp);
+        row.appendChild(txt);
+        wrap.appendChild(row);
+      });
+      return wrap;
+    }
+
+    if (type === "AudioPlayer") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-row";
+      const desc = String(resolveDynamic(comp.description, surface, scopeData) || "Audio Narration");
+      const textToSpeak = String(resolveDynamic(comp.ttsText, surface, scopeData) || "");
+      const url = resolveDynamic(comp.url, surface, scopeData);
+      if (url && !String(url).startsWith("tts://")) {
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.src = String(url);
+        wrap.appendChild(audio);
+      } else {
+        const playBtn = document.createElement("button");
+        playBtn.className = "a2ui-btn primary";
+        playBtn.textContent = "🔊 Spill av opplesning (" + desc + ")";
+        playBtn.addEventListener("click", () => speakNarration(textToSpeak));
+        const stopBtn = document.createElement("button");
+        stopBtn.className = "a2ui-btn";
+        stopBtn.textContent = "⏹ Stopp";
+        stopBtn.addEventListener("click", () => {
+          if (window.speechSynthesis) window.speechSynthesis.cancel();
+        });
+        wrap.appendChild(playBtn);
+        wrap.appendChild(stopBtn);
+      }
+      return wrap;
+    }
+
+    if (type === "Image") {
+      const img = document.createElement("img");
+      img.src = String(resolveDynamic(comp.url, surface, scopeData) || "");
+      img.alt = String(resolveDynamic(comp.alt, surface, scopeData) || "");
+      img.style.maxWidth = "100%";
+      img.style.borderRadius = "8px";
+      if (comp.fit) img.style.objectFit = String(comp.fit);
+      return img;
+    }
+
+    if (type === "Icon") {
+      const span = document.createElement("span");
+      span.className = "a2ui-badge neutral";
+      const iconName = resolveDynamic(comp.name, surface, scopeData);
+      span.textContent = typeof iconName === "object" && iconName && iconName.path ? iconName.path : String(iconName || "•");
+      return span;
+    }
+
+    if (type === "Video") {
+      const video = document.createElement("video");
+      video.controls = true;
+      video.src = String(resolveDynamic(comp.url, surface, scopeData) || "");
+      video.style.maxWidth = "100%";
+      video.style.borderRadius = "8px";
+      return video;
+    }
+
+    if (type === "Slider") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-textfield";
+      const lbl = resolveDynamic(comp.label, surface, scopeData);
+      const curVal = Number(resolveDynamic(comp.value, surface, scopeData) ?? comp.min ?? 0);
+      if (lbl) {
+        const l = document.createElement("label");
+        l.textContent = String(lbl) + ": " + curVal;
+        wrap.appendChild(l);
+      }
+      const inp = document.createElement("input");
+      inp.type = "range";
+      inp.min = String(comp.min ?? 0);
+      inp.max = String(comp.max ?? 100);
+      inp.value = String(curVal);
+      inp.addEventListener("input", () => {
+        if (comp.value && typeof comp.value === "object" && comp.value.path) {
+          setPointer(surface.dataModel, comp.value.path, Number(inp.value), scopePath);
+          renderSurface();
+        }
+      });
+      wrap.appendChild(inp);
+      return wrap;
+    }
+
+    if (type === "DateTimeInput") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-textfield";
+      const lbl = resolveDynamic(comp.label, surface, scopeData);
+      if (lbl) {
+        const l = document.createElement("label");
+        l.textContent = String(lbl);
+        wrap.appendChild(l);
+      }
+      const inp = document.createElement("input");
+      inp.type = comp.enableTime && comp.enableDate !== false ? "datetime-local" : comp.enableTime ? "time" : "date";
+      inp.value = String(resolveDynamic(comp.value, surface, scopeData) || "");
+      inp.addEventListener("change", () => {
+        if (comp.value && typeof comp.value === "object" && comp.value.path) {
+          setPointer(surface.dataModel, comp.value.path, inp.value, scopePath);
+        }
+      });
+      wrap.appendChild(inp);
+      return wrap;
+    }
+
+    if (type === "Modal") {
+      const wrap = document.createElement("div");
+      const trigId = comp.trigger || comp.entryPointChild;
+      const contentId = comp.content || comp.contentChild;
+      const isOpen = Boolean(surface.uiState["modal_" + comp.id]);
+      if (typeof trigId === "string") {
+        const trigEl = renderComponentById(surface, trigId, scopeData, scopePath);
+        trigEl.addEventListener("click", () => {
+          surface.uiState["modal_" + comp.id] = true;
+          renderSurface();
+        });
+        wrap.appendChild(trigEl);
+      }
+      if (isOpen && typeof contentId === "string") {
+        const backdrop = document.createElement("div");
+        backdrop.className = "a2ui-modal-backdrop";
+        const dialog = document.createElement("div");
+        dialog.className = "a2ui-modal-dialog";
+        const header = document.createElement("div");
+        header.className = "a2ui-modal-header";
+        header.innerHTML = "<strong>Modal</strong>";
+        const closeBtn = document.createElement("button");
+        closeBtn.className = "a2ui-btn";
+        closeBtn.textContent = "Lukk";
+        closeBtn.addEventListener("click", () => {
+          surface.uiState["modal_" + comp.id] = false;
+          renderSurface();
+        });
+        header.appendChild(closeBtn);
+        const body = document.createElement("div");
+        body.className = "a2ui-modal-body";
+        body.appendChild(renderComponentById(surface, contentId, scopeData, scopePath));
+        dialog.appendChild(header);
+        dialog.appendChild(body);
+        backdrop.appendChild(dialog);
+        wrap.appendChild(backdrop);
+      }
+      return wrap;
+    }
+
+    if (type === "Tabs") {
+      const wrap = document.createElement("div");
+      const tabsList = comp.tabs || comp.tabItems || [];
+      const activeIdx = surface.uiState.activeTabs[comp.id] || 0;
+
+      const nav = document.createElement("div");
+      nav.className = "a2ui-tabs-nav";
+      tabsList.forEach((tab, idx) => {
+        const btn = document.createElement("button");
+        btn.className = "a2ui-tab-btn" + (idx === activeIdx ? " active" : "");
+        btn.textContent = String(resolveDynamic(tab.title, surface, scopeData) || "Tab " + (idx + 1));
+        btn.addEventListener("click", () => {
+          surface.uiState.activeTabs[comp.id] = idx;
+          renderSurface();
+        });
+        nav.appendChild(btn);
+      });
+      wrap.appendChild(nav);
+
+      const activeTab = tabsList[activeIdx] || tabsList[0];
+      if (activeTab && typeof activeTab.child === "string") {
+        wrap.appendChild(renderComponentById(surface, activeTab.child, scopeData, scopePath));
+      }
+      return wrap;
+    }
+
+    // --- TIER 2: ICM + OKF v0.2 DOMAIN CUSTOM COMPONENTS ---
+    if (type === "InteractiveChecklist") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-col";
+      const groups = resolvePointer(surface.dataModel, comp.groupsPath || "/checklist/groups") || [];
+      const summaryText = resolvePointer(surface.dataModel, "/checklist/summaryText") || "";
+      const pct = Number(resolvePointer(surface.dataModel, "/checklist/percent") || 0);
+
+      const headerCard = document.createElement("div");
+      headerCard.className = "a2ui-card a2ui-col";
+      const topRow = document.createElement("div");
+      topRow.className = "a2ui-row justify-between";
+      const titleEl = document.createElement("h2");
+      titleEl.className = "a2ui-h2";
+      titleEl.textContent = String(resolveDynamic(comp.title, surface, scopeData) || "Interaktiv Sjekkliste");
+      const badge = document.createElement("span");
+      badge.className = "a2ui-badge " + (pct === 100 ? "success" : "primary");
+      badge.textContent = summaryText;
+      topRow.appendChild(titleEl);
+      topRow.appendChild(badge);
+      headerCard.appendChild(topRow);
+
+      const progWrap = document.createElement("div");
+      progWrap.className = "a2ui-progress-wrap";
+      const progFill = document.createElement("div");
+      progFill.className = "a2ui-progress-fill";
+      progFill.style.width = pct + "%";
+      progWrap.appendChild(progFill);
+      headerCard.appendChild(progWrap);
+
+      const btnRow = document.createElement("div");
+      btnRow.className = "a2ui-row";
+      const checkAllBtn = document.createElement("button");
+      checkAllBtn.className = "a2ui-btn";
+      checkAllBtn.textContent = "✓ Marker alle";
+      checkAllBtn.addEventListener("click", () => dispatchClientAction(surface, comp.id, "checkAllChecklist", {}));
+      const resetBtn = document.createElement("button");
+      resetBtn.className = "a2ui-btn";
+      resetBtn.textContent = "↺ Nullstill sjekkliste";
+      resetBtn.addEventListener("click", () => dispatchClientAction(surface, comp.id, "resetChecklist", {}));
+      btnRow.appendChild(checkAllBtn);
+      btnRow.appendChild(resetBtn);
+      headerCard.appendChild(btnRow);
+      wrap.appendChild(headerCard);
+
+      groups.forEach((grp, gIdx) => {
+        const grpCard = document.createElement("div");
+        grpCard.className = "a2ui-card a2ui-col";
+        const grpHeader = document.createElement("div");
+        grpHeader.className = "a2ui-row justify-between";
+        const h3 = document.createElement("h3");
+        h3.className = "a2ui-h3";
+        h3.textContent = grp.title;
+        const doneInGrp = (grp.items || []).filter((i) => i.checked).length;
+        const subBadge = document.createElement("span");
+        subBadge.className = "a2ui-badge " + (doneInGrp === (grp.items || []).length ? "success" : "neutral");
+        subBadge.textContent = doneInGrp + " / " + (grp.items || []).length;
+        grpHeader.appendChild(h3);
+        grpHeader.appendChild(subBadge);
+        grpCard.appendChild(grpHeader);
+
+        const itemsCol = document.createElement("div");
+        itemsCol.className = "a2ui-col";
+        itemsCol.style.gap = "4px";
+        (grp.items || []).forEach((item, iIdx) => {
+          const itemPath = (comp.groupsPath || "/checklist/groups") + "/" + gIdx + "/items/" + iIdx + "/checked";
+          const chkComp = {
+            id: comp.id + "_" + grp.id + "_" + item.id,
+            component: "CheckBox",
+            label: item.label,
+            value: { path: itemPath },
+          };
+          itemsCol.appendChild(renderComponent(surface, chkComp, undefined, undefined));
+        });
+        grpCard.appendChild(itemsCol);
+        wrap.appendChild(grpCard);
+      });
+
+      return wrap;
+    }
+
+    if (type === "ModuleCarousel") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-col";
+      const modules = resolvePointer(surface.dataModel, comp.modulesPath || "/stage2/modules") || [];
+      const activeIdxPath = comp.activeIndexPath || "/stage2/activeModuleIndex";
+      let idx = Number(resolvePointer(surface.dataModel, activeIdxPath) || 0);
+      if (idx < 0 || idx >= modules.length) idx = 0;
+
+      if (modules.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "a2ui-card a2ui-caption";
+        empty.textContent = "Ingen moduler funnet i Stage 2-artefaktet.";
+        return empty;
+      }
+
+      const mod = modules[idx];
+      const navRow = document.createElement("div");
+      navRow.className = "a2ui-row justify-between";
+      const pillRow = document.createElement("div");
+      pillRow.className = "a2ui-row";
+      modules.forEach((m, mIdx) => {
+        const b = document.createElement("button");
+        b.className = "a2ui-btn" + (mIdx === idx ? " primary" : "");
+        b.textContent = (m.number || mIdx + 1) + ". " + m.title;
+        b.addEventListener("click", () => {
+          setPointer(surface.dataModel, activeIdxPath, mIdx);
+          renderSurface();
+        });
+        pillRow.appendChild(b);
+      });
+      navRow.appendChild(pillRow);
+      wrap.appendChild(navRow);
+
+      const card = document.createElement("div");
+      card.className = "a2ui-card a2ui-col";
+      const headRow = document.createElement("div");
+      headRow.className = "a2ui-row justify-between";
+      const h2 = document.createElement("h2");
+      h2.className = "a2ui-h2";
+      h2.textContent = "Modul " + (mod.number || idx + 1) + ": " + mod.title;
+      headRow.appendChild(h2);
+      if (mod.subtitleOrBasis) {
+        const basisBadge = document.createElement("span");
+        basisBadge.className = "a2ui-badge accent";
+        basisBadge.textContent = mod.subtitleOrBasis;
+        headRow.appendChild(basisBadge);
+      }
+      card.appendChild(headRow);
+
+      if (mod.narration) {
+        const narBox = document.createElement("div");
+        narBox.className = "a2ui-body";
+        narBox.style.padding = "14px 16px";
+        narBox.style.background = "var(--bg)";
+        narBox.style.borderRadius = "8px";
+        narBox.style.borderLeft = "4px solid var(--primary)";
+        narBox.textContent = mod.narration;
+        card.appendChild(narBox);
+
+        const ttsPlayer = renderComponent(surface, {
+          id: comp.id + "_tts_" + idx,
+          component: "AudioPlayer",
+          description: mod.title,
+          ttsText: mod.narration,
+        });
+        card.appendChild(ttsPlayer);
+      }
+
+      if (Array.isArray(mod.bullets) && mod.bullets.length > 0) {
+        const ulWrap = document.createElement("div");
+        ulWrap.className = "a2ui-col";
+        const h4 = document.createElement("h4");
+        h4.className = "a2ui-h4";
+        h4.textContent = "Nøkkelpunkter / Lysbilder";
+        ulWrap.appendChild(h4);
+        const ul = document.createElement("ul");
+        ul.style.margin = "0";
+        mod.bullets.forEach((bText) => {
+          const li = document.createElement("li");
+          li.textContent = bText;
+          ul.appendChild(li);
+        });
+        ulWrap.appendChild(ul);
+        card.appendChild(ulWrap);
+      }
+
+      if (mod.actionItem) {
+        const actBox = document.createElement("div");
+        actBox.style.padding = "12px 14px";
+        actBox.style.background = "var(--success-soft)";
+        actBox.style.border = "1px solid var(--success-border)";
+        actBox.style.borderRadius = "8px";
+        actBox.innerHTML =
+          "<strong>⚡ Tiltak / Styrets handlingspunkt:</strong><div style='margin-top:4px'>" +
+          mod.actionItem +
+          "</div>";
+        card.appendChild(actBox);
+      }
+
+      const pager = document.createElement("div");
+      pager.className = "a2ui-row justify-between";
+      const prevBtn = document.createElement("button");
+      prevBtn.className = "a2ui-btn";
+      prevBtn.disabled = idx === 0;
+      prevBtn.textContent = "← Forrige modul";
+      prevBtn.addEventListener("click", () => {
+        if (idx > 0) {
+          setPointer(surface.dataModel, activeIdxPath, idx - 1);
+          renderSurface();
+        }
+      });
+      const nextBtn = document.createElement("button");
+      nextBtn.className = "a2ui-btn primary";
+      nextBtn.disabled = idx >= modules.length - 1;
+      nextBtn.textContent = "Neste modul →";
+      nextBtn.addEventListener("click", () => {
+        if (idx < modules.length - 1) {
+          setPointer(surface.dataModel, activeIdxPath, idx + 1);
+          renderSurface();
+        }
+      });
+      pager.appendChild(prevBtn);
+      pager.appendChild(nextBtn);
+      card.appendChild(pager);
+
+      wrap.appendChild(card);
+      return wrap;
+    }
+
+    if (type === "QuizRunner") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-col";
+      const questions = resolvePointer(surface.dataModel, comp.questionsPath || "/stage2/quiz") || [];
+      const answersPath = comp.answersPath || "/stage2/quizAnswers";
+      const answers = resolvePointer(surface.dataModel, answersPath) || {};
+
+      let answeredCount = 0;
+      let correctCount = 0;
+      questions.forEach((q) => {
+        if (answers[q.id] !== undefined) {
+          answeredCount++;
+          if (String(answers[q.id]) === String(q.correctValue)) correctCount++;
+        }
+      });
+
+      const scoreCard = document.createElement("div");
+      scoreCard.className = "a2ui-card a2ui-row justify-between";
+      const scoreTitle = document.createElement("h2");
+      scoreTitle.className = "a2ui-h2";
+      scoreTitle.textContent = String(resolveDynamic(comp.title, surface, scopeData) || "Kunnskapssjekk");
+      const scoreBadge = document.createElement("span");
+      scoreBadge.className = "a2ui-badge " + (correctCount === questions.length && questions.length > 0 ? "success" : "primary");
+      scoreBadge.textContent = "Resultat: " + correctCount + " / " + questions.length + " riktige (" + answeredCount + " besvart)";
+      scoreCard.appendChild(scoreTitle);
+      scoreCard.appendChild(scoreBadge);
+      wrap.appendChild(scoreCard);
+
+      questions.forEach((q, qIdx) => {
+        const qCard = document.createElement("div");
+        qCard.className = "a2ui-card a2ui-col";
+        const qHead = document.createElement("h3");
+        qHead.className = "a2ui-h3";
+        qHead.textContent = (qIdx + 1) + ". " + q.question;
+        qCard.appendChild(qHead);
+
+        const picker = renderComponent(surface, {
+          id: comp.id + "_q_" + q.id,
+          component: "ChoicePicker",
+          variant: "mutuallyExclusive",
+          options: q.options,
+          value: { path: answersPath + "/" + q.id },
+        });
+        qCard.appendChild(picker);
+
+        const chosen = answers[q.id];
+        if (chosen !== undefined) {
+          const isRight = String(chosen) === String(q.correctValue);
+          const fb = document.createElement("div");
+          fb.style.padding = "10px 12px";
+          fb.style.borderRadius = "7px";
+          fb.style.background = isRight ? "var(--success-soft)" : "var(--danger-soft)";
+          fb.style.border = "1px solid " + (isRight ? "var(--success-border)" : "var(--danger-border)");
+          fb.innerHTML =
+            "<strong>" +
+            (isRight ? "✓ Riktig svar!" : "✗ Ikke helt.") +
+            "</strong> " +
+            (q.explanation || "");
+          qCard.appendChild(fb);
+        }
+        wrap.appendChild(qCard);
+      });
+      return wrap;
+    }
+
+    if (type === "CaseSimulator") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-col";
+      const cases = resolvePointer(surface.dataModel, comp.casesPath || "/stage2/cases") || [];
+      const responsesPath = comp.responsesPath || "/stage2/caseResponses";
+      const revealedPath = "/stage2/caseRevealed";
+      const revealed = resolvePointer(surface.dataModel, revealedPath) || {};
+
+      cases.forEach((c, cIdx) => {
+        const card = document.createElement("div");
+        card.className = "a2ui-card a2ui-col";
+        const top = document.createElement("div");
+        top.className = "a2ui-row justify-between";
+        const h3 = document.createElement("h3");
+        h3.className = "a2ui-h3";
+        h3.textContent = "Case " + (cIdx + 1) + ": " + c.title;
+        top.appendChild(h3);
+        if (c.basisOrContext) {
+          const b = document.createElement("span");
+          b.className = "a2ui-badge accent";
+          b.textContent = c.basisOrContext;
+          top.appendChild(b);
+        }
+        card.appendChild(top);
+
+        const scen = document.createElement("div");
+        scen.className = "a2ui-body";
+        scen.textContent = c.scenario;
+        card.appendChild(scen);
+
+        const tf = renderComponent(surface, {
+          id: comp.id + "_input_" + c.id,
+          component: "TextField",
+          variant: "longText",
+          label: "Ditt vedtak / handlingsplan (lagres i A2UI Data Model):",
+          placeholder: "Beskriv hvordan styret eller ansvarlig bør håndtere dette...",
+          value: { path: responsesPath + "/" + c.id },
+        });
+        card.appendChild(tf);
+
+        if (c.recommendedAction) {
+          const toggleBtn = document.createElement("button");
+          toggleBtn.className = "a2ui-btn";
+          const isRev = Boolean(revealed[c.id]);
+          toggleBtn.textContent = isRev ? "Skjul anbefalt tiltak" : "Vis anbefalt tiltak (Fasit)";
+          toggleBtn.addEventListener("click", () => {
+            setPointer(surface.dataModel, revealedPath + "/" + c.id, !isRev);
+            renderSurface();
+          });
+          card.appendChild(toggleBtn);
+
+          if (isRev) {
+            const rec = document.createElement("div");
+            rec.style.padding = "12px";
+            rec.style.background = "var(--success-soft)";
+            rec.style.border = "1px solid var(--success-border)";
+            rec.style.borderRadius = "8px";
+            rec.innerHTML = "<strong>Anbefalt vedtak / tiltak:</strong><div>" + c.recommendedAction + "</div>";
+            card.appendChild(rec);
+          }
+        }
+        wrap.appendChild(card);
+      });
+      return wrap;
+    }
+
+    if (type === "OkfMarkdown") {
+      const wrap = document.createElement("div");
+      wrap.className = "okf-md-container";
+      const bodyMd = String(resolveDynamic(comp.body, surface, scopeData) || "");
+      const sources = resolveDynamic(comp.sources, surface, scopeData) || [];
+      const trustTier = String(resolveDynamic(comp.trustTier, surface, scopeData) || "unverified");
+      const isStale = Boolean(resolveDynamic(comp.isStale, surface, scopeData));
+      const editModePath = "/okf/editMode";
+      const isEditing = Boolean(resolvePointer(surface.dataModel, editModePath));
+
+      const mainCard = document.createElement("div");
+      mainCard.className = "a2ui-card a2ui-col";
+      const toolbar = document.createElement("div");
+      toolbar.className = "a2ui-row justify-between";
+      const leftHead = document.createElement("div");
+      leftHead.className = "a2ui-row";
+      const tTitle = document.createElement("h3");
+      tTitle.className = "a2ui-h3";
+      tTitle.textContent = String(resolveDynamic(comp.title, surface, scopeData) || "Stage 1 OKF v0.2 Kunnskapsgrunnlag");
+      const trustBadge = document.createElement("span");
+      trustBadge.className = "a2ui-badge " + (trustTier === "human-reviewed" ? "accent" : "primary");
+      trustBadge.textContent = "trust: " + trustTier;
+      const freshBadge = document.createElement("span");
+      freshBadge.className = "a2ui-badge " + (isStale ? "danger" : "success");
+      freshBadge.textContent = isStale ? "stale" : "fresh";
+      leftHead.appendChild(tTitle);
+      leftHead.appendChild(trustBadge);
+      leftHead.appendChild(freshBadge);
+
+      const editBtn = document.createElement("button");
+      editBtn.className = "a2ui-btn";
+      editBtn.textContent = isEditing ? "👁 Forhåndsvis OKF Markdown" : "✏️ Rediger Layer 4 Markdown";
+      editBtn.addEventListener("click", () => {
+        setPointer(surface.dataModel, editModePath, !isEditing);
+        renderSurface();
+      });
+      toolbar.appendChild(leftHead);
+      toolbar.appendChild(editBtn);
+      mainCard.appendChild(toolbar);
+
+      if (isEditing) {
+        const editor = renderComponent(surface, {
+          id: comp.id + "_editor",
+          component: "TextField",
+          variant: "longText",
+          label: "Redigerbar OKF v0.2 Markdown (oppdaterer A2UI Data Model direkte):",
+          value: comp.body,
+        });
+        const ta = editor.querySelector("textarea");
+        if (ta) ta.rows = 22;
+        mainCard.appendChild(editor);
+      } else {
+        const mdBody = document.createElement("div");
+        mdBody.className = "okf-md-body";
+        const formatted = formatInlineLatexAndFootnotes(bodyMd, sources);
+        mdBody.innerHTML = window.marked ? window.marked.parse(formatted) : formatted;
+        // Wire internal /research/*.md concept links & [^id] footnote scroll/highlight
+        mdBody.querySelectorAll("a[href]").forEach((a) => {
+          const href = a.getAttribute("href") || "";
+          const fnId = a.getAttribute("data-fn");
+          if (fnId) {
+            a.addEventListener("click", (e) => {
+              e.preventDefault();
+              const targetEl = document.getElementById("okf-src-" + fnId);
+              if (targetEl) {
+                document.querySelectorAll(".okf-source-card").forEach((el) => el.classList.remove("highlight"));
+                targetEl.classList.add("highlight");
+                targetEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+              }
+            });
+            return;
+          }
+          if (href.startsWith("/") || href.endsWith(".md")) {
+            const conceptId = href.replace(/^\\/+/, "").replace(/\\.md$/i, "");
+            if (bundleGraph.bodies && bundleGraph.bodies[conceptId]) {
+              a.style.color = "var(--accent)";
+              a.style.fontWeight = "600";
+              a.addEventListener("click", (e) => {
+                e.preventDefault();
+                setPointer(surface.dataModel, "/okf/body", bundleGraph.bodies[conceptId]);
+                setPointer(surface.dataModel, "/okf/title", conceptId);
+                renderSurface();
+              });
+            }
+          }
+        });
+        mainCard.appendChild(mdBody);
+      }
+
+      const sideCard = document.createElement("div");
+      sideCard.className = "a2ui-card a2ui-col";
+      const sHead = document.createElement("h3");
+      sHead.className = "a2ui-h3";
+      sHead.textContent = "Verifiserte Kilder (" + sources.length + ")";
+      sideCard.appendChild(sHead);
+
+      const srcList = document.createElement("div");
+      sources.forEach((src) => {
+        const sc = document.createElement("div");
+        sc.className = "okf-source-card";
+        sc.id = "okf-src-" + src.id;
+        sc.innerHTML =
+          "<div><strong>[^" +
+          (src.id || "src") +
+          "]</strong> " +
+          (src.title || src.url || src.resource || "") +
+          "</div>" +
+          (src.url
+            ? '<div style="margin-top:2px;word-break:break-all"><a href="' +
+              src.url +
+              '" target="_blank" rel="noopener" style="color:var(--primary)">' +
+              src.url +
+              "</a></div>"
+            : "") +
+          "<div>" +
+          (src.retrieved_at ? '<span class="src-chip retrieved">retrieved: ' + src.retrieved_at + "</span>" : "") +
+          (src.last_modified ? '<span class="src-chip modified">modified: ' + src.last_modified + "</span>" : "") +
+          "</div>";
+        srcList.appendChild(sc);
+      });
+      sideCard.appendChild(srcList);
+
+      wrap.appendChild(mainCard);
+      wrap.appendChild(sideCard);
+      return wrap;
+    }
+
+    if (type === "OkfKnowledgeGraph") {
+      const wrap = document.createElement("div");
+      wrap.className = "a2ui-col";
+      const split = document.createElement("div");
+      split.className = "okf-graph-split";
+      const canvas = document.createElement("div");
+      canvas.className = "okf-graph-canvas";
+      const detail = document.createElement("div");
+      detail.className = "okf-graph-detail";
+      detail.innerHTML = '<div class="a2ui-caption">Klikk på en OKF-node i grafen for å inspisere konseptet og relasjoner.</div>';
+      split.appendChild(canvas);
+      split.appendChild(detail);
+      wrap.appendChild(split);
+
+      setTimeout(() => {
+        if (!window.cytoscape) {
+          canvas.innerHTML = '<div style="padding:20px" class="a2ui-caption">Cytoscape.js ikke lastet (offline). Antall noder i bundle: ' + (bundleGraph.nodes || []).length + "</div>";
+          return;
+        }
+        const cy = window.cytoscape({
+          container: canvas,
+          elements: { nodes: bundleGraph.nodes || [], edges: bundleGraph.edges || [] },
+          style: [
+            {
+              selector: "node",
+              style: {
+                "background-color": "data(color)",
+                label: "data(label)",
+                width: "data(size)",
+                height: "data(size)",
+                "font-size": 11,
+                color: "#0f172a",
+                "text-valign": "bottom",
+                "text-margin-y": 5,
+                "text-wrap": "wrap",
+                "text-max-width": 140,
+              },
+            },
+            {
+              selector: "edge",
+              style: {
+                width: 2,
+                "line-color": "#94a3b8",
+                "target-arrow-color": "#94a3b8",
+                "target-arrow-shape": "triangle",
+                "curve-style": "bezier",
+              },
+            },
+          ],
+          layout: { name: (bundleGraph.nodes || []).length > 1 ? "cose" : "grid", padding: 40 },
+        });
+        cy.on("tap", "node", (evt) => {
+          const d = evt.target.data();
+          const body = (bundleGraph.bodies && bundleGraph.bodies[d.id]) || "";
+          detail.innerHTML =
+            '<span class="a2ui-badge primary">' +
+            (d.type || "Concept") +
+            "</span>" +
+            '<h3 class="a2ui-h3" style="margin-top:8px">' +
+            (d.label || d.id) +
+            "</h3>" +
+            '<p class="a2ui-caption">' +
+            (d.description || "") +
+            "</p><hr class='a2ui-divider'>" +
+            '<div class="okf-md-body">' +
+            (window.marked ? window.marked.parse(body) : body) +
+            "</div>";
+        });
+      }, 30);
+
+      return wrap;
+    }
+
+    const fallback = document.createElement("div");
+    fallback.className = "a2ui-card";
+    fallback.textContent = "[" + type + ": " + comp.id + "]";
+    return fallback;
+  }
+
+  function renderSurface() {
+    const mount = document.getElementById("a2ui-surface-root");
+    if (!mount) return;
+    mount.innerHTML = "";
+    const surface = surfaces[activeSurfaceId];
+    if (!surface || !surface.components["root"]) {
+      mount.textContent = "No active A2UI surface found.";
+      return;
+    }
+    mount.appendChild(renderComponentById(surface, "root", undefined, ""));
+  }
+
+  // Inspector Modal Wiring
+  const modal = document.getElementById("a2ui-inspector-modal");
+  const inspectBtn = document.getElementById("a2ui-open-inspector");
+  const closeBtn = document.getElementById("a2ui-close-inspector");
+  const exportBtn = document.getElementById("a2ui-export-json");
+
+  if (inspectBtn && modal) {
+    inspectBtn.addEventListener("click", () => {
+      const surface = surfaces[activeSurfaceId];
+      const pre = document.getElementById("a2ui-inspector-content");
+      if (pre && surface) {
+        pre.textContent = JSON.stringify(
+          {
+            protocolVersion: "v0.9.1",
+            surfaceId: surface.surfaceId,
+            catalogId: surface.catalogId,
+            componentCount: Object.keys(surface.components).length,
+            dataModel: surface.dataModel,
+            clientActionEvents: actionLog,
+            serverToClientMessages: messages,
+          },
+          null,
+          2
+        );
+      }
+      modal.hidden = false;
+    });
+  }
+  if (closeBtn && modal) {
+    closeBtn.addEventListener("click", () => {
+      modal.hidden = true;
+    });
+  }
+  if (exportBtn) {
+    exportBtn.addEventListener("click", () => {
+      const surface = surfaces[activeSurfaceId];
+      if (surface) dispatchClientAction(surface, "topbar", "exportSurfaceJson", {});
+    });
+  }
+
+  renderSurface();
+})();
+`.trim();
+
+/**
+ * Generates an A2UI v0.9.1 Declarative Surface (`a2ui_surface.json` + `a2ui_surface.jsonl`)
+ * and a zero-dependency Bi-Directional A2UI Studio HTML renderer (`a2ui.html`) for any ICM run.
+ */
+export function generateA2uiSurface(
+  runIdOrOptions?: string | A2uiSurfaceGenerationOptions,
+  maybeOptions?: A2uiSurfaceGenerationOptions
+): A2uiSurfaceGenerationResult {
+  const options: A2uiSurfaceGenerationOptions =
+    typeof runIdOrOptions === 'string'
+      ? { ...maybeOptions, runId: runIdOrOptions }
+      : { ...runIdOrOptions, ...maybeOptions };
+
+  const workspaceRoot = path.resolve(options.workspaceRoot || './workspace');
+  const bundleRoot = path.resolve(options.bundleRoot || path.join(workspaceRoot, 'bundle'));
+  const runsRoot = path.join(workspaceRoot, 'runs');
+
+  // Resolve target run directory
+  let resolvedRunDir = '';
+  let resolvedRunId = options.runId || '';
+
+  if (resolvedRunId && fs.existsSync(resolvedRunId) && fs.statSync(resolvedRunId).isDirectory()) {
+    resolvedRunDir = path.resolve(resolvedRunId);
+    resolvedRunId = path.basename(resolvedRunDir);
+  } else if (resolvedRunId) {
+    resolvedRunDir = path.join(runsRoot, resolvedRunId);
+  } else if (fs.existsSync(runsRoot)) {
+    const candidates = fs
+      .readdirSync(runsRoot, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name !== '_dry_run')
+      .map((d) => ({
+        name: d.name,
+        mtime: fs.statSync(path.join(runsRoot, d.name)).mtimeMs,
+      }))
+      .sort((a, b) => b.mtime - a.mtime);
+    if (candidates.length > 0) {
+      resolvedRunId = candidates[0].name;
+      resolvedRunDir = path.join(runsRoot, resolvedRunId);
+    }
+  }
+
+  // Load Run Metadata, Stage 1 OKF v0.2 Artifact, and Stage 2 JSON Artifact
+  let meta: Record<string, any> = {};
+  if (resolvedRunDir && fs.existsSync(path.join(resolvedRunDir, 'meta.json'))) {
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(resolvedRunDir, 'meta.json'), 'utf-8'));
+    } catch {
+      meta = {};
+    }
+  }
+
+  let rawOkfMarkdown = '';
+  const stage1OutputPath = resolvedRunDir
+    ? path.join(resolvedRunDir, 'stages', '01_research', 'output', 'research_summary.md')
+    : '';
+  if (stage1OutputPath && fs.existsSync(stage1OutputPath)) {
+    rawOkfMarkdown = fs.readFileSync(stage1OutputPath, 'utf-8');
+  } else if (fs.existsSync(bundleRoot)) {
+    const bundleConcepts = walkBundleConcepts(bundleRoot);
+    if (bundleConcepts.length > 0) {
+      const firstPath = path.join(bundleRoot, `${bundleConcepts[0].id}.md`);
+      if (fs.existsSync(firstPath)) {
+        rawOkfMarkdown = fs.readFileSync(firstPath, 'utf-8');
+      }
+    }
+  }
+
+  const okfDoc = rawOkfMarkdown
+    ? parseOkfDocument(rawOkfMarkdown)
+    : { frontmatter: { title: resolvedRunId || 'ICM Studio', status: 'draft' }, body: '' };
+  const okfTrustTier = getOkfTrustTier(okfDoc.frontmatter);
+  const okfStale = isOkfStale(okfDoc.frontmatter);
+  const okfSources = Array.isArray(okfDoc.frontmatter.sources) ? okfDoc.frontmatter.sources : [];
+
+  let rawStage2: Record<string, unknown> | null = null;
+  const stage2OutputPath = resolvedRunDir
+    ? path.join(resolvedRunDir, 'stages', '02_script', 'output', 'script_draft.json')
+    : '';
+  if (stage2OutputPath && fs.existsSync(stage2OutputPath)) {
+    try {
+      rawStage2 = JSON.parse(fs.readFileSync(stage2OutputPath, 'utf-8'));
+    } catch {
+      rawStage2 = null;
+    }
+  }
+
+  const fallbackTitle = String(
+    okfDoc.frontmatter.title || meta.topic || resolvedRunId || 'ICM Studio Surface'
+  );
+  const stage2Norm = normalizeStage2ForA2ui(rawStage2, fallbackTitle);
+  const checklistGroups = extractChecklistGroupsFromMarkdown(okfDoc.body);
+
+  let totalChecklistItems = 0;
+  for (const g of checklistGroups) {
+    totalChecklistItems += g.items.length;
+  }
+
+  // Collect OKF Bundle Graph Data for OkfKnowledgeGraph
+  const concepts = fs.existsSync(bundleRoot) ? walkBundleConcepts(bundleRoot) : [];
+  if (concepts.length === 0 && okfDoc.body) {
+    const synthId = `research/${resolvedRunId || 'current'}`;
+    concepts.push({
+      id: synthId,
+      type: String(okfDoc.frontmatter.type || 'Research Concept'),
+      title: String(okfDoc.frontmatter.title || stage2Norm.title),
+      description: String(okfDoc.frontmatter.description || ''),
+      resource: String(okfDoc.frontmatter.resource || ''),
+      tags: Array.isArray(okfDoc.frontmatter.tags) ? okfDoc.frontmatter.tags.map(String) : [],
+      body: okfDoc.body,
+      status: String(okfDoc.frontmatter.status || 'draft'),
+      generated: (okfDoc.frontmatter.generated as any) || {},
+      verified: [],
+      stale_after: String(okfDoc.frontmatter.stale_after || ''),
+      sources: okfSources,
+      trust_tier: okfTrustTier,
+      stale: okfStale,
+      links_to: extractConceptLinks(
+        okfDoc.body,
+        okfDoc.frontmatter,
+        path.join(bundleRoot, 'research'),
+        bundleRoot
+      ),
+    });
+  }
+  const conceptIds = new Set(concepts.map((c) => c.id));
+  const graphNodes = concepts.map((c) => ({
+    data: {
+      id: c.id,
+      label: c.title || c.id,
+      type: c.type,
+      description: c.description,
+      status: c.status,
+      trust_tier: c.trust_tier,
+      stale: c.stale,
+      color: getOkfTypeColor(c.type),
+      size: 32 + Math.min(48, Math.floor(c.body.length / 250)),
+    },
+  }));
+  const graphBodies: Record<string, string> = {};
+  for (const c of concepts) {
+    graphBodies[c.id] = c.body;
+  }
+  const graphEdges: Array<{ data: { id: string; source: string; target: string } }> = [];
+  const seenEdgeKeys = new Set<string>();
+  for (const c of concepts) {
+    for (const target of c.links_to) {
+      if (target === c.id) continue;
+      if (!conceptIds.has(target)) {
+        conceptIds.add(target);
+        const shortLabel = target
+          .replace(/^research\//, '')
+          .replace(/-/g, ' ')
+          .replace(/\b\w/g, (m) => m.toUpperCase());
+        graphNodes.push({
+          data: {
+            id: target,
+            label: shortLabel,
+            type: 'Linked Concept',
+            description: `Referert OKF-konsept fra ${c.id}`,
+            status: 'draft',
+            trust_tier: 'unverified',
+            stale: false,
+            color: '#64748b',
+            size: 28,
+          },
+        });
+        graphBodies[target] =
+          `# ${shortLabel}\n\n*Dette OKF-konseptet (\`/${target}.md\`) er referert fra **${c.title || c.id}**.*\n\nKjør \`npm run cli:stage1 -- "${shortLabel}"\` for å generere og verifisere dette konseptet i kunnskapsbunten.`;
+      }
+      const key = `${c.id}__${target}`;
+      if (seenEdgeKeys.has(key)) continue;
+      seenEdgeKeys.add(key);
+      graphEdges.push({ data: { id: key, source: c.id, target } });
+    }
+    for (const src of c.sources || []) {
+      const srcNodeId = `source:${src.id || src.title || 'ref'}`;
+      if (!conceptIds.has(srcNodeId)) {
+        conceptIds.add(srcNodeId);
+        const srcUrl = (src as any).url || (src as any).resource || '';
+        graphNodes.push({
+          data: {
+            id: srcNodeId,
+            label: `[^${src.id}] ${String(src.title || srcUrl).slice(0, 42)}`,
+            type: 'Verified Source',
+            description: srcUrl,
+            status: 'stable',
+            trust_tier: c.trust_tier,
+            stale: false,
+            color: '#10b981',
+            size: 24,
+          },
+        });
+        graphBodies[srcNodeId] = [
+          `# [^${src.id}] ${src.title || srcUrl}`,
+          srcUrl ? `- **Kilde-URL:** [${srcUrl}](${srcUrl})` : '',
+          src.retrieved_at ? `- **Hentet (\`retrieved_at\`):** \`${src.retrieved_at}\`` : '',
+          src.last_modified ? `- **Sist endret (\`last_modified\`):** \`${src.last_modified}\`` : '',
+        ]
+          .filter(Boolean)
+          .join('\n');
+      }
+      const edgeKey = `${c.id}__${srcNodeId}`;
+      if (!seenEdgeKeys.has(edgeKey)) {
+        seenEdgeKeys.add(edgeKey);
+        graphEdges.push({ data: { id: edgeKey, source: c.id, target: srcNodeId } });
+      }
+    }
+  }
+
+  const surfaceId =
+    options.surfaceId ||
+    `icm_${(resolvedRunId || 'workspace').replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+
+  // Construct A2UI v0.9.1 Component Adjacency List
+  const components: A2uiComponent[] = [];
+  const tabs: Array<{ title: string; child: string }> = [];
+
+  // Header Components
+  components.push(
+    {
+      id: 'header_card',
+      component: 'Card',
+      child: 'header_col',
+    },
+    {
+      id: 'header_col',
+      component: 'Column',
+      children: ['header_top_row', 'header_meta_row'],
+    },
+    {
+      id: 'header_top_row',
+      component: 'Row',
+      justify: 'spaceBetween',
+      children: ['header_title', 'header_badges_row'],
+    },
+    {
+      id: 'header_title',
+      component: 'Text',
+      variant: 'h1',
+      text: { path: '/meta/title' },
+    },
+    {
+      id: 'header_badges_row',
+      component: 'Row',
+      children: ['badge_status', 'badge_trust', 'badge_freshness', 'badge_sources'],
+    },
+    {
+      id: 'badge_status',
+      component: 'Badge',
+      tone: okfDoc.frontmatter.status === 'stable' ? 'success' : 'warn',
+      text: { path: '/okf/statusBadge' },
+    },
+    {
+      id: 'badge_trust',
+      component: 'Badge',
+      tone: okfTrustTier === 'human-reviewed' ? 'accent' : 'primary',
+      text: { path: '/okf/trustBadge' },
+    },
+    {
+      id: 'badge_freshness',
+      component: 'Badge',
+      tone: okfStale ? 'danger' : 'success',
+      text: { path: '/okf/freshnessBadge' },
+    },
+    {
+      id: 'badge_sources',
+      component: 'Badge',
+      tone: 'neutral',
+      text: { path: '/okf/sourcesBadge' },
+    },
+    {
+      id: 'header_meta_row',
+      component: 'Row',
+      children: ['header_subtitle'],
+    },
+    {
+      id: 'header_subtitle',
+      component: 'Text',
+      variant: 'caption',
+      text: { path: '/meta/subtitleLine' },
+    }
+  );
+
+  // Tab 1: Oversikt & Sammendrag (Overview, TTS Narration, Highlights)
+  tabs.push({ title: '📋 Oversikt & Sammendrag', child: 'tab_overview' });
+  const overviewChildren = ['overview_narration_card'];
+  if (stage2Norm.highlights.length > 0) {
+    overviewChildren.push('overview_highlights_card');
+  }
+  components.push(
+    {
+      id: 'tab_overview',
+      component: 'Column',
+      children: overviewChildren,
+    },
+    {
+      id: 'overview_narration_card',
+      component: 'Card',
+      child: 'overview_narration_col',
+    },
+    {
+      id: 'overview_narration_col',
+      component: 'Column',
+      children: ['overview_narration_heading', 'overview_tts_player', 'overview_narration_body'],
+    },
+    {
+      id: 'overview_narration_heading',
+      component: 'Text',
+      variant: 'h2',
+      text: 'Stage 2 Syntese & Hovedbudskap',
+    },
+    {
+      id: 'overview_tts_player',
+      component: 'AudioPlayer',
+      description: { path: '/meta/title' },
+      ttsText: { path: '/stage2/scriptBody' },
+    },
+    {
+      id: 'overview_narration_body',
+      component: 'Text',
+      variant: 'body',
+      markdown: true,
+      text: { path: '/stage2/scriptBody' },
+    }
+  );
+
+  if (stage2Norm.highlights.length > 0) {
+    components.push(
+      {
+        id: 'overview_highlights_card',
+        component: 'Card',
+        child: 'overview_highlights_col',
+      },
+      {
+        id: 'overview_highlights_col',
+        component: 'Column',
+        children: ['overview_highlights_title', 'overview_highlights_list'],
+      },
+      {
+        id: 'overview_highlights_title',
+        component: 'Text',
+        variant: 'h3',
+        text: 'Nøkkelpunkter / Læringsmål',
+      },
+      {
+        id: 'overview_highlights_list',
+        component: 'List',
+        children: {
+          path: '/stage2/highlightsObjects',
+          componentId: 'highlight_item_text',
+        },
+      },
+      {
+        id: 'highlight_item_text',
+        component: 'Text',
+        variant: 'body',
+        text: { path: 'label' },
+      }
+    );
+  }
+
+  // Tab 2 (Conditional): Interactive Checklist if `- [ ]` items exist in OKF Markdown
+  if (totalChecklistItems > 0) {
+    tabs.push({
+      title: `✅ Interaktiv Sjekkliste (${totalChecklistItems})`,
+      child: 'tab_checklist',
+    });
+    components.push({
+      id: 'tab_checklist',
+      component: 'InteractiveChecklist',
+      title: 'Interaktiv Sjekkliste (OKF v0.2 Kontrollpunkter)',
+      groupsPath: '/checklist/groups',
+    });
+  }
+
+  // Tab 3 (Conditional): ModuleCarousel if Stage 2 has trainingModules / lessons / modules / slides
+  if (stage2Norm.modules.length > 0) {
+    tabs.push({
+      title: `🎓 Moduler (${stage2Norm.modules.length})`,
+      child: 'tab_modules',
+    });
+    components.push({
+      id: 'tab_modules',
+      component: 'ModuleCarousel',
+      title: 'Opplæringsmoduler & Leksjoner',
+      modulesPath: '/stage2/modules',
+      activeIndexPath: '/stage2/activeModuleIndex',
+    });
+  }
+
+  // Tab 4 (Conditional): CaseSimulator if Stage 2 has cases or boardActionItems
+  if (stage2Norm.cases.length > 0) {
+    tabs.push({
+      title: `⚖️ Case & Tiltak (${stage2Norm.cases.length})`,
+      child: 'tab_cases',
+    });
+    components.push({
+      id: 'tab_cases',
+      component: 'CaseSimulator',
+      title: 'Scenario- og vedtakssimulator',
+      casesPath: '/stage2/cases',
+      responsesPath: '/stage2/caseResponses',
+    });
+  }
+
+  // Tab 5 (Conditional): QuizRunner if Stage 2 has quiz questions
+  if (stage2Norm.quiz.length > 0) {
+    tabs.push({
+      title: `🧪 Quiz (${stage2Norm.quiz.length})`,
+      child: 'tab_quiz',
+    });
+    components.push({
+      id: 'tab_quiz',
+      component: 'QuizRunner',
+      title: 'Interaktiv Kunnskapssjekk',
+      questionsPath: '/stage2/quiz',
+      answersPath: '/stage2/quizAnswers',
+    });
+  }
+
+  // Tab 6: OKF v0.2 Kunnskapsgrunnlag (`OkfMarkdown`)
+  tabs.push({
+    title: '📚 OKF v0.2 Kunnskapsgrunnlag',
+    child: 'tab_okf_markdown',
+  });
+  components.push({
+    id: 'tab_okf_markdown',
+    component: 'OkfMarkdown',
+    title: { path: '/okf/title' },
+    body: { path: '/okf/body' },
+    sources: { path: '/okf/sources' },
+    trustTier: { path: '/okf/trustTier' },
+    isStale: { path: '/okf/isStale' },
+  });
+
+  // Tab 7: OKF Knowledge Graph (`OkfKnowledgeGraph`)
+  tabs.push({
+    title: `🕸️ OKF Kunnskapsgraf (${graphNodes.length})`,
+    child: 'tab_okf_graph',
+  });
+  components.push({
+    id: 'tab_okf_graph',
+    component: 'OkfKnowledgeGraph',
+    title: 'OKF v0.2 Kunnskapsgraf',
+  });
+
+  // Root & Main Tabs Component
+  components.push(
+    {
+      id: 'main_tabs',
+      component: 'Tabs',
+      tabs,
+    },
+    {
+      id: 'root',
+      component: 'Column',
+      children: ['header_card', 'main_tabs'],
+    }
+  );
+
+  const completedChecklistCount = checklistGroups.reduce(
+    (acc, g) => acc + g.items.filter((i) => i.checked).length,
+    0
+  );
+  const checklistPct =
+    totalChecklistItems > 0 ? Math.round((completedChecklistCount / totalChecklistItems) * 100) : 0;
+
+  const dataModel = {
+    meta: {
+      runId: resolvedRunId || 'workspace',
+      title: stage2Norm.title,
+      subtitle: stage2Norm.subtitle,
+      targetAudience: stage2Norm.targetAudience,
+      estimatedDuration: stage2Norm.estimatedDuration,
+      model: meta.model || GEMINI_4_ARGON_MODEL,
+      subtitleLine: [
+        stage2Norm.targetAudience ? `Målgruppe: ${stage2Norm.targetAudience}` : '',
+        stage2Norm.estimatedDuration ? `Varighet: ${stage2Norm.estimatedDuration}s` : '',
+        `Modell: ${meta.model || GEMINI_4_ARGON_MODEL}`,
+        `Run: ${resolvedRunId || 'workspace'}`,
+      ]
+        .filter(Boolean)
+        .join('  •  '),
+    },
+    okf: {
+      title: String(okfDoc.frontmatter.title || stage2Norm.title),
+      type: String(okfDoc.frontmatter.type || 'Research Concept'),
+      status: String(okfDoc.frontmatter.status || 'draft'),
+      trustTier: okfTrustTier,
+      isStale: okfStale,
+      statusBadge: `status: ${okfDoc.frontmatter.status || 'draft'}`,
+      trustBadge: `trust: ${okfTrustTier}`,
+      freshnessBadge: okfStale ? 'stale' : 'fresh',
+      sourcesBadge: `${okfSources.length} verifiserte kilder`,
+      sources: okfSources,
+      body: okfDoc.body || '*Ingen Stage 1 OKF-kropp funnet.*',
+      editMode: false,
+    },
+    checklist: {
+      groups: checklistGroups,
+      completedCount: completedChecklistCount,
+      totalCount: totalChecklistItems,
+      percent: checklistPct,
+      summaryText: `${completedChecklistCount} / ${totalChecklistItems} fullført (${checklistPct}%)`,
+    },
+    stage2: {
+      scriptBody:
+        stage2Norm.scriptBody ||
+        okfDoc.frontmatter.description ||
+        'Ingen Stage 2-manustekst generert ennå.',
+      highlights: stage2Norm.highlights,
+      highlightsObjects: stage2Norm.highlights.map((h, idx) => ({
+        id: `hl_${idx + 1}`,
+        label: `• ${h}`,
+      })),
+      modules: stage2Norm.modules,
+      activeModuleIndex: 0,
+      cases: stage2Norm.cases,
+      caseResponses: {},
+      caseRevealed: {},
+      quiz: stage2Norm.quiz,
+      quizAnswers: {},
+    },
+  };
+
+  const messages: A2uiEnvelopeMessage[] = [
+    {
+      version: A2UI_PROTOCOL_VERSION,
+      createSurface: {
+        surfaceId,
+        catalogId: A2UI_ICM_CATALOG_ID,
+        theme: {
+          primaryColor: '#1d4ed8',
+          agentDisplayName: 'ICM + OKF v0.2 A2UI Studio',
+        },
+        sendDataModel: true,
+      },
+    },
+    {
+      version: A2UI_PROTOCOL_VERSION,
+      updateComponents: {
+        surfaceId,
+        components,
+      },
+    },
+    {
+      version: A2UI_PROTOCOL_VERSION,
+      updateDataModel: {
+        surfaceId,
+        path: '/',
+        value: dataModel,
+      },
+    },
+  ];
+
+  const validation = validateA2uiSurfaceMessages(messages);
+  if (!validation.valid) {
+    throw new Error(`Invalid A2UI v0.9.1 surface generated: ${validation.errors.join('; ')}`);
+  }
+
+  // Determine output paths (supports `outputDir` override for non-destructive external testing)
+  const baseOutDir = options.outputDir
+    ? path.resolve(options.outputDir)
+    : resolvedRunDir || workspaceRoot;
+  const stage2OutDir = options.outputDir
+    ? path.join(baseOutDir, 'stages', '02_script', 'output')
+    : resolvedRunDir
+      ? path.join(resolvedRunDir, 'stages', '02_script', 'output')
+      : path.join(workspaceRoot, 'bundle');
+
+  fs.mkdirSync(stage2OutDir, { recursive: true });
+
+  const surfaceJsonPath = path.join(stage2OutDir, 'a2ui_surface.json');
+  const surfaceJsonlPath = path.join(stage2OutDir, 'a2ui_surface.jsonl');
+  const htmlOutputPath = options.outputHtmlPath
+    ? path.resolve(options.outputHtmlPath)
+    : path.join(baseOutDir, 'a2ui.html');
+
+  const surfaceJsonDoc = {
+    version: A2UI_PROTOCOL_VERSION,
+    surfaceId,
+    catalogId: A2UI_ICM_CATALOG_ID,
+    catalogSchema: A2UI_ICM_CATALOG_SCHEMA,
+    generatedAt: new Date().toISOString(),
+    runId: resolvedRunId || 'workspace',
+    messages,
+  };
+
+  fs.writeFileSync(surfaceJsonPath, JSON.stringify(surfaceJsonDoc, null, 2), 'utf-8');
+  fs.writeFileSync(
+    surfaceJsonlPath,
+    messages.map((m) => JSON.stringify(m)).join('\n') + '\n',
+    'utf-8'
+  );
+
+  const clientPayload = {
+    surfaceId,
+    catalogId: A2UI_ICM_CATALOG_ID,
+    messages,
+    bundleGraph: {
+      nodes: graphNodes,
+      edges: graphEdges,
+      bodies: graphBodies,
+    },
+  };
+
+  const html = `<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeA2uiHtml(stage2Norm.title)} — A2UI v0.9.1 Studio</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+<style>
+${A2UI_STUDIO_CSS}
+</style>
+</head>
+<body>
+<header class="a2ui-topbar">
+  <div class="a2ui-topbar-brand">
+    <span class="a2ui-protocol-pill">A2UI ${A2UI_PROTOCOL_VERSION}</span>
+    <span class="a2ui-topbar-title">${escapeA2uiHtml(stage2Norm.title)}</span>
+  </div>
+  <div class="a2ui-topbar-actions">
+    <button class="a2ui-top-btn" id="a2ui-open-inspector">🔍 A2UI Surface &amp; Data Model Inspector</button>
+    <button class="a2ui-top-btn" id="a2ui-export-json">⬇ Eksporter A2UI Tilstand (.json)</button>
+  </div>
+</header>
+
+<main class="a2ui-root-Mount" id="a2ui-surface-root"></main>
+
+<div class="a2ui-modal-backdrop" id="a2ui-inspector-modal" hidden>
+  <div class="a2ui-modal-dialog">
+    <div class="a2ui-modal-header">
+      <strong>A2UI v0.9.1 Deklarativ Surface, Data Model &amp; Action Log</strong>
+      <button class="a2ui-btn" id="a2ui-close-inspector">Lukk</button>
+    </div>
+    <div class="a2ui-modal-body">
+      <pre id="a2ui-inspector-content" style="background:#0f172a;color:#e2e8f0;padding:14px;border-radius:8px;font-size:12px;overflow-x:auto;margin:0"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+window.A2UI_SURFACE_PAYLOAD = ${JSON.stringify(clientPayload).replace(/<\//g, '<\\/')};
+</script>
+<script>
+${A2UI_STUDIO_JS}
+</script>
+</body>
+</html>
+`;
+
+  fs.mkdirSync(path.dirname(htmlOutputPath), { recursive: true });
+  fs.writeFileSync(htmlOutputPath, html, 'utf-8');
+
+  let bundleHtmlPath: string | undefined;
+  const shouldMirrorBundle =
+    options.mirrorBundleHtml !== undefined ? options.mirrorBundleHtml : !options.outputDir;
+  if (shouldMirrorBundle && fs.existsSync(bundleRoot)) {
+    bundleHtmlPath = path.join(bundleRoot, 'a2ui.html');
+    fs.writeFileSync(bundleHtmlPath, html, 'utf-8');
+  }
+
+  return {
+    runId: resolvedRunId || 'workspace',
+    surfaceId,
+    catalogId: A2UI_ICM_CATALOG_ID,
+    componentCount: components.length,
+    tabCount: tabs.length,
+    checklistItemCount: totalChecklistItems,
+    moduleCount: stage2Norm.modules.length,
+    quizCount: stage2Norm.quiz.length,
+    caseCount: stage2Norm.cases.length,
+    conceptCount: graphNodes.length,
+    surfaceJsonPath,
+    surfaceJsonlPath,
+    htmlOutputPath,
+    bundleHtmlPath,
+    messages,
+  };
+}
+
 // 4. Headless CLI Entrypoint (Linux / macOS / Windows / SSH / Cron / Terminal execution)
 if (
   process.argv.includes('--cli') ||
   process.argv.includes('--stage1') ||
   process.argv.includes('--stage2') ||
   process.argv.includes('--verify') ||
-  process.argv.includes('--viz')
+  process.argv.includes('--viz') ||
+  process.argv.includes('--a2ui')
 ) {
   (async () => {
     const isStage1Only = process.argv.includes('--stage1');
@@ -5459,6 +8340,7 @@ if (
     const isFullCli = process.argv.includes('--cli');
     const hasVerify = process.argv.includes('--verify');
     const hasViz = process.argv.includes('--viz');
+    const hasA2ui = process.argv.includes('--a2ui');
     const isDryRun = process.argv.includes('--dry-run');
 
     const byFlagIdx = process.argv.indexOf('--by');
@@ -5466,6 +8348,36 @@ if (
       byFlagIdx !== -1 && process.argv[byFlagIdx + 1] && !process.argv[byFlagIdx + 1].startsWith('--')
         ? process.argv[byFlagIdx + 1]
         : undefined;
+
+    // Standalone `--a2ui` execution
+    if (hasA2ui && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify) {
+      const a2uiIdx = process.argv.indexOf('--a2ui');
+      const a2uiArgs = process.argv
+        .slice(a2uiIdx + 1)
+        .filter((a) => !a.startsWith('--'));
+      const targetRunOrPath = a2uiArgs[0];
+      const customHtmlOut = a2uiArgs[1];
+      const a2uiResult = generateA2uiSurface({
+        workspaceRoot: './workspace',
+        runId: targetRunOrPath,
+        outputHtmlPath: customHtmlOut,
+      });
+      console.log('A2UI v0.9.1 Surface & Studio Generated:', {
+        runId: a2uiResult.runId,
+        surfaceId: a2uiResult.surfaceId,
+        componentCount: a2uiResult.componentCount,
+        tabCount: a2uiResult.tabCount,
+        checklistItemCount: a2uiResult.checklistItemCount,
+        moduleCount: a2uiResult.moduleCount,
+        quizCount: a2uiResult.quizCount,
+        caseCount: a2uiResult.caseCount,
+        surfaceJsonPath: a2uiResult.surfaceJsonPath,
+        surfaceJsonlPath: a2uiResult.surfaceJsonlPath,
+        htmlOutputPath: a2uiResult.htmlOutputPath,
+        bundleHtmlPath: a2uiResult.bundleHtmlPath,
+      });
+      return;
+    }
 
     // Standalone `--viz` execution
     if (hasViz && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify) {
@@ -5506,6 +8418,10 @@ if (
         const vizResult = generateBundleVisualization('./workspace/bundle');
         console.log('OKF Bundle Visualization Generated:', vizResult);
       }
+      if (hasA2ui) {
+        const a2uiResult = generateA2uiSurface({ workspaceRoot: './workspace', runId: target });
+        console.log('A2UI v0.9.1 Surface Generated:', a2uiResult.htmlOutputPath);
+      }
       console.log('OKF Verification Complete:', verifyResult);
       return;
     }
@@ -5520,7 +8436,12 @@ if (
         i++;
         continue;
       }
-      if (token === '--dry-run' || token === '--verify' || token === '--viz') {
+      if (
+        token === '--dry-run' ||
+        token === '--verify' ||
+        token === '--viz' ||
+        token === '--a2ui'
+      ) {
         continue;
       }
       cleanedPositional.push(token);
@@ -5530,10 +8451,10 @@ if (
     if (!argValue) {
       console.error(
         isStage2Only
-          ? 'Usage: npm run cli:stage2 -- [--dry-run] [--verify] [--by human:<id>] <runId>'
+          ? 'Usage: npm run cli:stage2 -- [--dry-run] [--verify] [--by human:<id>] [--a2ui] <runId>'
           : isStage1Only
-            ? 'Usage: npm run cli:stage1 -- [--dry-run] [--viz] "<Research Topic>"'
-            : 'Usage: npm run cli -- [--dry-run] [--verify] [--viz] "<Research Topic>"'
+            ? 'Usage: npm run cli:stage1 -- [--dry-run] [--viz] [--a2ui] "<Research Topic>"'
+            : 'Usage: npm run cli -- [--dry-run] [--verify] [--viz] [--a2ui] "<Research Topic>"'
       );
       process.exit(1);
     }
@@ -5563,6 +8484,10 @@ if (
       if (hasViz) {
         const vizResult = generateBundleVisualization('./workspace/bundle');
         console.log('OKF Bundle Visualization Generated:', vizResult);
+      }
+      if (hasA2ui && !isDryRun) {
+        const a2uiResult = generateA2uiSurface({ workspaceRoot: './workspace', runId: argValue });
+        console.log('A2UI v0.9.1 Surface Generated:', a2uiResult.htmlOutputPath);
       }
       console.log('Stage 2 CLI Run Complete:', result);
     } else {
@@ -5625,6 +8550,10 @@ if (
           const vizResult = generateBundleVisualization('./workspace/bundle');
           console.log('OKF Bundle Visualization Generated:', vizResult);
         }
+        if (hasA2ui && !isDryRun) {
+          const a2uiResult = generateA2uiSurface({ workspaceRoot: './workspace', runId });
+          console.log('A2UI v0.9.1 Surface Generated:', a2uiResult.htmlOutputPath);
+        }
         console.log(
           `Stage 1 CLI ${isDryRun ? 'Dry-Run ' : 'Run '}Complete (${runId}):`,
           result
@@ -5658,6 +8587,10 @@ if (
           const vizResult = generateBundleVisualization('./workspace/bundle');
           console.log('OKF Bundle Visualization Generated:', vizResult);
         }
+        if (hasA2ui) {
+          const a2uiResult = generateA2uiSurface({ workspaceRoot: './workspace', runId });
+          console.log('A2UI v0.9.1 Surface Generated:', a2uiResult.htmlOutputPath);
+        }
         console.log(`Headless ICM Run Complete (${runId}):`, {
           status: 'Pipeline executed successfully',
           outputPath: stage2Result.outputPath,
@@ -5671,3 +8604,4 @@ if (
     process.exit(1);
   });
 }
+

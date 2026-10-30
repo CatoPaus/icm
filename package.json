@@ -8,6 +8,7 @@
     "cli:stage2": "npx tsx --env-file=.env.local src/index.ts --stage2",
     "cli:verify": "npx tsx --env-file=.env.local src/index.ts --verify",
     "cli:viz": "npx tsx --env-file=.env.local src/index.ts --viz",
+    "cli:a2ui": "npx tsx --env-file=.env.local src/index.ts --a2ui",
     "clean": "node scripts/cleanup.js"
   },
   "devDependencies": {

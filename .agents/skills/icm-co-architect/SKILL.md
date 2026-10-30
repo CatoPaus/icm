@@ -122,11 +122,12 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
 
 ---
 
-## Phase 5: Optional Bespoke Domain Web Studio (Built From Real Run Artifacts)
+## Phase 5: A2UI v0.9.1 Declarative Surface (`npm run cli:a2ui`) or Optional Bespoke Domain Web Studio
 
 Once the pipeline's stages (`01_research`, `02_script`, `03_...`, `04_...`) and a real verified run in `workspace/runs/<runId>/` are complete on disk, ask the user via `ask_question` whether they want to:
-1. **Build a Bespoke Domain Web Studio (`src/server.ts` + `public/`)** designed from scratch around their pipeline's *actual* filesystem artifacts, or
-2. **Keep the project as a 100% Pure Headless CLI Pipeline** (zero web server code).
+1. **(Recommended) Compile a Declarative A2UI v0.9.1 Surface & Bi-Directional Studio (`npm run cli:a2ui -- <runId>`)** generating `a2ui_surface.json`, `a2ui_surface.jsonl`, and `workspace/runs/<runId>/a2ui.html` (plus `workspace/bundle/a2ui.html`) with Tier 1 A2UI Basic Catalog Primitives + Tier 2 ICM/OKF Domain Components (`OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`),
+2. **Build a Bespoke Domain Web Studio (`src/server.ts` + `public/`)** designed from scratch around their pipeline's *actual* filesystem artifacts, or
+3. **Keep the project as a 100% Pure Headless CLI Pipeline** (zero web server code).
 
 If the user chooses to build a custom Domain Web Studio:
 - **Design for the Specific Domain & Artifacts (Never a Generic Form):**
@@ -134,13 +135,13 @@ If the user chooses to build a custom Domain Web Studio:
     - *Online Course & Lesson Studio*: Interactive 16:9 Slide Deck Carousel (`slides_deck.json` + rendered PNGs), synchronized HTML5 Instructor Audio Player (`lesson_voiceover.wav`), collapsible Module Syllabus & Speaker Notes drawer, interactive Formative Quiz check cards, and per-stage regenerate/edit controls.
     - *Podcast & Audio Studio*: Dual-host transcript timeline, inline voiceover player, and episode show notes editor.
     - *Executive / Legal / Competitor Intelligence*: Executive KPI summary cards, side-by-side source verification inspector, and interactive filterable tables.
-- **Zero-Dependency Native Node HTTP Server (`src/server.ts`) & OKF v0.2 UI Best Practices:**
-  - Generate the interactive OKF knowledge graph (`npm run cli:viz` → `workspace/bundle/viz.html`) so it is ready to embed or view alongside the studio.
+- **Zero-Dependency Native Node HTTP Server (`src/server.ts`) & OKF v0.2 / A2UI v0.9.1 UI Best Practices:**
+  - Generate the interactive OKF knowledge graph (`npm run cli:viz` → `workspace/bundle/viz.html`) and A2UI v0.9.1 surface (`npm run cli:a2ui -- <runId>` → `a2ui.html`) so they are ready to embed or view alongside the studio.
   - Build `src/server.ts` using Node's built-in `node:http` and `node:fs` modules (keeping **0 external npm dependencies**!) or install `express` if preferred.
   - When rendering OKF v0.2 Markdown documents (`research_summary.md`) inside a custom Web Studio (`public/index.html`):
     - Preprocess OKF `[^id]` footnotes and `[^id]: Title` footnote definitions before calling `marked.parse()` so inline `[^id]` citations render as clickable superscript links tied to `frontmatter.sources`, and display each source's `retrieved_at` (and `last_modified` if present) timestamp badge.
     - Intercept clicks on internal OKF bundle links (e.g., `/research/<concept>.md`) inside the studio preview so clicking them selects the matching run/concept or opens the `viz.html` graph tab rather than navigating to a 404 URL.
     - If extracting Markdown checklists (`- [ ] ...`) into a checklist UI tab, strip `[^id]` footnotes, backticks, and inline LaTeX (`$\text{...}$`), and render top-level `- [ ] **Category**:` lines that precede indented `  - [ ]` sub-items as group headers.
-    - In `src/server.ts`, whenever an endpoint saves edited Stage 1 Markdown (`PUT /api/runs/:id/research`) or verifies a run (`POST /api/runs/:id/verify`), also call `syncRunToBundle()` and `generateBundleVisualization()` so `workspace/bundle/` and `workspace/bundle/viz.html` stay automatically in sync.
+    - In `src/server.ts`, whenever an endpoint saves edited Stage 1 Markdown (`PUT /api/runs/:id/research`) or verifies a run (`POST /api/runs/:id/verify`), also call `syncRunToBundle()`, `generateBundleVisualization()`, and `generateA2uiSurface()` so `workspace/bundle/`, `workspace/bundle/viz.html`, and `a2ui.html` stay automatically in sync.
   - Add `"server": "npx tsx --env-file=.env.local src/server.ts"` and `"dev": "npx tsx watch --clear-screen=false --ignore=.icm/** --ignore=workspace/** --env-file=.env.local src/server.ts"` to `package.json`, and run the server in development using `npm run dev` (`IsDaemon: true`) so edits to `src/server.ts` hot-reload automatically without manual task restarts.
   - Hydrate initial run data from `workspace/runs/` so the first browser paint at `http://localhost:3000` loads immediately with the user's verified run selected.

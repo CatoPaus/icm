@@ -179,7 +179,7 @@ GEMINI_API_KEY="your-gemini-api-key"
 
 ---
 
-## Running the ICM + OKF v0.2 Pipeline (`cli:stage1`, `cli:verify`, `cli:stage2`, `cli:viz`, `cli`, `--dry-run`)
+## Running the ICM + OKF v0.2 + A2UI v0.9.1 Pipeline (`cli:stage1`, `cli:verify`, `cli:stage2`, `cli:viz`, `cli:a2ui`, `cli`, `--dry-run`)
 
 Because the ICM state lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/` and `workspace/bundle/`) and `src/index.ts` uses pure cross-platform Node.js with zero external dependencies, you can run every stage standalone from any Windows, macOS, or Linux terminal, SSH session, Docker container, or cron job:
 
@@ -199,7 +199,7 @@ Because the ICM state lives in plain Markdown and JSON files on disk (`workspace
    npm run cli:verify -- <runId> --by human:reviewer
    ```
    *(Stamps `verified: [{ by: "human:reviewer", at: "..." }]` and `status: stable`, upgrading `trust_tier` from `unverified` to `human-reviewed` in both `research_summary.md` and `workspace/bundle/`.)*
-4. **Run or re-run Stage 2 standalone after reviewing/verifying Stage 1 (supports `--dry-run` and `--verify`):**
+4. **Run or re-run Stage 2 standalone after reviewing/verifying Stage 1 (supports `--dry-run`, `--verify`, and `--a2ui`):**
    ```bash
    npm run cli:stage2 -- --dry-run <runId>
    npm run cli:stage2 -- <runId>
@@ -209,11 +209,16 @@ Because the ICM state lives in plain Markdown and JSON files on disk (`workspace
    npm run cli:viz
    ```
    *(Walks `workspace/bundle/` and writes a self-contained single-file `workspace/bundle/viz.html` with Cytoscape.js force-directed graph, trust-tier & staleness badges, and bidirectional backlinks.)*
-6. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
+6. **Compile the Declarative A2UI v0.9.1 Surface & Bi-Directional Studio (`cli:a2ui`):**
+   ```bash
+   npm run cli:a2ui -- <runId>
+   ```
+   *(Compiles the run's Stage 1 OKF v0.2 Markdown, Stage 2 JSON, and OKF Bundle into declarative **A2UI v0.9.1** surface artifacts (`workspace/runs/<runId>/stages/02_script/output/a2ui_surface.json` and `a2ui_surface.jsonl` with `createSurface`, `updateComponents`, and `updateDataModel` bound via RFC 6901 JSON Pointers) plus a self-contained **A2UI Studio HTML app** (`workspace/runs/<runId>/a2ui.html` and `workspace/bundle/a2ui.html`) implementing both **Tier 1 Basic Catalog Primitives** (`Tabs`, `Card`, `Row`, `Column`, `List`, `Text`, `CheckBox`, `ChoicePicker`, `TextField`, `Button`, `AudioPlayer`, `Video`, `Image`, `Icon`, `Divider`, `Modal`, `Badge`) and **Tier 2 ICM + OKF Domain Components** (`OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`). See [`A2UI_SPEC.md`](file:///c:/lab/jolly-hertz/A2UI_SPEC.md) for the upstream A2UI v0.9.1 protocol specification.)*
+7. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
    ```bash
    npm run cli -- "Cloud Native Architecture in 2026"
    ```
-7. **Read the final Stage 2 output:**
+8. **Read the final Stage 2 output:**
    ```bash
    cat workspace/runs/<runId>/stages/02_script/output/script_draft.json
    ```
