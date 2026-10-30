@@ -413,111 +413,134 @@ export async function streamGemini4ArgonInteraction(
       const { steps, ...rest } = event.interaction || {};
       Object.assign(interaction, rest);
       if (Array.isArray(steps) && steps.length > 0) {
-        if (!Array.isArray(interaction.steps) || interaction.steps.length === 0) {
-          interaction.steps = steps;
-        } else {
-          const mergedExisting = new Set<any>();
-          for (let i = 0; i < steps.length; i++) {
-            const completedStep = steps[i];
-            if (!completedStep || typeof completedStep !== 'object') continue;
+        if (!Array.isArray(interaction.steps)) {
+          interaction.steps = [];
+        }
+        const mergedExisting = new Set<any>();
+        for (let i = 0; i < steps.length; i++) {
+          const completedStep = steps[i];
+          if (!completedStep || typeof completedStep !== 'object') continue;
 
-            let targetStep: any = null;
-            const atIdx = interaction.steps[i];
-            if (
-              atIdx &&
-              typeof atIdx === 'object' &&
-              !mergedExisting.has(atIdx) &&
-              (!atIdx.type || !completedStep.type || atIdx.type === completedStep.type)
-            ) {
-              targetStep = atIdx;
+          let targetStep: any = null;
+          const atIdx = interaction.steps[i];
+          if (
+            atIdx &&
+            typeof atIdx === 'object' &&
+            !mergedExisting.has(atIdx) &&
+            (!atIdx.type || !completedStep.type || atIdx.type === completedStep.type) &&
+            (!completedStep.id || !atIdx.id || atIdx.id === completedStep.id) &&
+            (!completedStep.call_id || !atIdx.call_id || atIdx.call_id === completedStep.call_id)
+          ) {
+            targetStep = atIdx;
+          } else {
+            targetStep = interaction.steps.find(
+              (s: any) =>
+                s &&
+                typeof s === 'object' &&
+                !mergedExisting.has(s) &&
+                s.type === completedStep.type &&
+                (!completedStep.id || !s.id || s.id === completedStep.id) &&
+                (!completedStep.call_id || !s.call_id || s.call_id === completedStep.call_id)
+            );
+          }
+
+          if (!targetStep) {
+            if (!interaction.steps[i]) {
+              interaction.steps[i] = completedStep;
             } else {
-              targetStep = interaction.steps.find(
-                (s: any) =>
-                  s &&
-                  typeof s === 'object' &&
-                  !mergedExisting.has(s) &&
-                  s.type === completedStep.type &&
-                  (!completedStep.id || !s.id || s.id === completedStep.id) &&
-                  (!completedStep.call_id || !s.call_id || s.call_id === completedStep.call_id)
-              );
+              interaction.steps.push(completedStep);
             }
-
-            if (!targetStep) {
-              if (!interaction.steps[i]) {
-                interaction.steps[i] = completedStep;
-              } else {
-                interaction.steps.push(completedStep);
-              }
-              mergedExisting.add(completedStep);
-              targetStep = completedStep;
-            } else {
-              mergedExisting.add(targetStep);
-              for (const [k, v] of Object.entries(completedStep)) {
-                if (v === undefined || v === null) continue;
-                if (
-                  k === 'content' &&
-                  Array.isArray(v) &&
-                  Array.isArray(targetStep.content) &&
-                  targetStep.content.length > 0
-                ) {
-                  for (const cPart of v) {
-                    if (!cPart || typeof cPart !== 'object') continue;
-                    if (cPart.type === 'text') {
-                      let existingTextPart = [...targetStep.content]
-                        .reverse()
-                        .find((p: any) => p && p.type === 'text');
-                      if (!existingTextPart) {
-                        existingTextPart = { type: 'text', text: cPart.text || '' };
-                        targetStep.content.push(existingTextPart);
-                      } else if (
-                        typeof cPart.text === 'string' &&
-                        cPart.text.length > (existingTextPart.text || '').length
-                      ) {
-                        existingTextPart.text = cPart.text;
-                      }
-                      if (Array.isArray(cPart.annotations) && cPart.annotations.length > 0) {
-                        const existingAnns: any[] = Array.isArray(existingTextPart.annotations)
-                          ? existingTextPart.annotations
-                          : [];
-                        const seenAnnKeys = new Set(
-                          existingAnns.map(
-                            (a: any) =>
-                              `${a?.start_index ?? ''}:${a?.end_index ?? ''}:${a?.url ?? ''}`
-                          )
-                        );
-                        for (const ann of cPart.annotations) {
-                          const key = `${ann?.start_index ?? ''}:${ann?.end_index ?? ''}:${ann?.url ?? ''}`;
-                          if (!seenAnnKeys.has(key)) {
-                            seenAnnKeys.add(key);
-                            existingAnns.push(ann);
-                          }
+            mergedExisting.add(completedStep);
+            targetStep = completedStep;
+          } else {
+            mergedExisting.add(targetStep);
+            for (const [k, v] of Object.entries(completedStep)) {
+              if (v === undefined || v === null) continue;
+              if (
+                k === 'content' &&
+                Array.isArray(v) &&
+                Array.isArray(targetStep.content) &&
+                targetStep.content.length > 0
+              ) {
+                for (const cPart of v) {
+                  if (!cPart || typeof cPart !== 'object') continue;
+                  if (cPart.type === 'text') {
+                    let existingTextPart = [...targetStep.content]
+                      .reverse()
+                      .find((p: any) => p && p.type === 'text');
+                    if (!existingTextPart) {
+                      existingTextPart = { type: 'text', text: cPart.text || '' };
+                      targetStep.content.push(existingTextPart);
+                    } else if (
+                      typeof cPart.text === 'string' &&
+                      cPart.text.length > (existingTextPart.text || '').length
+                    ) {
+                      existingTextPart.text = cPart.text;
+                    }
+                    if (Array.isArray(cPart.annotations) && cPart.annotations.length > 0) {
+                      const existingAnns: any[] = Array.isArray(existingTextPart.annotations)
+                        ? existingTextPart.annotations
+                        : [];
+                      const seenAnnKeys = new Set(
+                        existingAnns.map(
+                          (a: any) =>
+                            `${a?.start_index ?? ''}:${a?.end_index ?? ''}:${a?.url ?? ''}`
+                        )
+                      );
+                      for (const ann of cPart.annotations) {
+                        const key = `${ann?.start_index ?? ''}:${ann?.end_index ?? ''}:${ann?.url ?? ''}`;
+                        if (!seenAnnKeys.has(key)) {
+                          seenAnnKeys.add(key);
+                          existingAnns.push(ann);
                         }
-                        existingTextPart.annotations = existingAnns;
                       }
-                    } else {
+                      existingTextPart.annotations = existingAnns;
+                    }
+                  } else {
+                    const alreadyPresent = targetStep.content.some(
+                      (p: any) =>
+                        p &&
+                        p.type === cPart.type &&
+                        ((cPart.id && p.id === cPart.id) ||
+                          (cPart.name && p.name === cPart.name) ||
+                          JSON.stringify(p) === JSON.stringify(cPart))
+                    );
+                    if (!alreadyPresent) {
                       targetStep.content.push(cPart);
                     }
                   }
-                } else if (Array.isArray(v)) {
-                  if (v.length > 0 || !Array.isArray(targetStep[k])) {
-                    targetStep[k] = v;
-                  }
-                } else {
+                }
+              } else if (Array.isArray(v)) {
+                if (v.length > 0 || !Array.isArray(targetStep[k])) {
                   targetStep[k] = v;
                 }
+              } else {
+                targetStep[k] = v;
               }
             }
+          }
 
-            if (
-              completedStep.type === 'google_search_call' &&
-              Array.isArray(completedStep.arguments?.queries)
-            ) {
-              const newQueries = completedStep.arguments.queries.filter(
-                (q: any) => typeof q === 'string' && q.trim() && !searchQueries.includes(q)
-              );
-              if (newQueries.length > 0) {
-                searchQueries.push(...newQueries);
-                options.onSearchQuery?.(newQueries, searchQueries);
+          if (
+            completedStep.type === 'google_search_call' &&
+            Array.isArray(completedStep.arguments?.queries)
+          ) {
+            const newQueries = completedStep.arguments.queries.filter(
+              (q: any) => typeof q === 'string' && q.trim() && !searchQueries.includes(q)
+            );
+            if (newQueries.length > 0) {
+              searchQueries.push(...newQueries);
+              options.onSearchQuery?.(newQueries, searchQueries);
+            }
+          }
+
+          if (completedStep.type === 'thought' && Array.isArray(completedStep.summary)) {
+            for (const sPart of completedStep.summary) {
+              const thoughtText = String(
+                typeof sPart === 'string' ? sPart : sPart?.text || ''
+              ).trim();
+              if (thoughtText && !thoughts.includes(thoughtText)) {
+                thoughts.push(thoughtText);
+                options.onThought?.(thoughtText, thoughts);
               }
             }
           }
@@ -1779,6 +1802,13 @@ export async function cleanGroundingLinks(
 
   // Build candidate pool from groundedSources + existing workspace/bundle/ concepts to heal any
   // frontmatter/body redirect URLs whose base64 token was corrupted or truncated by the LLM
+  const extractRedirectToken = (url?: string): string => {
+    if (!url) return '';
+    const marker = 'vertexaisearch.cloud.google.com/grounding-api-redirect/';
+    const idx = url.indexOf(marker);
+    return idx !== -1 ? url.slice(idx + marker.length).trim() : '';
+  };
+
   interface HealingCandidate {
     id: string;
     slug: string;
@@ -1788,6 +1818,7 @@ export async function cleanGroundingLinks(
     tokens: Set<string>;
     searchableText: string;
     originalRedirect?: string;
+    redirectToken: string;
   }
   const healingCandidates: HealingCandidate[] = [];
   const seenCandidateKeys = new Set<string>();
@@ -1823,6 +1854,7 @@ export async function cleanGroundingLinks(
       tokens: new Set(allTokens),
       searchableText: `${normalizeSourceMatchKey(rawId)} ${normTitle} ${normalizeSourceMatchKey(urlTokensText)}`.trim(),
       originalRedirect,
+      redirectToken: extractRedirectToken(originalRedirect),
     });
   };
 
@@ -1835,6 +1867,12 @@ export async function cleanGroundingLinks(
         undefined,
         isVertexRedirectUrl(gs.url) ? gs.url : undefined
       );
+    }
+  }
+
+  for (const [origRedirect, resolvedUrl] of urlMap.entries()) {
+    if (resolvedUrl && resolvedUrl !== origRedirect && !isVertexRedirectUrl(resolvedUrl)) {
+      addHealingCandidate(resolvedUrl, undefined, undefined, origRedirect);
     }
   }
 
@@ -1855,81 +1893,102 @@ export async function cleanGroundingLinks(
     const titleSlug = rawTitle
       ? generateSourceSlugId(rawTitle, 'https://example.com', new Set()).toLowerCase()
       : '';
-
-    // 1. Exact ID or generated slug match
-    for (const c of healingCandidates) {
-      if (slugId && (c.id === slugId || c.slug === slugId)) {
-        return c.resource;
-      }
-      if (titleSlug && titleSlug !== 'source' && (c.slug === titleSlug || c.id === titleSlug)) {
-        return c.resource;
-      }
-    }
-
-    // 2. Exact normalized title match
-    if (normTitle) {
-      for (const c of healingCandidates) {
-        if (c.normTitle && c.normTitle === normTitle) {
-          return c.resource;
-        }
-      }
-    }
-
-    // 3. Normalized title / ID substring containment match
-    let bestContainment: { resource: string; len: number } | null = null;
-    for (const c of healingCandidates) {
-      if (normTitle.length >= 4 && c.normTitle.length >= 4) {
-        if (c.normTitle.includes(normTitle) || normTitle.includes(c.normTitle)) {
-          const overlapLen = Math.min(normTitle.length, c.normTitle.length);
-          if (!bestContainment || overlapLen > bestContainment.len) {
-            bestContainment = { resource: c.resource, len: overlapLen };
-          }
-        }
-      }
-      if (normId.length >= 4 && c.normTitle.length >= 4) {
-        if (c.normTitle.includes(normId) || normId.includes(c.normTitle)) {
-          const overlapLen = Math.min(normId.length, c.normTitle.length);
-          if (!bestContainment || overlapLen > bestContainment.len) {
-            bestContainment = { resource: c.resource, len: overlapLen };
-          }
-        }
-      }
-    }
-    if (bestContainment) {
-      return bestContainment.resource;
-    }
-
-    // 4. Token overlap scoring across id, title, and URL domain/path
     const queryTokens = extractSourceMatchTokens(`${preferredId || ''} ${rawTitle || ''}`);
-    if (queryTokens.length > 0) {
-      let bestCandidate: HealingCandidate | null = null;
-      let bestScore = 0;
+    const rawRedirectToken = extractRedirectToken(mapped);
 
-      for (const c of healingCandidates) {
-        let score = 0;
-        for (const qt of queryTokens) {
-          if (c.tokens.has(qt)) {
-            score += 3;
-          } else if (qt.length >= 4 && c.searchableText.includes(qt)) {
-            score += 2;
-          } else if (qt.length >= 5) {
-            for (const ct of c.tokens) {
-              if (ct.length >= 4 && (qt.includes(ct) || ct.includes(qt))) {
-                score += 2;
-                break;
-              }
+    let bestCandidate: HealingCandidate | null = null;
+    let bestScore = 0;
+
+    for (const c of healingCandidates) {
+      let score = 0;
+
+      // 1. Exact or substring ID / slug match
+      if (slugId && (c.id === slugId || c.slug === slugId)) {
+        score += 100;
+      } else if (
+        titleSlug &&
+        titleSlug !== 'source' &&
+        (c.slug === titleSlug || c.id === titleSlug)
+      ) {
+        score += 90;
+      } else if (slugId.length >= 5) {
+        if (
+          (c.id.length >= 5 && (c.id.includes(slugId) || slugId.includes(c.id))) ||
+          (c.slug.length >= 5 && (c.slug.includes(slugId) || slugId.includes(c.slug)))
+        ) {
+          score += 45;
+        }
+      }
+
+      // 2. Normalized title match (weighted by title specificity so generic 1-word site titles like 'Lovdata' don't trump specific compound matches)
+      if (normTitle && c.normTitle) {
+        if (c.normTitle === normTitle) {
+          const wordCount = normTitle.split(/\s+/).length;
+          score += wordCount >= 2 || normTitle.length >= 12 ? 85 : 25;
+        } else if (
+          normTitle.length >= 5 &&
+          c.normTitle.length >= 5 &&
+          (c.normTitle.includes(normTitle) || normTitle.includes(c.normTitle))
+        ) {
+          const overlapLen = Math.min(normTitle.length, c.normTitle.length);
+          const overlapWords = Math.min(
+            normTitle.split(/\s+/).length,
+            c.normTitle.split(/\s+/).length
+          );
+          score += overlapWords >= 2 || overlapLen >= 12 ? Math.min(55, overlapLen * 2) : 6;
+        }
+      }
+
+      if (
+        normId.length >= 5 &&
+        c.normTitle.length >= 5 &&
+        (c.normTitle.includes(normId) || normId.includes(c.normTitle))
+      ) {
+        const overlapLen = Math.min(normId.length, c.normTitle.length);
+        score += overlapLen >= 8 ? Math.min(40, overlapLen * 2) : 8;
+      }
+
+      // 3. Token overlap scoring across id, title, and URL domain/path (supporting compound words)
+      for (const qt of queryTokens) {
+        if (c.tokens.has(qt)) {
+          score += qt.length >= 10 ? 18 : qt.length >= 6 ? 10 : 5;
+        } else if (qt.length >= 5) {
+          let matchedCompound = false;
+          for (const ct of c.tokens) {
+            if (ct.length >= 4 && (qt.includes(ct) || ct.includes(qt))) {
+              score += Math.min(qt.length, ct.length) >= 8 ? 14 : 8;
+              matchedCompound = true;
+              break;
             }
           }
-        }
-        if (score > bestScore) {
-          bestScore = score;
-          bestCandidate = c;
+          if (!matchedCompound && c.searchableText.includes(qt)) {
+            score += 4;
+          }
+        } else if (qt.length >= 4 && c.searchableText.includes(qt)) {
+          score += 3;
         }
       }
 
-      if (bestCandidate && bestScore >= 2) {
-        return bestCandidate.resource;
+      // 4. Base64 redirect token prefix similarity (when LLM truncated or slightly corrupted the redirect token)
+      if (rawRedirectToken.length >= 16 && c.redirectToken.length >= 16) {
+        let prefixLen = 0;
+        const maxLen = Math.min(rawRedirectToken.length, c.redirectToken.length);
+        while (prefixLen < maxLen && rawRedirectToken[prefixLen] === c.redirectToken[prefixLen]) {
+          prefixLen++;
+        }
+        if (prefixLen >= 18) {
+          score += Math.min(60, prefixLen);
+        }
       }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestCandidate = c;
+      }
+    }
+
+    if (bestCandidate && bestScore >= 6) {
+      return bestCandidate.resource;
     }
 
     // 5. Fallback if there is only a single unique resolved grounded URL
@@ -1957,9 +2016,16 @@ export async function cleanGroundingLinks(
     const resolvedUrl = isVertexRedirectUrl(initialResolved)
       ? healRedirectUrl(initialResolved, rawTitle, preferredId)
       : initialResolved;
-    if (resolvedUrl !== rawUrl && !isVertexRedirectUrl(resolvedUrl)) {
-      urlMap.set(rawUrl, resolvedUrl);
-      addHealingCandidate(resolvedUrl, rawTitle, preferredId);
+    if (!isVertexRedirectUrl(resolvedUrl)) {
+      if (resolvedUrl !== rawUrl) {
+        urlMap.set(rawUrl, resolvedUrl);
+      }
+      addHealingCandidate(
+        resolvedUrl,
+        rawTitle,
+        preferredId,
+        isVertexRedirectUrl(rawUrl) ? rawUrl : undefined
+      );
     }
 
     const cleanTitle = (rawTitle || '')
@@ -1990,6 +2056,24 @@ export async function cleanGroundingLinks(
         existing.title = cleanTitle;
       }
       return existing;
+    }
+
+    // If this newly resolved URL heals an already-registered unhealed frontmatter source, update it in place
+    if (!preferredId && !isVertexRedirectUrl(resolvedUrl)) {
+      for (const existing of orderedSources) {
+        if (isVertexRedirectUrl(existing.resource)) {
+          const healed = healRedirectUrl(existing.resource, existing.title, existing.id);
+          if (healed === resolvedUrl) {
+            sourcesByUrl.delete(existing.resource);
+            existing.resource = resolvedUrl;
+            sourcesByUrl.set(resolvedUrl, existing);
+            if (cleanTitle && (!existing.title || existing.title === existing.resource)) {
+              existing.title = cleanTitle;
+            }
+            return existing;
+          }
+        }
+      }
     }
 
     let fallbackLabel = cleanTitle;
@@ -2218,17 +2302,40 @@ export async function cleanGroundingLinks(
     }
   }
 
-  // Final healing pass on orderedSources in case body links introduced new candidate URLs
-  for (const entry of orderedSources) {
+  // Final healing and deduplication pass on orderedSources in case body links introduced new candidate URLs
+  for (let i = 0; i < orderedSources.length; i++) {
+    const entry = orderedSources[i];
     if (isVertexRedirectUrl(entry.resource)) {
       const healed = healRedirectUrl(entry.resource, entry.title, entry.id);
       if (healed && !isVertexRedirectUrl(healed)) {
         sourcesByUrl.delete(entry.resource);
         entry.resource = healed;
-        sourcesByUrl.set(healed, entry);
       }
     }
   }
+
+  const dedupedSources: OKFSource[] = [];
+  const canonicalByResource = new Map<string, OKFSource>();
+  for (const entry of orderedSources) {
+    const existingCanonical = canonicalByResource.get(entry.resource);
+    if (existingCanonical && existingCanonical !== entry) {
+      if (entry.title && (!existingCanonical.title || existingCanonical.title === existingCanonical.resource)) {
+        existingCanonical.title = entry.title;
+      }
+      if (entry.id && existingCanonical.id && entry.id !== existingCanonical.id) {
+        bodyText = bodyText.replaceAll(`[^${entry.id}]`, `[^${existingCanonical.id}]`);
+        existingFootnoteDefs.delete(entry.id);
+        sourcesById.set(entry.id, existingCanonical);
+      }
+    } else {
+      canonicalByResource.set(entry.resource, entry);
+      sourcesByUrl.set(entry.resource, entry);
+      dedupedSources.push(entry);
+    }
+  }
+  orderedSources.length = 0;
+  orderedSources.push(...dedupedSources);
+  bodyText = bodyText.replace(/(\[\^[A-Za-z0-9_\-]+\])\1+/g, '$1');
 
   // 7. Append OKF v0.2 footnote definitions (`[^id]: Title`) at the bottom of the body (SPEC.md §5.1)
   const citedFootnoteIds = Array.from(
@@ -2525,7 +2632,8 @@ export function mergeConceptDocuments(
     mergedFm.status = 'stable';
   }
 
-  // Preserve non-shrinking union of sources (`resource` | `url` | `path` | `id`)
+  // Preserve non-shrinking union of sources (`resource` | `url` | `path` | `id`),
+  // while healing existing unresolvable Vertex redirect URLs when a matching source provides a resolved URL
   const existingSources = Array.isArray(existing.frontmatter?.sources)
     ? existing.frontmatter.sources
     : [];
@@ -2549,6 +2657,40 @@ export function mergeConceptDocuments(
       }
       continue;
     }
+
+    const srcId = String(src.id || '').trim();
+    const srcNormTitle = normalizeSourceMatchKey(src.title);
+    const matchingExisting = mergedSources.find(
+      (s) =>
+        (srcId && s.id === srcId) ||
+        (srcNormTitle &&
+          srcNormTitle.length >= 6 &&
+          normalizeSourceMatchKey(s.title) === srcNormTitle)
+    );
+    if (matchingExisting) {
+      const existingLocator = String(
+        (matchingExisting as any).resource ||
+          (matchingExisting as any).url ||
+          (matchingExisting as any).path ||
+          ''
+      ).trim();
+      if (isVertexRedirectUrl(existingLocator) && !isVertexRedirectUrl(locator)) {
+        seenKeys.delete(existingLocator);
+        matchingExisting.resource = locator;
+        seenKeys.add(locator);
+        if (
+          src.title &&
+          (!matchingExisting.title || matchingExisting.title === existingLocator)
+        ) {
+          matchingExisting.title = src.title;
+        }
+        continue;
+      }
+      if (!isVertexRedirectUrl(existingLocator) && isVertexRedirectUrl(locator)) {
+        continue;
+      }
+    }
+
     seenKeys.add(locator);
     let id = src.id || 'source';
     let counter = 2;
@@ -2559,6 +2701,24 @@ export function mergeConceptDocuments(
     mergedSources.push({ ...src, id });
   }
   mergedFm.sources = mergedSources;
+
+  if (
+    typeof mergedFm.stale_after === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(mergedFm.stale_after.trim())
+  ) {
+    mergedFm.stale_after = `${mergedFm.stale_after.trim()}T00:00:00Z`;
+  }
+  if (
+    mergedFm.generated &&
+    typeof mergedFm.generated === 'object' &&
+    typeof mergedFm.generated.at === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(mergedFm.generated.at.trim())
+  ) {
+    mergedFm.generated = {
+      ...mergedFm.generated,
+      at: `${mergedFm.generated.at.trim()}T00:00:00Z`,
+    };
+  }
 
   // Preserve union of tags
   const existingTags = Array.isArray(existing.frontmatter?.tags) ? existing.frontmatter.tags : [];
@@ -3490,6 +3650,23 @@ export function verifyOkfConcept(
   if (!doc.frontmatter.type) {
     doc.frontmatter.type = 'Research Concept';
   }
+  if (
+    typeof doc.frontmatter.stale_after === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(doc.frontmatter.stale_after.trim())
+  ) {
+    doc.frontmatter.stale_after = `${doc.frontmatter.stale_after.trim()}T00:00:00Z`;
+  }
+  if (
+    doc.frontmatter.generated &&
+    typeof doc.frontmatter.generated === 'object' &&
+    typeof doc.frontmatter.generated.at === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(doc.frontmatter.generated.at.trim())
+  ) {
+    doc.frontmatter.generated = {
+      ...doc.frontmatter.generated,
+      at: `${doc.frontmatter.generated.at.trim()}T00:00:00Z`,
+    };
+  }
 
   const existingVerified = normalizeVerified(doc.frontmatter);
   existingVerified.push({ by: actor, at: atIso });
@@ -3600,11 +3777,14 @@ export function sanitizeSpokenScript(text: string): string {
       '$1'
     )
     .replace(/\[\^[A-Za-z0-9_\-]+\]:\s*.*$/gm, '')
+    .replace(/\s*\(\s*(?:\[\^[A-Za-z0-9_\-]+\][\s,;]*)+\)/g, '')
     .replace(/\[\^[A-Za-z0-9_\-]+\]/g, '')
     .replace(/\s*\(\s*(?:https?:\/\/|verified-source:)[^\s)]+\s*\)/g, '')
     .replace(/(?:https?:\/\/|verified-source:)\S+/g, '')
+    .replace(/\s*\(\s*[,;:\s]*\)/g, '')
     .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\s+([.,;!?])/g, '$1')
+    .replace(/[ \t]+([.,;!?])/g, '$1')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
