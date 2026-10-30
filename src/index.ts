@@ -765,14 +765,46 @@ async function executeWithRetryAndFallback(
   }
 }
 
-// Helper function to extract the destination URL from Vertex AI Search grounding 302 redirects
+export function parseValidIsoTimestamp(val: any): string | undefined {
+  if (val === undefined || val === null || typeof val === 'boolean') return undefined;
+  const s = String(val).trim();
+  if (!s) return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const ms = Date.parse(`${s}T00:00:00Z`);
+    if (Number.isNaN(ms)) return undefined;
+    return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  }
+  const isoCandidate = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(s)
+    ? `${s.replace(' ', 'T')}Z`
+    : s;
+  const ms = Date.parse(isoCandidate);
+  if (Number.isNaN(ms)) return undefined;
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+export function parseHttpLastModified(headerVal?: string | null): string | undefined {
+  if (!headerVal || typeof headerVal !== 'string') return undefined;
+  return parseValidIsoTimestamp(headerVal);
+}
+
+function normalizeIsoTimestamp(val: any): string {
+  const s = String(val ?? '').trim();
+  if (!s) return '';
+  return parseValidIsoTimestamp(s) || s;
+}
+
+// Helper function to extract the destination URL (and opportunistic Last-Modified header) from Vertex AI Search grounding 302 redirects.
 // Uses `redirect: 'manual'` first so we read Google's `Location` header directly in ~100ms without
 // failing or timing out when a third-party destination server is unreachable.
-async function resolveRedirect(url: string): Promise<string> {
+async function resolveRedirect(
+  url: string
+): Promise<{ url: string; lastModified?: string }> {
   const headers = {
     'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   };
+  const isNonErrorStatus = (res: any): boolean =>
+    res?.status === undefined || (typeof res.status === 'number' && res.status >= 200 && res.status < 400);
 
   try {
     const manualRes = await globalThis.fetch(url, {
@@ -782,9 +814,31 @@ async function resolveRedirect(url: string): Promise<string> {
       headers,
     });
     await manualRes.body?.cancel().catch(() => {});
-    const location = manualRes.headers.get('location');
+    let lastModified = isNonErrorStatus(manualRes)
+      ? parseHttpLastModified(manualRes.headers?.get?.('last-modified'))
+      : undefined;
+    const location = manualRes.headers?.get?.('location');
     if (location && /^https?:\/\//i.test(location)) {
-      return location;
+      if (!lastModified) {
+        try {
+          const headRes = await globalThis.fetch(location, {
+            method: 'HEAD',
+            redirect: 'follow',
+            signal: AbortSignal.timeout(1500),
+            headers,
+          });
+          await headRes?.body?.cancel().catch(() => {});
+          if (isNonErrorStatus(headRes)) {
+            lastModified = parseHttpLastModified(headRes?.headers?.get?.('last-modified'));
+          }
+        } catch {
+          // Ignore unreachable third-party servers or unsupported HEAD checks
+        }
+      }
+      return { url: location, lastModified };
+    }
+    if (lastModified) {
+      return { url: manualRes.url || url, lastModified };
     }
   } catch {
     // Fall through to follow mode if manual hop check fails
@@ -798,9 +852,12 @@ async function resolveRedirect(url: string): Promise<string> {
       headers,
     });
     await followRes.body?.cancel().catch(() => {});
-    return followRes.url || url;
+    const lastModified = isNonErrorStatus(followRes)
+      ? parseHttpLastModified(followRes.headers?.get?.('last-modified'))
+      : undefined;
+    return { url: followRes.url || url, lastModified };
   } catch {
-    return url;
+    return { url };
   }
 }
 
@@ -815,9 +872,10 @@ export interface OKFSource {
   id?: string;
   resource: string;
   title?: string;
+  retrieved_at?: string;
+  last_modified?: string;
   author?: string;
   usage_count?: number;
-  last_modified?: string;
   usage_window?: { from: string; to: string };
 }
 
@@ -866,6 +924,17 @@ const PREFERRED_OKF_KEY_ORDER = [
   'verified',
   'stale_after',
   'sources',
+  'usage_window',
+];
+
+const PREFERRED_OKF_SOURCE_KEY_ORDER = [
+  'id',
+  'resource',
+  'title',
+  'retrieved_at',
+  'last_modified',
+  'author',
+  'usage_count',
   'usage_window',
 ];
 
@@ -1364,7 +1433,12 @@ function serializeYamlKeyValue(key: string, val: any, indent: string = ''): stri
     if (key === 'okf_version') {
       return [`${indent}${key}: "${String(val).replace(/"/g, '')}"`];
     }
-    return [`${indent}${key}: ${formatYamlScalar(val)}`];
+    const normalizedScalar =
+      typeof val === 'string' &&
+      (key === 'retrieved_at' || key === 'last_modified' || key === 'stale_after' || key === 'at')
+        ? normalizeIsoTimestamp(val)
+        : val;
+    return [`${indent}${key}: ${formatYamlScalar(normalizedScalar)}`];
   }
 
   if (Array.isArray(val)) {
@@ -1380,7 +1454,14 @@ function serializeYamlKeyValue(key: string, val: any, indent: string = ''): stri
     const lines = [`${indent}${key}:`];
     for (const item of val) {
       if (item && typeof item === 'object' && !Array.isArray(item)) {
-        const keys = Object.keys(item).filter((k) => item[k] !== undefined);
+        const rawKeys = Object.keys(item).filter((k) => item[k] !== undefined);
+        const keys =
+          key === 'sources'
+            ? [
+                ...PREFERRED_OKF_SOURCE_KEY_ORDER.filter((k) => rawKeys.includes(k)),
+                ...rawKeys.filter((k) => !PREFERRED_OKF_SOURCE_KEY_ORDER.includes(k)),
+              ]
+            : rawKeys;
         // Compact inline mapping for { by, at } or { name, type, required }
         if (
           keys.length <= 3 &&
@@ -1393,12 +1474,26 @@ function serializeYamlKeyValue(key: string, val: any, indent: string = ''): stri
                 typeof item[k] === 'boolean')
           )
         ) {
-          const pairs = keys.map((k) => `${k}: ${formatYamlScalar(item[k], true)}`).join(', ');
+          const pairs = keys
+            .map((k) => {
+              const rawItemVal = item[k];
+              const normItemVal =
+                typeof rawItemVal === 'string' && (k === 'at' || k === 'from' || k === 'to')
+                  ? normalizeIsoTimestamp(rawItemVal)
+                  : rawItemVal;
+              return `${k}: ${formatYamlScalar(normItemVal, true)}`;
+            })
+            .join(', ');
           lines.push(`${indent}  - { ${pairs} }`);
         } else {
           keys.forEach((k, idx) => {
             const prefix = idx === 0 ? `${indent}  - ` : `${indent}    `;
-            const v = item[k];
+            const rawV = item[k];
+            const v =
+              typeof rawV === 'string' &&
+              (k === 'retrieved_at' || k === 'last_modified' || k === 'stale_after' || k === 'at')
+                ? normalizeIsoTimestamp(rawV)
+                : rawV;
             if (Array.isArray(v)) {
               const vScalars = v.every(
                 (sub) =>
@@ -1432,7 +1527,13 @@ function serializeYamlKeyValue(key: string, val: any, indent: string = ''): stri
                 lines.push(`${prefix}${k}: {}`);
               } else if (allSubScalars && subEntries.length <= 4) {
                 const subPairs = subEntries
-                  .map(([sk, sv]) => `${sk}: ${formatYamlScalar(sv, true)}`)
+                  .map(([sk, sv]) => {
+                    const normSv =
+                      typeof sv === 'string' && (sk === 'at' || sk === 'from' || sk === 'to')
+                        ? normalizeIsoTimestamp(sv)
+                        : sv;
+                    return `${sk}: ${formatYamlScalar(normSv, true)}`;
+                  })
                   .join(', ');
                 lines.push(`${prefix}${k}: { ${subPairs} }`);
               } else {
@@ -1465,7 +1566,15 @@ function serializeYamlKeyValue(key: string, val: any, indent: string = ''): stri
         (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
     );
     if (isCompactActorOrWindow) {
-      const pairs = entries.map(([k, v]) => `${k}: ${formatYamlScalar(v, true)}`).join(', ');
+      const pairs = entries
+        .map(([k, v]) => {
+          const normV =
+            typeof v === 'string' && (k === 'at' || k === 'from' || k === 'to')
+              ? normalizeIsoTimestamp(v)
+              : v;
+          return `${k}: ${formatYamlScalar(normV, true)}`;
+        })
+        .join(', ');
       return [`${indent}${key}: { ${pairs} }`];
     }
     const lines = [`${indent}${key}:`];
@@ -1692,6 +1801,8 @@ function collectExistingBundleSources(bundleRoot: string): OKFSource[] {
                   id: s.id ? String(s.id) : undefined,
                   resource: s.resource.trim(),
                   title: s.title ? String(s.title) : undefined,
+                  retrieved_at: parseValidIsoTimestamp(s.retrieved_at),
+                  last_modified: parseValidIsoTimestamp(s.last_modified),
                 });
               }
             }
@@ -1723,7 +1834,7 @@ export interface CleanGroundingOptions {
 /**
  * Parses markdown text and Interactions API grounding steps, resolves Vertex redirect URLs,
  * weaves inline `url_citation` annotations at their UTF-8 byte offsets as OKF v0.2 `[^id]` footnotes,
- * lifts all external sources into YAML frontmatter (`sources: [{ id, resource, title }]`),
+ * lifts all external sources into YAML frontmatter (`sources: [{ id, resource, title, retrieved_at }]`),
  * and formats a complete OKF v0.2 Concept Document (`SPEC.md` §4 & §5).
  */
 export async function cleanGroundingLinks(
@@ -1731,6 +1842,10 @@ export async function cleanGroundingLinks(
   steps?: any[],
   options?: CleanGroundingOptions
 ): Promise<string> {
+  const nowIso =
+    parseValidIsoTimestamp(options?.generatedAt) ||
+    new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
   const redirectRegex =
     /https:\/\/vertexaisearch\.cloud\.google\.com\/grounding-api-redirect\/[a-zA-Z0-9_\-\+=%]+/g;
   const textMatches = text.match(redirectRegex) || [];
@@ -1785,6 +1900,18 @@ export async function cleanGroundingLinks(
   );
 
   const urlMap = new Map<string, string>();
+  const lastModifiedMap = new Map<string, string>();
+  const freshlyGroundedUrls = new Set<string>();
+  for (const gs of groundedSources) {
+    if (gs.url) freshlyGroundedUrls.add(gs.url.trim());
+  }
+  for (const ann of inlineAnnotations) {
+    if (ann.url) freshlyGroundedUrls.add(ann.url.trim());
+  }
+  for (const rUrl of allRedirectUrls) {
+    if (rUrl) freshlyGroundedUrls.add(rUrl.trim());
+  }
+
   if (allRedirectUrls.length > 0) {
     console.log(
       `Found ${allRedirectUrls.length} Vertex grounding redirects. Resolving to raw URLs...`
@@ -1796,7 +1923,15 @@ export async function cleanGroundingLinks(
       })
     );
     for (const { original, resolved } of resolutions) {
-      urlMap.set(original, resolved || original);
+      const finalUrl = (resolved?.url || original).trim();
+      urlMap.set(original, finalUrl);
+      if (!isVertexRedirectUrl(finalUrl)) {
+        freshlyGroundedUrls.add(finalUrl);
+      }
+      if (resolved?.lastModified) {
+        lastModifiedMap.set(original, resolved.lastModified);
+        lastModifiedMap.set(finalUrl, resolved.lastModified);
+      }
     }
   }
 
@@ -1880,6 +2015,9 @@ export async function cleanGroundingLinks(
     options?.bundleRoot || path.join(options?.workspaceRoot || './workspace', 'bundle');
   for (const bs of collectExistingBundleSources(bundleRootDir)) {
     addHealingCandidate(bs.resource, bs.title, bs.id);
+    if (bs.last_modified && !lastModifiedMap.has(bs.resource)) {
+      lastModifiedMap.set(bs.resource, bs.last_modified);
+    }
   }
 
   const healRedirectUrl = (rawUrl: string, rawTitle?: string, preferredId?: string): string => {
@@ -2010,7 +2148,8 @@ export async function cleanGroundingLinks(
     rawUrl: string,
     rawTitle?: string,
     preferredId?: string,
-    extra?: Partial<OKFSource>
+    extra?: Partial<OKFSource>,
+    freshlyGrounded: boolean = false
   ): OKFSource => {
     const initialResolved = (urlMap.get(rawUrl) || rawUrl).trim();
     const resolvedUrl = isVertexRedirectUrl(initialResolved)
@@ -2033,6 +2172,18 @@ export async function cleanGroundingLinks(
       .replace(/^\*\*|\*\*$/g, '')
       .trim();
 
+    const detectedLastModified =
+      lastModifiedMap.get(resolvedUrl) ||
+      lastModifiedMap.get(rawUrl) ||
+      parseValidIsoTimestamp(extra?.last_modified);
+    const extraRetrievedAt = parseValidIsoTimestamp(extra?.retrieved_at);
+    const wasHealedFromRedirect = isVertexRedirectUrl(rawUrl) && !isVertexRedirectUrl(resolvedUrl);
+    const isFresh =
+      freshlyGrounded ||
+      wasHealedFromRedirect ||
+      freshlyGroundedUrls.has(rawUrl.trim()) ||
+      freshlyGroundedUrls.has(resolvedUrl);
+
     if (preferredId && sourcesById.has(preferredId)) {
       const existingById = sourcesById.get(preferredId)!;
       if (
@@ -2043,9 +2194,20 @@ export async function cleanGroundingLinks(
         sourcesByUrl.delete(existingById.resource);
         existingById.resource = resolvedUrl;
         sourcesByUrl.set(resolvedUrl, existingById);
+        existingById.retrieved_at = nowIso;
       }
       if (cleanTitle && (!existingById.title || existingById.title === existingById.resource)) {
         existingById.title = cleanTitle;
+      }
+      if (isFresh) {
+        existingById.retrieved_at = nowIso;
+      } else if (extraRetrievedAt && !existingById.retrieved_at) {
+        existingById.retrieved_at = extraRetrievedAt;
+      } else if (!existingById.retrieved_at) {
+        existingById.retrieved_at = nowIso;
+      }
+      if (detectedLastModified && !existingById.last_modified) {
+        existingById.last_modified = detectedLastModified;
       }
       return existingById;
     }
@@ -2054,6 +2216,16 @@ export async function cleanGroundingLinks(
       const existing = sourcesByUrl.get(resolvedUrl)!;
       if (cleanTitle && (!existing.title || existing.title === existing.resource)) {
         existing.title = cleanTitle;
+      }
+      if (isFresh) {
+        existing.retrieved_at = nowIso;
+      } else if (extraRetrievedAt && !existing.retrieved_at) {
+        existing.retrieved_at = extraRetrievedAt;
+      } else if (!existing.retrieved_at) {
+        existing.retrieved_at = nowIso;
+      }
+      if (detectedLastModified && !existing.last_modified) {
+        existing.last_modified = detectedLastModified;
       }
       return existing;
     }
@@ -2069,6 +2241,10 @@ export async function cleanGroundingLinks(
             sourcesByUrl.set(resolvedUrl, existing);
             if (cleanTitle && (!existing.title || existing.title === existing.resource)) {
               existing.title = cleanTitle;
+            }
+            existing.retrieved_at = nowIso;
+            if (detectedLastModified && !existing.last_modified) {
+              existing.last_modified = detectedLastModified;
             }
             return existing;
           }
@@ -2092,12 +2268,19 @@ export async function cleanGroundingLinks(
       id = generateSourceSlugId(fallbackLabel, resolvedUrl, usedIds);
     }
 
+    const validExtraLm = parseValidIsoTimestamp(extra?.last_modified);
+    const finalLm = detectedLastModified || validExtraLm;
     const entry: OKFSource = {
       id,
       resource: resolvedUrl,
       title: cleanTitle || fallbackLabel,
       ...extra,
+      retrieved_at: isFresh ? nowIso : extraRetrievedAt || nowIso,
+      ...(finalLm ? { last_modified: finalLm } : {}),
     };
+    if (!finalLm && 'last_modified' in entry) {
+      delete entry.last_modified;
+    }
     sourcesByUrl.set(resolvedUrl, entry);
     sourcesById.set(id, entry);
     orderedSources.push(entry);
@@ -2132,7 +2315,7 @@ export async function cleanGroundingLinks(
     const byEndIndex = new Map<number, OKFSource[]>();
     for (const ann of inlineAnnotations) {
       if (ann.end_index > buf.length || ann.end_index <= frontmatterEndByteOffset) continue;
-      const srcEntry = registerSource(ann.url, ann.title);
+      const srcEntry = registerSource(ann.url, ann.title, undefined, undefined, true);
       if (!byEndIndex.has(ann.end_index)) {
         byEndIndex.set(ann.end_index, []);
       }
@@ -2298,7 +2481,7 @@ export async function cleanGroundingLinks(
   for (const src of groundedSources) {
     const candidateResolved = (urlMap.get(src.url) || src.url).trim();
     if (!isVertexRedirectUrl(candidateResolved) || orderedSources.length === 0) {
-      registerSource(src.url, src.title);
+      registerSource(src.url, src.title, undefined, undefined, true);
     }
   }
 
@@ -2310,6 +2493,11 @@ export async function cleanGroundingLinks(
       if (healed && !isVertexRedirectUrl(healed)) {
         sourcesByUrl.delete(entry.resource);
         entry.resource = healed;
+        entry.retrieved_at = nowIso;
+        const healedLm = lastModifiedMap.get(healed);
+        if (healedLm && !entry.last_modified) {
+          entry.last_modified = healedLm;
+        }
       }
     }
   }
@@ -2321,6 +2509,12 @@ export async function cleanGroundingLinks(
     if (existingCanonical && existingCanonical !== entry) {
       if (entry.title && (!existingCanonical.title || existingCanonical.title === existingCanonical.resource)) {
         existingCanonical.title = entry.title;
+      }
+      if (entry.retrieved_at === nowIso || !existingCanonical.retrieved_at) {
+        existingCanonical.retrieved_at = entry.retrieved_at || nowIso;
+      }
+      if (entry.last_modified && !existingCanonical.last_modified) {
+        existingCanonical.last_modified = entry.last_modified;
       }
       if (entry.id && existingCanonical.id && entry.id !== existingCanonical.id) {
         bodyText = bodyText.replaceAll(`[^${entry.id}]`, `[^${existingCanonical.id}]`);
@@ -2416,17 +2610,16 @@ export async function cleanGroundingLinks(
     fm.status = options?.status || 'draft';
   }
 
-  const nowIso =
-    options?.generatedAt || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const existingGen =
     fm.generated && typeof fm.generated === 'object' ? fm.generated : ({} as OKFActorEvent);
   const rawGenAt = String(existingGen.at || nowIso).trim();
+  const finalGenAt = parseValidIsoTimestamp(rawGenAt) || nowIso;
   fm.generated = {
     by:
       existingGen.by ||
       options?.generatedBy ||
       `icm-stage1/${options?.model || GEMINI_4_ARGON_MODEL}`,
-    at: /^\d{4}-\d{2}-\d{2}$/.test(rawGenAt) ? `${rawGenAt}T00:00:00Z` : rawGenAt,
+    at: finalGenAt,
   };
 
   if (!fm.stale_after) {
@@ -2439,10 +2632,19 @@ export async function cleanGroundingLinks(
       fm.stale_after = staleDate.toISOString().replace(/\.\d{3}Z$/, 'Z');
     }
   }
-  if (typeof fm.stale_after === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(fm.stale_after.trim())) {
-    fm.stale_after = `${fm.stale_after.trim()}T00:00:00Z`;
+  if (typeof fm.stale_after === 'string') {
+    fm.stale_after = normalizeIsoTimestamp(fm.stale_after);
   }
 
+  for (const s of orderedSources) {
+    s.retrieved_at = parseValidIsoTimestamp(s.retrieved_at) || finalGenAt;
+    const validLm = parseValidIsoTimestamp(s.last_modified);
+    if (validLm) {
+      s.last_modified = validLm;
+    } else {
+      delete s.last_modified;
+    }
+  }
   fm.sources = orderedSources;
 
   return serializeOkfDocument({
@@ -2632,6 +2834,16 @@ export function mergeConceptDocuments(
     mergedFm.status = 'stable';
   }
 
+  const existingGenAt =
+    existing.frontmatter?.generated && typeof existing.frontmatter.generated === 'object'
+      ? parseValidIsoTimestamp(existing.frontmatter.generated.at)
+      : undefined;
+  const incomingGenAt =
+    incoming.frontmatter?.generated && typeof incoming.frontmatter.generated === 'object'
+      ? parseValidIsoTimestamp(incoming.frontmatter.generated.at)
+      : undefined;
+  const fallbackGenAt = incomingGenAt || existingGenAt;
+
   // Preserve non-shrinking union of sources (`resource` | `url` | `path` | `id`),
   // while healing existing unresolvable Vertex redirect URLs when a matching source provides a resolved URL
   const existingSources = Array.isArray(existing.frontmatter?.sources)
@@ -2643,17 +2855,91 @@ export function mergeConceptDocuments(
   const mergedSources: OKFSource[] = [];
   const seenKeys = new Set<string>();
   const seenIds = new Set<string>();
+  const getSourceLocator = (s: any): string =>
+    String(s?.resource || s?.url || s?.path || s?.id || '').trim();
 
-  for (const src of [...existingSources, ...incomingSources]) {
+  const updateMergedSourceMetadata = (
+    target: OKFSource,
+    incomingSrc: OKFSource,
+    wasHealed: boolean = false
+  ) => {
+    const cleanIncomingTitle = typeof incomingSrc.title === 'string' ? incomingSrc.title.trim() : '';
+    if (
+      cleanIncomingTitle &&
+      (!target.title ||
+        !target.title.trim() ||
+        target.title.trim() === String(target.resource || '').trim())
+    ) {
+      target.title = cleanIncomingTitle;
+    }
+    const incRetrievedAt = parseValidIsoTimestamp(incomingSrc.retrieved_at);
+    const targetRetrievedAt = parseValidIsoTimestamp(target.retrieved_at);
+    if (incRetrievedAt) {
+      if (!targetRetrievedAt) {
+        target.retrieved_at = incRetrievedAt;
+      } else {
+        const targetMs = Date.parse(targetRetrievedAt);
+        const incMs = Date.parse(incRetrievedAt);
+        if (!Number.isNaN(incMs) && (Number.isNaN(targetMs) || incMs >= targetMs)) {
+          target.retrieved_at = incRetrievedAt;
+        } else {
+          target.retrieved_at = targetRetrievedAt;
+        }
+      }
+    } else if (wasHealed && (incomingGenAt || fallbackGenAt)) {
+      target.retrieved_at = incomingGenAt || fallbackGenAt;
+    } else if (targetRetrievedAt) {
+      target.retrieved_at = targetRetrievedAt;
+    } else if (existingGenAt || fallbackGenAt) {
+      target.retrieved_at = existingGenAt || fallbackGenAt;
+    } else if ('retrieved_at' in target) {
+      delete target.retrieved_at;
+    }
+
+    const incLastModified = parseValidIsoTimestamp(incomingSrc.last_modified);
+    const targetLastModified = parseValidIsoTimestamp(target.last_modified);
+    if (incLastModified) {
+      if (!targetLastModified) {
+        target.last_modified = incLastModified;
+      } else {
+        const targetLmMs = Date.parse(targetLastModified);
+        const incLmMs = Date.parse(incLastModified);
+        if (!Number.isNaN(incLmMs) && (Number.isNaN(targetLmMs) || incLmMs >= targetLmMs)) {
+          target.last_modified = incLastModified;
+        } else {
+          target.last_modified = targetLastModified;
+        }
+      }
+    } else if (targetLastModified) {
+      target.last_modified = targetLastModified;
+    } else if ('last_modified' in target) {
+      delete target.last_modified;
+    }
+
+    if (incomingSrc.author && !target.author) {
+      target.author = incomingSrc.author;
+    }
+    if (incomingSrc.usage_count !== undefined) {
+      target.usage_count = incomingSrc.usage_count;
+    }
+    if (incomingSrc.usage_window && !target.usage_window) {
+      target.usage_window = incomingSrc.usage_window;
+    }
+  };
+
+  const taggedSources: Array<{ src: OKFSource; isIncoming: boolean }> = [
+    ...existingSources.map((src) => ({ src, isIncoming: false })),
+    ...incomingSources.map((src) => ({ src, isIncoming: true })),
+  ];
+
+  for (const { src, isIncoming } of taggedSources) {
     if (!src || typeof src !== 'object') continue;
-    const locator = String((src as any).resource || (src as any).url || (src as any).path || src.id || '').trim();
+    const locator = getSourceLocator(src);
     if (!locator) continue;
     if (seenKeys.has(locator)) {
-      const target = mergedSources.find(
-        (s) => ((s as any).resource || (s as any).url || (s as any).path || s.id) === locator
-      );
-      if (target && src.title && (!target.title || target.title === target.resource)) {
-        target.title = src.title;
+      const target = mergedSources.find((s) => getSourceLocator(s) === locator);
+      if (target) {
+        updateMergedSourceMetadata(target, src, false);
       }
       continue;
     }
@@ -2682,11 +2968,13 @@ export function mergeConceptDocuments(
           src.title &&
           (!matchingExisting.title || matchingExisting.title === existingLocator)
         ) {
-          matchingExisting.title = src.title;
+          matchingExisting.title = src.title.trim();
         }
+        updateMergedSourceMetadata(matchingExisting, src, true);
         continue;
       }
       if (!isVertexRedirectUrl(existingLocator) && isVertexRedirectUrl(locator)) {
+        updateMergedSourceMetadata(matchingExisting, src, false);
         continue;
       }
     }
@@ -2698,25 +2986,41 @@ export function mergeConceptDocuments(
       id = `${src.id || 'source'}-${counter++}`;
     }
     seenIds.add(id);
-    mergedSources.push({ ...src, id });
+
+    const normalizedRetrievedAt =
+      parseValidIsoTimestamp(src.retrieved_at) ||
+      (isIncoming ? incomingGenAt || fallbackGenAt : existingGenAt || fallbackGenAt);
+    const normalizedLastModified = parseValidIsoTimestamp(src.last_modified);
+
+    const mergedEntry: OKFSource = {
+      ...src,
+      ...(typeof src.resource === 'string' ? { resource: src.resource.trim() } : {}),
+      ...(typeof src.title === 'string' ? { title: src.title.trim() } : {}),
+      id,
+      ...(normalizedRetrievedAt ? { retrieved_at: normalizedRetrievedAt } : {}),
+      ...(normalizedLastModified ? { last_modified: normalizedLastModified } : {}),
+    };
+    if (!normalizedRetrievedAt && 'retrieved_at' in mergedEntry) {
+      delete mergedEntry.retrieved_at;
+    }
+    if (!normalizedLastModified && 'last_modified' in mergedEntry) {
+      delete mergedEntry.last_modified;
+    }
+    mergedSources.push(mergedEntry);
   }
   mergedFm.sources = mergedSources;
 
-  if (
-    typeof mergedFm.stale_after === 'string' &&
-    /^\d{4}-\d{2}-\d{2}$/.test(mergedFm.stale_after.trim())
-  ) {
-    mergedFm.stale_after = `${mergedFm.stale_after.trim()}T00:00:00Z`;
+  if (typeof mergedFm.stale_after === 'string') {
+    mergedFm.stale_after = normalizeIsoTimestamp(mergedFm.stale_after);
   }
   if (
     mergedFm.generated &&
     typeof mergedFm.generated === 'object' &&
-    typeof mergedFm.generated.at === 'string' &&
-    /^\d{4}-\d{2}-\d{2}$/.test(mergedFm.generated.at.trim())
+    typeof mergedFm.generated.at === 'string'
   ) {
     mergedFm.generated = {
       ...mergedFm.generated,
-      at: `${mergedFm.generated.at.trim()}T00:00:00Z`,
+      at: normalizeIsoTimestamp(mergedFm.generated.at),
     };
   }
 
@@ -2852,6 +3156,26 @@ export function writeBundleConcept(
       by: options?.actor || `icm/${GEMINI_4_ARGON_MODEL}`,
       at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     };
+  }
+
+  if (Array.isArray(docToWrite.frontmatter.sources)) {
+    const genAtFallback =
+      parseValidIsoTimestamp(docToWrite.frontmatter.generated?.at) ||
+      new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    docToWrite.frontmatter.sources = docToWrite.frontmatter.sources.map((s) => {
+      if (!s || typeof s !== 'object') return s;
+      const validRetrieved = parseValidIsoTimestamp(s.retrieved_at) || genAtFallback;
+      const validLm = parseValidIsoTimestamp(s.last_modified);
+      const nextSrc: OKFSource = {
+        ...s,
+        retrieved_at: validRetrieved,
+        ...(validLm ? { last_modified: validLm } : {}),
+      };
+      if (!validLm && 'last_modified' in nextSrc) {
+        delete nextSrc.last_modified;
+      }
+      return nextSrc;
+    });
   }
 
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
@@ -3821,9 +4145,10 @@ function formatResearchForStage2Prompt(doc: OKFDocument, rawText: string): strin
       id: s.id,
       resource: s.title ? `verified-source:${s.id || 'ref'}` : s.resource,
       title: s.title || s.id || 'Verified Source',
+      ...(s.retrieved_at ? { retrieved_at: s.retrieved_at } : {}),
+      ...(s.last_modified ? { last_modified: s.last_modified } : {}),
       ...(s.author ? { author: s.author } : {}),
       ...(s.usage_count !== undefined ? { usage_count: s.usage_count } : {}),
-      ...(s.last_modified ? { last_modified: s.last_modified } : {}),
       ...(s.usage_window ? { usage_window: s.usage_window } : {}),
     }));
   }
@@ -4280,12 +4605,29 @@ export function walkBundleConcepts(bundleRoot: string): OKFConceptNode[] {
     const rawTags = fm.tags || [];
     const tags = Array.isArray(rawTags) ? rawTags.map(String) : [String(rawTags)];
     const generated = fm.generated && typeof fm.generated === 'object' ? fm.generated : {};
+    const genAtFallback = parseValidIsoTimestamp((generated as any)?.at);
     const rawSources = fm.sources;
-    const sources: OKFSource[] = Array.isArray(rawSources)
+    const rawSourcesList: OKFSource[] = Array.isArray(rawSources)
       ? rawSources.filter((s) => s && typeof s === 'object')
       : rawSources && typeof rawSources === 'object'
         ? [rawSources as OKFSource]
         : [];
+    const sources: OKFSource[] = rawSourcesList.map((s) => {
+      const validRetrieved = parseValidIsoTimestamp(s.retrieved_at) || genAtFallback;
+      const validLm = parseValidIsoTimestamp(s.last_modified);
+      const nextSrc: OKFSource = {
+        ...s,
+        ...(validRetrieved ? { retrieved_at: validRetrieved } : {}),
+        ...(validLm ? { last_modified: validLm } : {}),
+      };
+      if (!validRetrieved && 'retrieved_at' in nextSrc) {
+        delete nextSrc.retrieved_at;
+      }
+      if (!validLm && 'last_modified' in nextSrc) {
+        delete nextSrc.last_modified;
+      }
+      return nextSrc;
+    });
 
     concepts.push({
       id: conceptId,
@@ -4409,7 +4751,19 @@ dl.frontmatter a { color: #2563eb; word-break: break-all; }
 .badge.stale { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
 .badge.fresh { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
 .sources-list { padding-left: 18px; margin: 0; }
-.sources-list li { margin: 1px 0; }
+.sources-list li { margin: 2px 0; }
+.src-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  vertical-align: middle;
+  border: 1px solid transparent;
+}
+.src-badge.retrieved { background: #f1f5f9; color: #475569; border-color: #e2e8f0; }
+.src-badge.modified { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
 hr { border: none; border-top: 1px solid #e2e8f0; margin: 14px 0; }
 #detail-body { font-size: 13px; line-height: 1.55; }
 #detail-body h1 { font-size: 16px; margin: 18px 0 6px; padding-bottom: 4px; border-bottom: 1px solid #e2e8f0; }
@@ -4624,24 +4978,98 @@ const OKF_VIZ_JS = `
     return relResolved;
   }
 
+  function formatSourceDateShort(isoStr) {
+    if (!isoStr) return "";
+    const s = String(isoStr).trim();
+    const m = s.match(/^(\\d{4}-\\d{2}-\\d{2})/);
+    return m ? m[1] : s;
+  }
+
+  function escapeHtmlAttr(str) {
+    return String(str || "")
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  }
+
+  function renderSourceBadgesHtml(src) {
+    if (!src) return "";
+    let out = "";
+    if (src.retrieved_at) {
+      const shortDate = formatSourceDateShort(src.retrieved_at);
+      out +=
+        ' <span class="src-badge retrieved" title="Retrieved at ' +
+        escapeHtmlAttr(src.retrieved_at) +
+        '">retrieved ' +
+        escapeHtmlAttr(shortDate) +
+        "</span>";
+    }
+    if (src.last_modified) {
+      const shortMod = formatSourceDateShort(src.last_modified);
+      out +=
+        ' <span class="src-badge modified" title="Last-Modified ' +
+        escapeHtmlAttr(src.last_modified) +
+        '">last_modified ' +
+        escapeHtmlAttr(shortMod) +
+        "</span>";
+    }
+    return out;
+  }
+
+  function appendSourceBadges(container, src) {
+    if (!src) return;
+    if (src.retrieved_at) {
+      const b = document.createElement("span");
+      b.className = "src-badge retrieved";
+      b.title = "Retrieved at " + src.retrieved_at;
+      b.textContent = "retrieved " + formatSourceDateShort(src.retrieved_at);
+      container.appendChild(document.createTextNode(" "));
+      container.appendChild(b);
+    }
+    if (src.last_modified) {
+      const b = document.createElement("span");
+      b.className = "src-badge modified";
+      b.title = "Last-Modified " + src.last_modified;
+      b.textContent = "last_modified " + formatSourceDateShort(src.last_modified);
+      container.appendChild(document.createTextNode(" "));
+      container.appendChild(b);
+    }
+  }
+
   function renderMarkdownWithOkfFootnotes(rawBody, sources) {
     const srcById = {};
     for (const s of sources || []) {
       if (s && s.id) srcById[s.id] = s;
     }
     const fnDefs = [];
+    const seenFnIds = {};
     const bodyLines = [];
     for (const line of String(rawBody || "").split(/\\r?\\n/)) {
       const m = line.trim().match(/^\\[\\^([A-Za-z0-9_\\-]+)\\]:\\s*(.+)$/);
       if (m) {
+        seenFnIds[m[1]] = true;
         fnDefs.push({ id: m[1], label: m[2] });
       } else {
         bodyLines.push(line);
       }
     }
-    const bodyWithSup = bodyLines
-      .join("\\n")
-      .replace(/\\[\\^([A-Za-z0-9_\\-]+)\\]/g, '<sup class="fn-ref"><a href="#fn-$1">[$1]</a></sup>');
+    const joinedBody = bodyLines.join("\\n");
+    const inlineMatches = joinedBody.matchAll(/\\[\\^([A-Za-z0-9_\\-]+)\\]/g);
+    for (const im of inlineMatches) {
+      const cid = im[1];
+      if (!seenFnIds[cid] && srcById[cid]) {
+        seenFnIds[cid] = true;
+        fnDefs.push({
+          id: cid,
+          label: srcById[cid].title || srcById[cid].resource || cid,
+        });
+      }
+    }
+    const bodyWithSup = joinedBody.replace(
+      /\\[\\^([A-Za-z0-9_\\-]+)\\]/g,
+      '<sup class="fn-ref"><a href="#fn-$1">[$1]</a></sup>'
+    );
     let html = marked.parse(bodyWithSup, { breaks: false, gfm: true });
     if (fnDefs.length > 0) {
       const items = fnDefs
@@ -4649,9 +5077,14 @@ const OKF_VIZ_JS = `
           const src = srcById[fn.id];
           const url = src && src.resource && /^https?:\\/\\//.test(src.resource) ? src.resource : null;
           const text = url
-            ? '<a class="external" target="_blank" rel="noopener" href="' + url + '">' + fn.label + "</a>"
-            : fn.label;
-          return '<li id="fn-' + fn.id + '"><code>[' + fn.id + "]</code> " + text + "</li>";
+            ? '<a class="external" target="_blank" rel="noopener" href="' +
+              escapeHtmlAttr(url) +
+              '">' +
+              escapeHtmlAttr(fn.label) +
+              "</a>"
+            : escapeHtmlAttr(fn.label);
+          const badges = renderSourceBadgesHtml(src);
+          return '<li id="fn-' + escapeHtmlAttr(fn.id) + '"><code>[' + escapeHtmlAttr(fn.id) + "]</code> " + text + badges + "</li>";
         })
         .join("");
       html += '<section class="footnotes"><ul>' + items + "</ul></section>";
@@ -4762,6 +5195,7 @@ const OKF_VIZ_JS = `
         } else {
           li.textContent = s.resource ? idPrefix + label + " (" + s.resource + ")" : idPrefix + label;
         }
+        appendSourceBadges(li, s);
         ul.appendChild(li);
       }
       sourcesEl.appendChild(ul);

@@ -40,7 +40,7 @@ OKF v0.2 FRONTMATTER & CITATIONS REQUIREMENT:
    - `title`: Clear human-readable title for the research concept.
    - `description`: A concise one-sentence summary of the concept.
    - `tags`: A YAML list of 3–6 lowercase topic tags (e.g., `[cloud, architecture, security]`).
-   - `sources`: A YAML list of external sources retrieved via Google Search, where each entry has `id` (a short kebab-case key like `cncf-report-2026`), `resource` (the EXACT, verbatim URL returned by Google Search — never guess or fabricate URLs), and `title` (human-readable source title).
+   - `sources`: A YAML list of external sources retrieved via Google Search, where each entry has `id` (a short kebab-case key like `cncf-report-2026`), `resource` (the EXACT, verbatim URL returned by Google Search — never guess or fabricate URLs), and `title` (human-readable source title). (The OKF provenance engine automatically stamps each source with `retrieved_at` in ISO 8601 UTC and opportunistically captures `last_modified` during redirect resolution.)
 2. In the Markdown body, attribute every key fact, statistic, or claim using a Markdown footnote label matching `sources[].id` (for example: `Cloud adoption grew 28% year-over-year.[^cncf-report-2026]`). Do NOT repeat raw URLs inline in prose paragraphs.
 3. If your research relates to any existing concept listed in `workspace/bundle/`, cross-link to it in the body using a bundle-root-relative Markdown link (e.g., `[Concept Title](/research/concept-slug.md)`).
 4. At the very bottom of the Markdown body, include the matching footnote definitions (`[^source-id]: Source Title`).
