@@ -2376,22 +2376,23 @@ export async function cleanGroundingLinks(
         return null;
       }
 
-      const beforeStr = buf.subarray(lineStart, idx).toString('utf8');
+      let beforeStr = buf.subarray(lineStart, idx).toString('utf8');
       let afterStr = buf.subarray(idx, lineEnd).toString('utf8');
 
-      // Advance to the end of the current word/token (or short section/parenthetical token like `§ 11-2` / `(RK 1)`)
-      if (/(?:§|\([*_`]*[\p{L}\p{N}_\-]{1,12})\s*$/u.test(beforeStr)) {
-        const clauseMatch = afterStr.match(/^(?:[\p{L}\p{N}_\-]+|\s+(?:§\s*)?[\p{L}\p{N}_\-]+)+/u);
-        if (clauseMatch) {
-          const advanceBytes = Buffer.byteLength(clauseMatch[0], 'utf8');
-          idx += advanceBytes;
-          afterStr = buf.subarray(idx, lineEnd).toString('utf8');
-        }
-      } else {
-        const wordMatch = afterStr.match(/^[\p{L}\p{N}_\-]+/u);
-        if (wordMatch) {
-          const advanceBytes = Buffer.byteLength(wordMatch[0], 'utf8');
-          idx += advanceBytes;
+      // Advance to the end of the current word/token
+      const wordMatch = afterStr.match(/^[\p{L}\p{N}_\-]+/u);
+      if (wordMatch) {
+        idx += Buffer.byteLength(wordMatch[0], 'utf8');
+        beforeStr = buf.subarray(lineStart, idx).toString('utf8');
+        afterStr = buf.subarray(idx, lineEnd).toString('utf8');
+      }
+
+      // If immediately after `§` or inside a short section/parenthetical token like `§ 11-2` / `(RK 1)` / `(*FOB § 4*)`,
+      // advance past any trailing section number (`§ 4`, `11-2`, `1`) without consuming subsequent prose words
+      if (/(?:§|\([*_`]*[\p{L}\p{N}_\-]{1,15})\s*$/u.test(beforeStr)) {
+        const secNumMatch = afterStr.match(/^(?:\s*(?:§\s*)?\d[\p{L}\p{N}_\-]*)+/u);
+        if (secNumMatch) {
+          idx += Buffer.byteLength(secNumMatch[0], 'utf8');
           afterStr = buf.subarray(idx, lineEnd).toString('utf8');
         }
       }
@@ -2639,13 +2640,18 @@ export async function cleanGroundingLinks(
     }
   );
   // Normalize trailing sentence punctuation (`word.[^id]` -> `word[^id].` and `[^a].[^b]` -> `[^a] [^b].`)
+  let prevBodyText = '';
+  while (prevBodyText !== bodyText) {
+    prevBodyText = bodyText;
+    bodyText = bodyText.replace(
+      /((?:\[\^[A-Za-z0-9_\-]+\][ \t]*)+)([.?!:;])[.?!:;]*((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)/g,
+      '$1 $3$2'
+    );
+  }
   bodyText = bodyText.replace(
-    /((?:\[\^[A-Za-z0-9_\-]+\][ \t]*)+)([.?!:;])((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)/g,
-    '$1 $3$2'
-  );
-  bodyText = bodyText.replace(
-    /([^\s.?!:;])([.?!])((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)/g,
-    (_m, before: string, punct: string, fns: string) => `${before}${fns.trimStart()}${punct}`
+    /([^\s.?!:;])([.?!])((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)([.?!]+)?/g,
+    (_m, before: string, punct: string, fns: string, trailingPunct?: string) =>
+      `${before}${fns.trimStart()}${(trailingPunct || punct)[0]}`
   );
   bodyText = bodyText.replace(/(?:\[\^[A-Za-z0-9_\-]+\][ \t]*){2,}/g, (cluster) => {
     const trailingSpace = /[ \t]+$/.exec(cluster)?.[0] || '';
@@ -5809,11 +5815,12 @@ export function cleanChecklistLabel(rawText: string): string {
   text = text.replace(/\$(?!\s)([^$]*?\S)\$/g, '$1');
   // Convert markdown links [label](url) -> label
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-  // Strip inline code backticks, bold, and italic markers
+  // Strip inline code backticks, bold-italic, bold, and italic markers without stripping spaced multiplication asterisks (e.g. "2 * 3 * 4")
   text = text
     .replace(/`([^`]+)`/g, '$1')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1');
+    .replace(/\*\*\*(?!\s)([^*]*?\S)\*\*\*/g, '$1')
+    .replace(/\*\*(?!\s)([^*]*?\S)\*\*/g, '$1')
+    .replace(/\*(?!\s)([^*]*?\S)\*/g, '$1');
   // Normalize whitespace and trailing punctuation spacing
   text = text.replace(/\s+/g, ' ').replace(/\s+([.,;:?!])/g, '$1').trim();
   return text;
@@ -5977,7 +5984,9 @@ export function normalizeStage2ForA2ui(
     };
   }
 
-  const title = String(scriptDraft.title || fallbackTitle || 'ICM Run Studio');
+  const title = String(
+    scriptDraft.title || scriptDraft.courseTitle || fallbackTitle || 'ICM Run Studio'
+  );
   const subtitle = String(scriptDraft.subtitle || scriptDraft.description || '');
   const targetAudience = String(scriptDraft.targetAudience || scriptDraft.audience || '');
   const estimatedDuration =
@@ -6059,8 +6068,9 @@ export function normalizeStage2ForA2ui(
         label: String(opt),
         value: String(oIdx),
       }));
-      const correctIdx =
-        typeof rawMod.quizCorrectIndex === 'number' ? String(rawMod.quizCorrectIndex) : '0';
+      const rawCorrectIdx =
+        rawMod.quizCorrectIndex ?? rawMod.correctOptionIndex ?? rawMod.correctIndex;
+      const correctIdx = typeof rawCorrectIdx === 'number' ? String(rawCorrectIdx) : '0';
       quiz.push({
         id: `quiz_mod_${idx + 1}`,
         question: rawMod.quizQuestion,
@@ -6984,8 +6994,9 @@ const A2UI_STUDIO_JS = `
     text = text.replace(/\\[([^\\]]+)\\]\\([^)]+\\)/g, "$1");
     text = text
       .replace(/\\x60([^\\x60]+)\\x60/g, "$1")
-      .replace(/\\*\\*([^*]+)\\*\\*/g, "$1")
-      .replace(/\\*([^*]+)\\*/g, "$1");
+      .replace(/\\*\\*\\*(?!\\s)([^*]*?\\S)\\*\\*\\*/g, "$1")
+      .replace(/\\*\\*(?!\\s)([^*]*?\\S)\\*\\*/g, "$1")
+      .replace(/\\*(?!\\s)([^*]*?\\S)\\*/g, "$1");
     text = text.replace(/\\s+/g, " ").replace(/\\s+([.,;:?!])/g, "$1").trim();
     return text;
   }
@@ -7234,7 +7245,7 @@ const A2UI_STUDIO_JS = `
       return "<code>" + escapeHtml(cleaned) + "</code>";
     });
     out = out.replace(/\\x60(\\/[A-Za-z0-9_\\-\\/]+\\.md)\\x60/g, '<a href="$1"><code>$1</code></a>');
-    out = out.replace(/\\[\\^([^\\]]+)\\](?!:)/g, function (_, id) {
+    out = out.replace(/\\[\\^([^\\]]+)\\]/g, function (_, id) {
       const safeId = escapeHtml(id);
       return '<sup class="fn-ref"><a href="#okf-src-' + safeId + '" data-fn="' + safeId + '">[' + safeId + "]</a></sup>";
     });
@@ -8190,6 +8201,18 @@ const A2UI_STUDIO_JS = `
           a.setAttribute("target", "_blank");
           a.setAttribute("rel", "noopener noreferrer");
         });
+        detail.querySelectorAll("a[data-fn]").forEach((a) => {
+          a.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            const fnId = a.getAttribute("data-fn");
+            const srcNodeId = "source:" + fnId;
+            const found = (bundleGraph.nodes || []).find((n) => n.data && n.data.id === srcNodeId);
+            if (found && found.data) {
+              renderGraphNodeDetail(found.data);
+              detail.scrollTop = 0;
+            }
+          });
+        });
       }
 
       const nodesList = bundleGraph.nodes || [];
@@ -9073,11 +9096,11 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   );
   assert(isOkfStale({ stale_after: '2020-01-01' }) === true, 'Past stale_after is detected as stale');
 
-  // 2. cleanGroundingLinks() UTF-8, heading/table skip, closing emphasis/paren snap, .^id typo, isFinalStep, citedFootnoteIds
+  // 2. cleanGroundingLinks() UTF-8, heading/table skip, closing emphasis/paren/section snap, .^id typo, isFinalStep, citedFootnoteIds
   const lineHeading = '## 1. Hovedkrav for særskilte brannobjekter (§ 13)';
   const lineTable = '| Risikoklasse | Krav til rømningsvei | Kontroll |';
   const lineProse =
-    'Brannvernleder må påse at **rømningsveier** og (RK 1) er frie. Kravet gjelder også næringsbygg.^dibk-no Dette er påbudt.[^lovdata-fob]';
+    'Etter FOB § 4 skal brannvernleder påse at **rømningsveier** og (RK 1) er frie. Kravet gjelder også næringsbygg.^dibk-no.^lovdata-fob Dette er påbudt.[^lovdata-fob]';
   const bodyMd = [
     lineHeading,
     '',
@@ -9114,15 +9137,18 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   // Byte offset inside the table row (should be skipped)
   const tableStartByte =
     fmBytePrefix + Buffer.from(lineHeading + '\n\n| Risikoklasse | Krav til røm', 'utf-8').length;
+  // Byte offset right after '§' in 'Etter FOB § 4 skal' (should snap past ' 4' and NOT consume 'skal brannvernleder...')
+  const sectionSymbolByteOffset =
+    fmBytePrefix + Buffer.from(lineHeading + '\n\n' + lineTable + '\n\nEtter FOB §', 'utf-8').length;
   // Byte offset landing mid-word and mid-UTF8 on 'rømningsveier' inside **rømningsveier**
   const prosePrefixBeforeRomning =
-    lineHeading + '\n\n' + lineTable + '\n\nBrannvernleder må påse at **r';
+    lineHeading + '\n\n' + lineTable + '\n\nEtter FOB § 4 skal brannvernleder påse at **r';
   // +1 byte into 'ø' (0xC3 0xB8) to test mid-codepoint UTF-8 continuation byte safety + snapping past **
   const midUtf8BoldByteOffset =
     fmBytePrefix + Buffer.from(prosePrefixBeforeRomning, 'utf-8').length + 1;
   // Byte offset landing inside (RK 1) right before closing ')'
   const prosePrefixBeforeParen =
-    lineHeading + '\n\n' + lineTable + '\n\nBrannvernleder må påse at **rømningsveier** og (RK 1';
+    lineHeading + '\n\n' + lineTable + '\n\nEtter FOB § 4 skal brannvernleder påse at **rømningsveier** og (RK 1';
   const insideParenByteOffset = fmBytePrefix + Buffer.from(prosePrefixBeforeParen, 'utf-8').length;
 
   const mockOutputs = [
@@ -9172,6 +9198,13 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
               url: 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710',
               title: 'Forskrift om brannforebygging',
               start_index: tableStartByte + 5,
+              end_index: sectionSymbolByteOffset,
+            },
+            {
+              type: 'url_citation',
+              url: 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710',
+              title: 'Forskrift om brannforebygging',
+              start_index: sectionSymbolByteOffset + 5,
               end_index: midUtf8BoldByteOffset,
             },
             {
@@ -9202,6 +9235,10 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     'Markdown table row was not corrupted by byte-offset citation injection'
   );
   assert(
+    cleanedMd.includes('Etter FOB § 4[^lovdata-fob] skal brannvernleder'),
+    `Citation right after § snaps past section number " 4" without consuming subsequent words (got: "${cleanedMd}")`
+  );
+  assert(
     cleanedMd.includes('**rømningsveier**[^lovdata-fob]'),
     'Citation snapped cleanly past multi-byte ø and closing **bold** markers'
   );
@@ -9210,8 +9247,8 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     'Citation snapped cleanly past closing parenthesis of (RK 1)'
   );
   assert(
-    cleanedMd.includes('næringsbygg[^dibk-no].'),
-    'Bare .^dibk-no typo normalized to [^dibk-no]. before period'
+    cleanedMd.includes('næringsbygg[^dibk-no] [^lovdata-fob].') && !cleanedMd.includes('..'),
+    `Chained .^dibk-no.^lovdata-fob typos normalized to [^dibk-no] [^lovdata-fob]. without double period (got: "${cleanedMd}")`
   );
   assert(
     cleanedMd.includes('Dette er påbudt[^lovdata-fob].'),
@@ -9224,11 +9261,12 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
 
   // 3. A2UI v0.9.1 validation, checklist label cleaning, and concise CaseSimulator synthesis
   const cleanedChkLabel = cleanChecklistLabel(
-    '**Brannvernleder** skal kontrollere *varme arbeider* (*FOB § 4*) og `internkontroll` [^lovdata-fob]'
+    '***Viktig*** **Brannvernleder** skal kontrollere *varme arbeider* (*FOB § 4*), måle 2 * 3 * 4 meter og `internkontroll` [^lovdata-fob]'
   );
   assert(
-    cleanedChkLabel === 'Brannvernleder skal kontrollere varme arbeider (FOB § 4) og internkontroll',
-    `cleanChecklistLabel strips **bold**, *italic*, \`code\`, and [^id] (got: "${cleanedChkLabel}")`
+    cleanedChkLabel ===
+      'Viktig Brannvernleder skal kontrollere varme arbeider (FOB § 4), måle 2 * 3 * 4 meter og internkontroll',
+    `cleanChecklistLabel strips ***bold-italic***, **bold**, *italic*, \`code\`, and [^id] while preserving "2 * 3 * 4" (got: "${cleanedChkLabel}")`
   );
 
   const stage2Norm = normalizeStage2ForA2ui(
@@ -9254,7 +9292,9 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     },
     'Fallback'
   );
+  assert(stage2Norm.title === 'Testkurs i Brannvern', 'courseTitle extracted as normalized title');
   assert(stage2Norm.modules[0]?.durationOrMeta === '15 min', 'Module durationMinutes preserved as durationOrMeta');
+  assert(stage2Norm.quiz[0]?.correctValue === '1', 'correctOptionIndex extracted as quiz correctValue');
   assert(stage2Norm.cases.length === 1, 'Synthesized 1 case from trainingModule');
   assert(
     !stage2Norm.cases[0].scenario.includes('Andre avsnitt er lang forelesningstekst'),
