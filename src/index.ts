@@ -2529,7 +2529,18 @@ export async function cleanGroundingLinks(
   }
   orderedSources.length = 0;
   orderedSources.push(...dedupedSources);
-  bodyText = bodyText.replace(/(\[\^[A-Za-z0-9_\-]+\])\1+/g, '$1');
+  bodyText = bodyText.replace(/(?:\[\^[A-Za-z0-9_\-]+\][ \t]*){2,}/g, (cluster) => {
+    const trailingSpace = /[ \t]+$/.exec(cluster)?.[0] || '';
+    const seenFn = new Set<string>();
+    const uniqueRefs: string[] = [];
+    for (const m of cluster.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)) {
+      if (!seenFn.has(m[1])) {
+        seenFn.add(m[1]);
+        uniqueRefs.push(`[^${m[1]}]`);
+      }
+    }
+    return uniqueRefs.join(' ') + trailingSpace;
+  });
 
   // 7. Append OKF v0.2 footnote definitions (`[^id]: Title`) at the bottom of the body (SPEC.md §5.1)
   const citedFootnoteIds = Array.from(
@@ -3037,7 +3048,10 @@ export function mergeConceptDocuments(
   if (existingVerified.length > 0 || incomingVerified.length > 0) {
     const combinedVerified: OKFActorEvent[] = [];
     for (const v of [...existingVerified, ...incomingVerified]) {
-      if (!combinedVerified.some((c) => c.by === v.by && c.at === v.at)) {
+      const existingActorIdx = combinedVerified.findIndex((c) => c.by === v.by);
+      if (existingActorIdx >= 0) {
+        combinedVerified[existingActorIdx] = v;
+      } else {
         combinedVerified.push(v);
       }
     }
@@ -3993,7 +4007,12 @@ export function verifyOkfConcept(
   }
 
   const existingVerified = normalizeVerified(doc.frontmatter);
-  existingVerified.push({ by: actor, at: atIso });
+  const existingActorIdx = existingVerified.findIndex((v) => v.by === actor);
+  if (existingActorIdx >= 0) {
+    existingVerified[existingActorIdx] = { by: actor, at: atIso };
+  } else {
+    existingVerified.push({ by: actor, at: atIso });
+  }
   doc.frontmatter.verified = existingVerified;
   doc.frontmatter.status = 'stable';
 
