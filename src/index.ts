@@ -1855,7 +1855,21 @@ export interface CleanGroundingOptions {
 function isBareDomainTitle(title?: string): boolean {
   const t = String(title || '').trim();
   if (!t) return true;
-  return /^(?:https?:\/\/)?(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}\/?$/i.test(t);
+  if (/^(?:https?:\/\/)?(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}\/?$/i.test(t)) {
+    return true;
+  }
+  const autoSlugMatch = t.match(/^[a-z0-9.-]+\.[a-z]{2,}\s+—\s+(.+)$/i);
+  if (autoSlugMatch) {
+    const slugPart = autoSlugMatch[1].trim();
+    if (
+      slugPart.length <= 1 ||
+      /^(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\s+\d/i.test(slugPart) ||
+      /^[^\p{L}]+[\p{Ll}]/u.test(slugPart)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function enrichBareDomainSourceTitle(
@@ -1872,10 +1886,10 @@ export function enrichBareDomainSourceTitle(
   }
   try {
     const parsed = new URL(cleanUrl);
-    const domain =
-      cleanTitle && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(cleanTitle)
-        ? cleanTitle.replace(/^www\./i, '')
-        : parsed.hostname.replace(/^www\./i, '');
+    const domainPrefixMatch = cleanTitle.match(/^(?:https?:\/\/)?(?:www\.)?([a-z0-9.-]+\.[a-z]{2,})/i);
+    const domain = domainPrefixMatch
+      ? domainPrefixMatch[1].replace(/^www\./i, '')
+      : parsed.hostname.replace(/^www\./i, '');
     const rawSegments = parsed.pathname
       .split('/')
       .map((s) => {
@@ -2821,6 +2835,10 @@ export async function cleanGroundingLinks(
     /([^\s.?!:;])([.?!])((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)([.?!]+)?/g,
     (_m, before: string, punct: string, fns: string, trailingPunct?: string) =>
       `${before}${fns.trimStart()}${(trailingPunct || punct)[0]}`
+  );
+  bodyText = bodyText.replace(
+    /([\p{L}\p{N}_\-]+)((?:\[\^[A-Za-z0-9_\-]+\])+)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
+    '$1$3$2'
   );
   bodyText = bodyText.replace(/(?:\[\^[A-Za-z0-9_\-]+\][ \t]*){2,}/g, (cluster) => {
     const trailingSpace = /[ \t]+$/.exec(cluster)?.[0] || '';
@@ -4940,11 +4958,25 @@ export function walkBundleConcepts(bundleRoot: string): OKFConceptNode[] {
       : rawSources && typeof rawSources === 'object'
         ? [rawSources as OKFSource]
         : [];
+    let normalizedBody = (doc.body || '').replace(
+      /([\p{L}\p{N}_\-]+)((?:\[\^[A-Za-z0-9_\-]+\])+)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
+      '$1$3$2'
+    );
     const sources: OKFSource[] = rawSourcesList.map((s) => {
       const validRetrieved = parseValidIsoTimestamp(s.retrieved_at) || genAtFallback;
       const validLm = parseValidIsoTimestamp(s.last_modified);
+      const enrichedTitle = s.resource
+        ? enrichBareDomainSourceTitle(s.title, String(s.resource))
+        : s.title;
+      if (s.id && enrichedTitle && s.title && enrichedTitle !== s.title) {
+        normalizedBody = normalizedBody.replaceAll(
+          `[^${s.id}]: ${s.title}`,
+          `[^${s.id}]: ${enrichedTitle}`
+        );
+      }
       const nextSrc: OKFSource = {
         ...s,
+        ...(enrichedTitle ? { title: enrichedTitle } : {}),
         ...(validRetrieved ? { retrieved_at: validRetrieved } : {}),
         ...(validLm ? { last_modified: validLm } : {}),
       };
@@ -4964,7 +4996,7 @@ export function walkBundleConcepts(bundleRoot: string): OKFConceptNode[] {
       description: String(fm.description || ''),
       resource: String(fm.resource || ''),
       tags,
-      body: doc.body || '',
+      body: normalizedBody,
       status: String(fm.status || 'stable'),
       generated,
       verified: normalizeVerified(fm),
@@ -8789,9 +8821,26 @@ export function generateA2uiSurface(
   const okfDoc = rawOkfMarkdown
     ? parseOkfDocument(rawOkfMarkdown)
     : { frontmatter: { title: resolvedRunId || 'ICM Studio', status: 'draft' }, body: '' };
+  okfDoc.body = String(okfDoc.body || '').replace(
+    /([\p{L}\p{N}_\-]+)((?:\[\^[A-Za-z0-9_\-]+\])+)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
+    '$1$3$2'
+  );
   const okfTrustTier = getOkfTrustTier(okfDoc.frontmatter);
   const okfStale = isOkfStale(okfDoc.frontmatter);
-  const okfSources = Array.isArray(okfDoc.frontmatter.sources) ? okfDoc.frontmatter.sources : [];
+  const rawOkfSources = Array.isArray(okfDoc.frontmatter.sources) ? okfDoc.frontmatter.sources : [];
+  const okfSources = rawOkfSources.map((s) => {
+    if (!s || typeof s !== 'object') return s;
+    const enrichedTitle = s.resource
+      ? enrichBareDomainSourceTitle(s.title, String(s.resource))
+      : s.title;
+    if (s.id && enrichedTitle && s.title && enrichedTitle !== s.title) {
+      okfDoc.body = okfDoc.body.replaceAll(
+        `[^${s.id}]: ${s.title}`,
+        `[^${s.id}]: ${enrichedTitle}`
+      );
+    }
+    return enrichedTitle ? { ...s, title: enrichedTitle } : s;
+  });
 
   let rawStage2: Record<string, unknown> | null = null;
   const stage2OutputPath = resolvedRunDir
