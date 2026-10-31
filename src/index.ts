@@ -1683,6 +1683,26 @@ export function isOkfStale(frontmatter: Record<string, any>, now?: Date): boolea
 
 export const is_stale = isOkfStale;
 
+export function truncateSlugAtWordBoundary(
+  rawSlug: string,
+  maxLen: number,
+  minSnapPos = 20
+): string {
+  const clean = String(rawSlug || '').replace(/^-+|-+$/g, '');
+  if (clean.length <= maxLen) {
+    return clean;
+  }
+  const sliced = clean.slice(0, maxLen);
+  if (clean[maxLen] === '-') {
+    return sliced.replace(/-+$/g, '');
+  }
+  const lastDash = sliced.lastIndexOf('-');
+  if (lastDash >= minSnapPos) {
+    return sliced.slice(0, lastDash).replace(/-+$/g, '');
+  }
+  return sliced.replace(/-+$/g, '');
+}
+
 function generateSourceSlugId(
   titleOrUrl: string,
   resourceUrl: string,
@@ -1706,7 +1726,7 @@ function generateSourceSlugId(
     }
   }
   const words = base.split('-').filter(Boolean).slice(0, 4);
-  base = words.join('-').slice(0, 32).replace(/-+$/g, '') || 'source';
+  base = truncateSlugAtWordBoundary(words.join('-'), 32) || 'source';
 
   let candidate = base;
   let counter = 2;
@@ -1874,7 +1894,14 @@ export function enrichBareDomainSourceTitle(
 
     const isOpaqueOrBucket = (seg: string): boolean => {
       const noExt = seg.replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
-      if (/^(?:_f|p\d+|r|no|nb|nn|en|wiki|globalassets|wp-content|uploads)$/i.test(noExt)) {
+      if (
+        /^(?:_f|p\d+|no|nb|nn|en|wiki|globalassets|contentassets|wp-content|uploads|dyn)$/i.test(
+          noExt
+        )
+      ) {
+        return true;
+      }
+      if (/^[a-z]$/i.test(noExt) || /^(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)$/i.test(noExt)) {
         return true;
       }
       if (/^i?[0-9a-f]{8,}(?:-[0-9a-f]{4,})*$/i.test(noExt) && /\d/.test(noExt)) {
@@ -1902,7 +1929,17 @@ export function enrichBareDomainSourceTitle(
       if (lastSeg === '1' && /\d/.test(prevSeg)) {
         chosenSlug = prevSeg;
       } else if (/^[0-9-]+$/.test(lastSeg)) {
-        chosenSlug = `${prevSeg} ${lastSeg}`;
+        let alphaPrev = prevSeg;
+        if (!/[\p{L}]/u.test(alphaPrev)) {
+          for (let k = meaningful.length - 3; k >= 0; k--) {
+            const candidate = meaningful[k].replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
+            if (/[\p{L}]/u.test(candidate)) {
+              alphaPrev = candidate;
+              break;
+            }
+          }
+        }
+        chosenSlug = `${alphaPrev} ${lastSeg}`;
       }
     }
 
@@ -1912,10 +1949,10 @@ export function enrichBareDomainSourceTitle(
       .replace(/\s+/g, ' ')
       .trim();
 
-    if (!humanized || !/[a-zA-Z\u00C0-\u024F]/.test(humanized)) {
+    if (!humanized || !/[\p{L}]/u.test(humanized)) {
       return domain || cleanTitle;
     }
-    humanized = humanized.charAt(0).toUpperCase() + humanized.slice(1);
+    humanized = humanized.replace(/[\p{L}]/u, (ch) => ch.toUpperCase());
     if (humanized.length > 160) {
       const cut = humanized.slice(0, 158);
       const lastSpace = cut.lastIndexOf(' ');
@@ -2497,12 +2534,20 @@ export async function cleanGroundingLinks(
       let beforeStr = buf.subarray(lineStart, idx).toString('utf8');
       let afterStr = buf.subarray(idx, lineEnd).toString('utf8');
 
-      // Advance to the end of the current word/token
-      const wordMatch = afterStr.match(/^[\p{L}\p{N}_\-]+/u);
+      // Advance to the end of the current word/token (including slash-joined word pairs like `overtredelser/avvik`)
+      const wordMatch = afterStr.match(/^[\p{L}\p{N}_\-]+(?:\/[\p{L}\p{N}_\-]+)*/u);
       if (wordMatch) {
         idx += Buffer.byteLength(wordMatch[0], 'utf8');
         beforeStr = buf.subarray(lineStart, idx).toString('utf8');
         afterStr = buf.subarray(idx, lineEnd).toString('utf8');
+      }
+      if (/[\p{L}\p{N}_\-]$/u.test(beforeStr)) {
+        const slashTailMatch = afterStr.match(/^(?:\/[\p{L}\p{N}_\-]+)+/u);
+        if (slashTailMatch) {
+          idx += Buffer.byteLength(slashTailMatch[0], 'utf8');
+          beforeStr = buf.subarray(lineStart, idx).toString('utf8');
+          afterStr = buf.subarray(idx, lineEnd).toString('utf8');
+        }
       }
 
       // If immediately after `§` or inside a short section/parenthetical token like `§ 11-2` / `(RK 1)` / `(*FOB § 4*)`,
@@ -3689,15 +3734,16 @@ export function syncRunToBundle(
     }
   }
   if (!slug) {
-    const baseSource = String(doc.frontmatter.title || runId)
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/-\d{10,}$/, '')
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 48)
-      .replace(/-+$/g, '');
+    const baseSource = truncateSlugAtWordBoundary(
+      String(doc.frontmatter.title || runId)
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/-\d{10,}$/, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, ''),
+      48
+    );
     slug = baseSource || 'research-concept';
   }
 
@@ -5967,21 +6013,23 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
   const groups: A2uiChecklistGroup[] = [];
   let currentHeading = 'Sjekkliste / Action Items';
   const categoryStack: Array<{ indent: number; title: string }> = [];
+  let sectionHasSubgroups = false;
   let itemCounter = 0;
 
   const getOrCreateGroup = (title: string): A2uiChecklistGroup => {
     const cleanTitle =
       cleanChecklistLabel(title.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:+\s*$/, '')) || 'Generelt';
-    let existing = groups.find((g) => g.title === cleanTitle);
-    if (!existing) {
-      existing = {
-        id: `chk_grp_${groups.length + 1}`,
-        title: cleanTitle,
-        items: [],
-      };
-      groups.push(existing);
+    const lastGroup = groups[groups.length - 1];
+    if (lastGroup && lastGroup.title === cleanTitle) {
+      return lastGroup;
     }
-    return existing;
+    const created: A2uiChecklistGroup = {
+      id: `chk_grp_${groups.length + 1}`,
+      title: cleanTitle,
+      items: [],
+    };
+    groups.push(created);
+    return created;
   };
 
   for (let i = 0; i < lines.length; i++) {
@@ -5990,6 +6038,7 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
     if (headingMatch) {
       currentHeading = headingMatch[2].replace(/^\d+(\.\d+)*\.?\s*/, '').trim();
       categoryStack.length = 0;
+      sectionHasSubgroups = false;
       continue;
     }
 
@@ -6027,18 +6076,38 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
       );
       if (headerTitle) {
         categoryStack.push({ indent, title: headerTitle });
+        sectionHasSubgroups = true;
       }
       continue;
     }
 
-    itemCounter++;
-    const groupTitle =
-      categoryStack.length > 0
-        ? categoryStack.map((c) => c.title).join(' — ')
-        : currentHeading;
-    const group = getOrCreateGroup(groupTitle);
-    const cleanedLabel = cleanChecklistLabel(rawContent);
+    let groupTitle = currentHeading;
+    let rawItemText = rawContent;
+
+    if (categoryStack.length > 0) {
+      const stackTitle = categoryStack.map((c) => c.title).join(' — ');
+      groupTitle =
+        currentHeading &&
+        currentHeading !== 'Sjekkliste / Action Items' &&
+        !stackTitle.startsWith(currentHeading)
+          ? `${currentHeading} — ${stackTitle}`
+          : stackTitle;
+    } else if (sectionHasSubgroups) {
+      const leadBoldMatch = rawContent.match(/^\*\*([^*]+)\*\*:\s*(.+)$/);
+      if (leadBoldMatch) {
+        const subCategory = cleanChecklistLabel(leadBoldMatch[1]);
+        groupTitle =
+          currentHeading && currentHeading !== 'Sjekkliste / Action Items'
+            ? `${currentHeading} — ${subCategory}`
+            : subCategory;
+        rawItemText = leadBoldMatch[2];
+      }
+    }
+
+    const cleanedLabel = cleanChecklistLabel(rawItemText);
     if (!cleanedLabel) continue;
+    itemCounter++;
+    const group = getOrCreateGroup(groupTitle);
 
     group.items.push({
       id: `chk_item_${itemCounter}`,
@@ -6187,8 +6256,14 @@ export function normalizeStage2ForA2ui(
       rawMod.spokenNarration || rawMod.narrationScript || rawMod.scriptBody || rawMod.content || ''
     );
     const actionItem = String(
-      rawMod.boardActionItem || rawMod.actionItem || rawMod.exercise || ''
-    );
+      rawMod.boardActionItem ||
+        rawMod.actionItem ||
+        rawMod.exercise ||
+        rawMod.caseActionItem ||
+        rawMod.caseResolution ||
+        rawMod.caseSolution ||
+        ''
+    ).trim();
     const bulletsRaw = Array.isArray(rawMod.slideCues)
       ? rawMod.slideCues
       : Array.isArray(rawMod.keyTakeaways)
@@ -6230,7 +6305,11 @@ export function normalizeStage2ForA2ui(
 
     // If module has a boardActionItem (or explicit caseScenario), populate a concise situational scenario case
     const explicitCaseScenario = String(rawMod.caseScenario || rawMod.scenario || '').trim();
-    if (actionItem || explicitCaseScenario) {
+    const explicitCaseResolution = String(
+      rawMod.caseResolution ?? rawMod.caseSolution ?? rawMod.caseActionItem ?? ''
+    ).trim();
+    const caseActionText = explicitCaseResolution || actionItem;
+    if (caseActionText || explicitCaseScenario) {
       let synthesizedScenario = explicitCaseScenario;
       if (!synthesizedScenario) {
         const scenarioParts: string[] = [];
@@ -6266,9 +6345,9 @@ export function normalizeStage2ForA2ui(
       const quizExpl =
         typeof rawMod.quizExplanation === 'string' ? rawMod.quizExplanation.trim() : '';
       const enrichedRecommendation =
-        actionItem && quizExpl
-          ? `${actionItem}\n\n📌 Faglig begrunnelse: ${quizExpl}`
-          : actionItem || quizExpl;
+        !explicitCaseScenario && caseActionText && quizExpl
+          ? `${caseActionText}\n\n📌 Faglig begrunnelse: ${quizExpl}`
+          : caseActionText || quizExpl;
 
       cases.push({
         id: `case_mod_${idx + 1}`,
@@ -7187,21 +7266,23 @@ const A2UI_STUDIO_JS = `
     const groups = [];
     let currentHeading = "Sjekkliste / Action Items";
     const categoryStack = [];
+    let sectionHasSubgroups = false;
     let itemCounter = 0;
 
     function getOrCreateGroup(title) {
       const cleanTitle =
         cleanClientChecklistLabel(title.replace(/\\*\\*([^*]+)\\*\\*/g, "$1").replace(/:+\\s*$/, "")) || "Generelt";
-      let existing = groups.find((g) => g.title === cleanTitle);
-      if (!existing) {
-        existing = {
-          id: "chk_grp_" + (groups.length + 1),
-          title: cleanTitle,
-          items: [],
-        };
-        groups.push(existing);
+      const lastGroup = groups[groups.length - 1];
+      if (lastGroup && lastGroup.title === cleanTitle) {
+        return lastGroup;
       }
-      return existing;
+      const created = {
+        id: "chk_grp_" + (groups.length + 1),
+        title: cleanTitle,
+        items: [],
+      };
+      groups.push(created);
+      return created;
     }
 
     for (let i = 0; i < lines.length; i++) {
@@ -7210,6 +7291,7 @@ const A2UI_STUDIO_JS = `
       if (headingMatch) {
         currentHeading = headingMatch[2].replace(/^\\d+(\\.\\d+)*\\.?\\s*/, "").trim();
         categoryStack.length = 0;
+        sectionHasSubgroups = false;
         continue;
       }
       const checkboxMatch = line.match(/^(\\s*)[-*]\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
@@ -7244,18 +7326,38 @@ const A2UI_STUDIO_JS = `
         );
         if (headerTitle) {
           categoryStack.push({ indent: indent, title: headerTitle });
+          sectionHasSubgroups = true;
         }
         continue;
       }
 
-      itemCounter++;
-      const groupTitle =
-        categoryStack.length > 0
-          ? categoryStack.map((c) => c.title).join(" — ")
-          : currentHeading;
-      const group = getOrCreateGroup(groupTitle);
-      const cleanedLabel = cleanClientChecklistLabel(rawContent);
+      let groupTitle = currentHeading;
+      let rawItemText = rawContent;
+
+      if (categoryStack.length > 0) {
+        const stackTitle = categoryStack.map((c) => c.title).join(" — ");
+        groupTitle =
+          currentHeading &&
+          currentHeading !== "Sjekkliste / Action Items" &&
+          !stackTitle.startsWith(currentHeading)
+            ? currentHeading + " — " + stackTitle
+            : stackTitle;
+      } else if (sectionHasSubgroups) {
+        const leadBoldMatch = rawContent.match(/^\\*\\*([^*]+)\\*\\*:\\s*(.+)$/);
+        if (leadBoldMatch) {
+          const subCategory = cleanClientChecklistLabel(leadBoldMatch[1]);
+          groupTitle =
+            currentHeading && currentHeading !== "Sjekkliste / Action Items"
+              ? currentHeading + " — " + subCategory
+              : subCategory;
+          rawItemText = leadBoldMatch[2];
+        }
+      }
+
+      const cleanedLabel = cleanClientChecklistLabel(rawItemText);
       if (!cleanedLabel) continue;
+      itemCounter++;
+      const group = getOrCreateGroup(groupTitle);
 
       group.items.push({
         id: "chk_item_" + itemCounter,
@@ -9437,11 +9539,11 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   );
   assert(isOkfStale({ stale_after: '2020-01-01' }) === true, 'Past stale_after is detected as stale');
 
-  // 2. cleanGroundingLinks() UTF-8, heading/table skip, closing emphasis/paren/section snap, .^id typo, isFinalStep, citedFootnoteIds, bare-domain enrichment & uncited fm.sources filtering
+  // 2. cleanGroundingLinks() UTF-8, heading/table skip, closing emphasis/paren/section snap, slash-joined word snap, .^id typo, isFinalStep, citedFootnoteIds, bare-domain enrichment & uncited fm.sources filtering
   const lineHeading = '## 1. Hovedkrav for særskilte brannobjekter (§ 13)';
   const lineTable = '| Risikoklasse | Krav til rømningsvei | Kontroll |';
   const lineProse =
-    'Etter FOB § 4 skal brannvernleder påse at **rømningsveier** og (RK 1) er frie. Kravet gjelder også næringsbygg.^dibk-no.^lovdata-fob Dette er påbudt.[^lovdata-fob]';
+    'Etter FOB § 4 skal brannvernleder påse at **rømningsveier** og (RK 1) er frie og forebygge overtredelser/avvik i drift. Kravet gjelder også næringsbygg.^dibk-no.^lovdata-fob Dette er påbudt.[^lovdata-fob]';
   const bodyMd = [
     lineHeading,
     '',
@@ -9494,6 +9596,13 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   const prosePrefixBeforeParen =
     lineHeading + '\n\n' + lineTable + '\n\nEtter FOB § 4 skal brannvernleder påse at **rømningsveier** og (RK 1';
   const insideParenByteOffset = fmBytePrefix + Buffer.from(prosePrefixBeforeParen, 'utf-8').length;
+  // Byte offset landing right before '/avvik' in 'overtredelser/avvik'
+  const prosePrefixBeforeSlashWord =
+    lineHeading +
+    '\n\n' +
+    lineTable +
+    '\n\nEtter FOB § 4 skal brannvernleder påse at **rømningsveier** og (RK 1) er frie og forebygge overtredelser';
+  const slashWordByteOffset = fmBytePrefix + Buffer.from(prosePrefixBeforeSlashWord, 'utf-8').length;
 
   const mockOutputs = [
     // Intermediate draft step (should be ignored because a later model_output exists)
@@ -9558,6 +9667,13 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
               start_index: midUtf8BoldByteOffset + 5,
               end_index: insideParenByteOffset,
             },
+            {
+              type: 'url_citation',
+              url: 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710',
+              title: 'Forskrift om brannforebygging',
+              start_index: insideParenByteOffset + 5,
+              end_index: slashWordByteOffset,
+            },
           ],
         },
       ],
@@ -9565,7 +9681,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   ];
 
   assert(
-    fmBytePrefix + bodyBuf.length > insideParenByteOffset,
+    fmBytePrefix + bodyBuf.length > slashWordByteOffset,
     'UTF-8 buffer covers test byte offsets'
   );
   const cleanedMd = await cleanGroundingLinks(rawTestMarkdown, mockOutputs);
@@ -9589,6 +9705,11 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   assert(
     cleanedMd.includes('(RK 1)[^dibk-no]'),
     'Citation snapped cleanly past closing parenthesis of (RK 1)'
+  );
+  assert(
+    cleanedMd.includes('overtredelser/avvik[^lovdata-fob]') &&
+      !cleanedMd.includes('overtredelser[^lovdata-fob]/avvik'),
+    `Citation inside slash-joined word pair snaps past entire "overtredelser/avvik" token (got: "${cleanedMd}")`
   );
   assert(
     cleanedMd.includes('næringsbygg[^dibk-no] [^lovdata-fob].') && !cleanedMd.includes('..'),
@@ -9625,11 +9746,32 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         'www.ha.no',
         'https://www.ha.no/_f/p1/i71e106c5-9925-4d53-8efc-f5736e3ee5f0/veiledning-tilrettelegging-for-innsats-for-redning-og-slokkemannskaper-ha-kommune-uu.pdf'
       ) ===
-        'ha.no — Veiledning tilrettelegging for innsats for redning og slokkemannskaper ha kommune uu',
-    'enrichBareDomainSourceTitle decodes UTF-8, handles legislative /1 paths, and preserves full descriptive slugs without mid-word truncation'
+        'ha.no — Veiledning tilrettelegging for innsats for redning og slokkemannskaper ha kommune uu' &&
+      enrichBareDomainSourceTitle(
+        'ilo.org',
+        'https://wwwex.ilo.org/dyn/legosh_en/f?p=14100:503:0::NO::P503_REFERENCE_ID:310536'
+      ) === 'ilo.org — Legosh en' &&
+      enrichBareDomainSourceTitle('dibk.no', 'https://www.dibk.no/regelverk/tek/3/11/iv/11-12') ===
+        'dibk.no — Tek 11-12' &&
+      enrichBareDomainSourceTitle(
+        'dibk.no',
+        'https://www.dibk.no/contentassets/c50f3c7dcbaa47a3bf4221ee88196aa5/-12-13.-dor-port-og-lignende-01.10.2030.09.21.pdf'
+      ) === 'dibk.no — 12-13. Dor port og lignende 01.10.2030.09.21',
+    'enrichBareDomainSourceTitle decodes UTF-8, skips 1-char servlet and Roman-numeral sub-segments, uppercases first alphabetic char, and preserves full descriptive slugs'
+  );
+  assert(
+    truncateSlugAtWordBoundary(
+      'systematisk-brannvern-ansvarsfordeling-og-krav-til-romningsveier-i-naeringsbygg',
+      48
+    ) === 'systematisk-brannvern-ansvarsfordeling-og-krav' &&
+      truncateSlugAtWordBoundary(
+        'systematisk-brannvern-ansvarsfordeling-og-krav-til-romningsveier-i-naeringsbygg',
+        32
+      ) === 'systematisk-brannvern',
+    'truncateSlugAtWordBoundary snaps 48-char and 32-char slugs to the last word boundary dash'
   );
 
-  // 3. A2UI v0.9.1 validation, checklist label cleaning, totalEstimatedMinutes, synthesized highlights, and CaseSimulator synthesis
+  // 3. A2UI v0.9.1 validation, checklist label cleaning, checklist group hierarchy/ordering, totalEstimatedMinutes, synthesized highlights, and CaseSimulator synthesis
   const cleanedChkLabel = cleanChecklistLabel(
     '***Viktig*** **Brannvernleder** skal kontrollere *varme arbeider* (*FOB § 4*), måle 2 * 3 * 4 meter og `internkontroll` [^lovdata-fob]'
   );
@@ -9637,6 +9779,29 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     cleanedChkLabel ===
       'Viktig Brannvernleder skal kontrollere varme arbeider (FOB § 4), måle 2 * 3 * 4 meter og internkontroll',
     `cleanChecklistLabel strips ***bold-italic***, **bold**, *italic*, \`code\`, and [^id] while preserving "2 * 3 * 4" (got: "${cleanedChkLabel}")`
+  );
+
+  const sampleChecklistMd = [
+    '### 4.1 Daglig og ukentlig kontroll',
+    '- [ ] **Frie rømningsveier**: Kontroller korridorer.',
+    '### 4.2 Månedlig og kvartalsvis kontroll',
+    '- [ ] **Nødbelysning**: Sjekk grønn LED.',
+    '- [ ] **Manuelt slokkeutstyr**:',
+    '  - [ ] Kontroller manometer på håndslokkere.',
+    '- [ ] **Tekniske rom og tavlerom**: Kontroller at elektro- og ventilasjonsrom ikke brukes som lager.',
+    '### 4.3 Halvårlig og årlig kontroll',
+    '- [ ] **Brannøvelse (`FOB § 12`)**:',
+    '  - [ ] Er årlig evakueringsøvelse gjennomført?',
+  ].join('\n');
+  const chkGroups = extractChecklistGroupsFromMarkdown(sampleChecklistMd);
+  assert(
+    chkGroups.length === 5 &&
+      chkGroups[0].title === 'Daglig og ukentlig kontroll' &&
+      chkGroups[1].title === 'Månedlig og kvartalsvis kontroll' &&
+      chkGroups[2].title === 'Månedlig og kvartalsvis kontroll — Manuelt slokkeutstyr' &&
+      chkGroups[3].title === 'Månedlig og kvartalsvis kontroll — Tekniske rom og tavlerom' &&
+      chkGroups[4].title === 'Halvårlig og årlig kontroll — Brannøvelse (FOB § 12)',
+    `extractChecklistGroupsFromMarkdown preserves currentHeading prefix and exact document order (got: ${chkGroups.map((g) => g.title).join(' | ')})`
   );
 
   const stage2Norm = normalizeStage2ForA2ui(
@@ -9659,6 +9824,19 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
           correctOptionIndex: 1,
           quizExplanation: 'Eier har det overordnede ansvaret etter FOB § 6.',
         },
+        {
+          moduleNumber: 2,
+          moduleTitle: 'Bruksendring i kombinasjonsbygg',
+          durationMinutes: 12,
+          regulatoryBasis: 'TEK17 § 11-2',
+          spokenNarration: 'Kort fortelling.',
+          caseScenario: 'Leietaker vil bygge om kontor i 1. etasje til treningssenter for 180 personer.',
+          boardActionItem: 'Stans ombyggingen og krev revidert brannkonsept for RKL 5.',
+          quizQuestion: 'Hvilken brannklasse gjelder for 4 etasjer?',
+          quizOptions: ['BKL 1', 'BKL 2'],
+          correctOptionIndex: 1,
+          quizExplanation: '4 etasjer ligger normalt i BKL 2.',
+        },
       ],
     },
     'Fallback'
@@ -9669,12 +9847,12 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     `totalEstimatedMinutes formatted with " min" unit (got: "${stage2Norm.estimatedDuration}")`
   );
   assert(
-    stage2Norm.highlights.length === 1 && stage2Norm.highlights[0].includes('Brannvernleders rolle'),
+    stage2Norm.highlights.length === 2 && stage2Norm.highlights[0].includes('Brannvernleders rolle'),
     'When top-level keyTakeaways is omitted, highlights are synthesized from trainingModules'
   );
   assert(stage2Norm.modules[0]?.durationOrMeta === '15 min', 'Module durationMinutes preserved as durationOrMeta');
   assert(stage2Norm.quiz[0]?.correctValue === '1', 'correctOptionIndex extracted as quiz correctValue');
-  assert(stage2Norm.cases.length === 1, 'Synthesized 1 case from trainingModule');
+  assert(stage2Norm.cases.length === 2, 'Extracted 2 cases from trainingModules');
   assert(
     stage2Norm.cases[0].scenario.includes('Første avsnitt beskriver den konkrete utfordringen i bygget.') &&
       stage2Norm.cases[0].scenario.includes(
@@ -9690,6 +9868,14 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   assert(
     stage2Norm.cases[0].recommendedAction.includes('📌 Faglig begrunnelse:'),
     'Synthesized case recommendedAction includes quizExplanation rationale'
+  );
+  assert(
+    stage2Norm.cases[1].scenario ===
+      'Leietaker vil bygge om kontor i 1. etasje til treningssenter for 180 personer.' &&
+      stage2Norm.cases[1].recommendedAction ===
+        'Stans ombyggingen og krev revidert brannkonsept for RKL 5.' &&
+      !stage2Norm.cases[1].recommendedAction.includes('📌 Faglig begrunnelse:'),
+    'Explicit caseScenario does NOT append unrelated quizExplanation onto recommendedAction'
   );
 
   const validMessages: A2uiEnvelopeMessage[] = [
@@ -9921,13 +10107,15 @@ if (
       }
       console.log('Stage 2 CLI Run Complete:', result);
     } else {
-      const slug = argValue
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 32);
+      const slug = truncateSlugAtWordBoundary(
+        argValue
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, ''),
+        32
+      );
       const runId = isDryRun ? '_dry_run' : `${slug || 'run'}-${Date.now()}`;
       const runDir = path.resolve('./workspace/runs', runId);
       fs.mkdirSync(runDir, { recursive: true });
