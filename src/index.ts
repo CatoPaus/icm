@@ -13,6 +13,7 @@ export function loadDotEnvIfExists(
   envTarget: Record<string, string | undefined> = process.env
 ): Record<string, string> {
   const loaded: Record<string, string> = {};
+  const seenKeys = new Set<string>();
   for (const fileName of ['.env.local', '.env']) {
     const filePath = path.resolve(cwd, fileName);
     if (!fs.existsSync(filePath)) continue;
@@ -22,25 +23,65 @@ export function loadDotEnvIfExists(
         rawBuf.length >= 2 && rawBuf[0] === 0xff && rawBuf[1] === 0xfe
           ? rawBuf.subarray(2).toString('utf16le')
           : rawBuf.toString('utf-8').replace(/^\uFEFF/, '');
-      for (const rawLine of rawContent.split(/\r?\n/)) {
-        const line = rawLine.trim();
+      const lines = rawContent.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
         if (!line || line.startsWith('#')) continue;
         const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
         if (!match) continue;
         const key = match[1];
-        let val = match[2].trim();
-        if (
-          (val.startsWith('"') && val.endsWith('"') && val.length >= 2) ||
-          (val.startsWith("'") && val.endsWith("'") && val.length >= 2)
-        ) {
-          val = val.slice(1, -1);
-        } else {
-          const commentIdx = val.search(/\s+#/);
-          if (commentIdx !== -1) {
-            val = val.slice(0, commentIdx).trim();
+        const rawVal = match[2].trim();
+        let val = rawVal;
+
+        if (rawVal.startsWith('"') || rawVal.startsWith("'")) {
+          const quote = rawVal[0];
+          const findClosingQuote = (str: string): number => {
+            for (let c = 1; c < str.length; c++) {
+              if (quote === '"' && str[c] === '\\') {
+                c++;
+                continue;
+              }
+              if (str[c] === quote) {
+                return c;
+              }
+            }
+            return -1;
+          };
+
+          let closeIdx = findClosingQuote(rawVal);
+          let lookaheadIdx = i;
+          let candidateVal = rawVal;
+          while (closeIdx === -1 && lookaheadIdx + 1 < lines.length) {
+            lookaheadIdx++;
+            candidateVal += '\n' + lines[lookaheadIdx];
+            closeIdx = findClosingQuote(candidateVal);
           }
+
+          const trailingAfterQuote = closeIdx !== -1 ? candidateVal.slice(closeIdx + 1) : '';
+          if (closeIdx !== -1 && /^\s*(?:#.*)?$/.test(trailingAfterQuote)) {
+            i = lookaheadIdx;
+            const inner = candidateVal.slice(1, closeIdx);
+            val =
+              quote === '"'
+                ? inner.replace(/\\(["\\nrt])/g, (_, ch: string) => {
+                    if (ch === 'n') return '\n';
+                    if (ch === 'r') return '\r';
+                    if (ch === 't') return '\t';
+                    return ch;
+                  })
+                : inner;
+          } else {
+            const commentIdx = rawVal.search(/(?:^|\s+)#/);
+            val = (commentIdx !== -1 ? rawVal.slice(0, commentIdx) : rawVal).trim();
+          }
+        } else {
+          const commentIdx = rawVal.search(/(?:^|\s+)#/);
+          val = (commentIdx !== -1 ? rawVal.slice(0, commentIdx) : rawVal).trim();
         }
-        if (envTarget[key] === undefined || envTarget[key] === '') {
+
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        if (envTarget[key] === undefined) {
           envTarget[key] = val;
           loaded[key] = val;
         }
@@ -10825,7 +10866,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     );
   }
 
-  // Verify loadDotEnvIfExists() precedence (.env.local > .env, existing env preserved, quotes/comments/UTF-16LE BOM handled)
+  // Verify loadDotEnvIfExists() precedence (.env.local > .env, existing env preserved, quotes/comments/multi-line/UTF-16LE BOM handled)
   const tmpDotEnvDir = path.resolve(`./workspace/runs/_dotenv_test_${Date.now()}`);
   fs.mkdirSync(tmpDotEnvDir, { recursive: true });
   try {
@@ -10833,15 +10874,25 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       path.join(tmpDotEnvDir, '.env.local'),
       [
         '# Comment line',
-        'GEMINI_API_KEY="from-dotenv-local"',
+        'GEMINI_API_KEY="from-dotenv-local" # trailing comment after double quotes',
         'export PRESERVED_KEY="should-not-overwrite"',
         'INLINE_KEY=unquoted-val # inline comment',
+        'HASH_INSIDE_QUOTES="val # not a comment" # trailing comment',
+        'ESCAPED_QUOTES="hello \\"world\\"" # trailing comment',
+        'MULTI_LINE="line 1',
+        'line 2" # multi-line comment',
+        'EMPTY_OVERRIDE=""',
+        'COMMENT_ONLY=# comment at start of unquoted value',
       ].join('\n'),
       'utf-8'
     );
     fs.writeFileSync(
       path.join(tmpDotEnvDir, '.env'),
-      ['GEMINI_API_KEY="from-dotenv-fallback"', "FALLBACK_ONLY='single-quoted'"].join('\n'),
+      [
+        'GEMINI_API_KEY="from-dotenv-fallback"',
+        "FALLBACK_ONLY='single-quoted' # trailing comment after single quotes",
+        'EMPTY_OVERRIDE="should-not-override-empty-env-local"',
+      ].join('\n'),
       'utf-8'
     );
     const mockEnv: Record<string, string | undefined> = {
@@ -10852,10 +10903,15 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       mockEnv.GEMINI_API_KEY === 'from-dotenv-local' &&
         mockEnv.PRESERVED_KEY === 'already-set-in-shell' &&
         mockEnv.INLINE_KEY === 'unquoted-val' &&
+        mockEnv.HASH_INSIDE_QUOTES === 'val # not a comment' &&
+        mockEnv.ESCAPED_QUOTES === 'hello "world"' &&
+        mockEnv.MULTI_LINE === 'line 1\nline 2' &&
+        mockEnv.EMPTY_OVERRIDE === '' &&
+        mockEnv.COMMENT_ONLY === '' &&
         mockEnv.FALLBACK_ONLY === 'single-quoted' &&
         loadedVars.GEMINI_API_KEY === 'from-dotenv-local' &&
         loadedVars.PRESERVED_KEY === undefined,
-      `loadDotEnvIfExists loads .env.local and .env while preserving existing process.env keys (got: ${JSON.stringify(mockEnv)})`
+      `loadDotEnvIfExists loads .env.local and .env while preserving existing process.env keys and handling quoted inline comments, escapes, and multi-line values (got: ${JSON.stringify(mockEnv)})`
     );
 
     // Also test UTF-16LE BOM (Windows PowerShell 5.1 ">" redirection)
