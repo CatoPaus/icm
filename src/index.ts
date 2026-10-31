@@ -2256,10 +2256,10 @@ function shouldUpgradeSourceTitle(
   return false;
 }
 
-function stripTrailingEmptyCitationSection(prose: string): string {
+export function stripTrailingEmptyCitationSection(prose: string): string {
   return prose
     .replace(
-      /(?:\r?\n+---)?\r?\n+#{1,3}\s+(?:Kildehenvisninger|Kilder(?:\s+og\s+referanser)?|Referanser|Fotnoter|Sources(?:\s*&\s*Citations)?|Citations|Grounded\s+Search\s+References)\s*$/i,
+      /(?:\r?\n+---)?\r?\n+#{1,3}\s+(?:\d+(?:\.\d+)*\.?\s+)?(?:Sources?(?:\s*(?:&|and)\s*(?:Citations?|Footnotes?|References?))?|References?(?:\s*(?:&|and)\s*Footnotes?)?|Citations?|Footnotes?|Grounded\s+Search\s+References|Kildehenvisninger(?:\s+og\s+(?:referanser|fotnoter))?|Kilder(?:\s+og\s+(?:referanser|fotnoter|kildehenvisninger))?|Referanser(?:\s+og\s+(?:fotnoter|kilder))?|Fotnoter):?\s*$/i,
       ''
     )
     .trim();
@@ -5676,6 +5676,10 @@ hr { border: none; border-top: 1px solid #e2e8f0; margin: 14px 0; }
 
 const OKF_VIZ_JS = `
 (function () {
+  if (typeof window !== "undefined" && window.__ICM_TEST_HOOKS__) {
+    window.__ICM_TEST_HOOKS__.renderMarkdownWithOkfFootnotes = renderMarkdownWithOkfFootnotes;
+    return;
+  }
   const bundle = window.BUNDLE;
   const bundleName = window.BUNDLE_NAME;
   document.title = bundleName + " — OKF v0.2 Viewer";
@@ -5947,7 +5951,8 @@ const OKF_VIZ_JS = `
     }
     const joinedBody = bodyLines
       .join("\\n")
-      .replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,3}\\s+(?:Kildehenvisninger|Kilder(?:\\s+og\\s+referanser)?|Referanser|Fotnoter|Sources(?:\\s*&\\s*Citations)?|Citations|Grounded\\s+Search\\s+References)\\s*$/i, "")
+      .replace(/^\\s*#\\s+[^\\r\\n]+(?:\\r?\\n+---(?=\\r?\\n|$))?\\r?\\n*/, "")
+      .replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,3}\\s+(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:Sources?(?:\\s*(?:&|and)\\s*(?:Citations?|Footnotes?|References?))?|References?(?:\\s*(?:&|and)\\s*Footnotes?)?|Citations?|Footnotes?|Grounded\\s+Search\\s+References|Kildehenvisninger(?:\\s+og\\s+(?:referanser|fotnoter))?|Kilder(?:\\s+og\\s+(?:referanser|fotnoter|kildehenvisninger))?|Referanser(?:\\s+og\\s+(?:fotnoter|kilder))?|Fotnoter):?\\s*$/i, "")
       .replace(/\\n+---\\s*$/g, "");
     const inlineMatches = joinedBody.matchAll(/\\[\\^([A-Za-z0-9_\\-]+)\\]/g);
     for (const im of inlineMatches) {
@@ -5960,7 +5965,48 @@ const OKF_VIZ_JS = `
         });
       }
     }
-    const bodyWithSup = joinedBody.replace(
+    const supDigits = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+    const subDigits = "₀₁₂₃₄₅₆₇₈₉";
+    const bodyWithMath = joinedBody.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_, inner) {
+      const cleaned = String(inner)
+        .replace(/\\\\(?:text|mathrm|textbf|textit|emph)\\{([^}]*)\\}/g, "$1")
+        .replace(/\\\\[,;:]/g, " ")
+        .replace(/\\\\!/g, "")
+        .replace(/\\\\leftrightarrow/g, "↔")
+        .replace(/\\\\Leftrightarrow/g, "⇔")
+        .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
+        .replace(/\\\\Rightarrow/g, "⇒")
+        .replace(/\\\\leftarrow/g, "←")
+        .replace(/\\\\(?:ge|geq)\\b/g, "≥")
+        .replace(/\\\\(?:le|leq)\\b/g, "≤")
+        .replace(/\\\\(?:neq|ne)\\b/g, "≠")
+        .replace(/\\\\approx\\b/g, "≈")
+        .replace(/\\\\times\\b/g, "×")
+        .replace(/\\\\pm\\b/g, "±")
+        .replace(/\\\\cdot\\b/g, "·")
+        .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
+        .replace(/\\%/g, "%")
+        .replace(/\\^\\{\\s*(?:°|o)\\s*\\}|\\^°/g, "°")
+        .replace(/\\^\\{\\s*\\+\\s*\\}|\\^\\+/g, "⁺")
+        .replace(/\\^\\{\\s*-\\s*\\}|\\^-/g, "⁻")
+        .replace(/\\^\\{\\s*([0-9]+)\\s*\\}|\\^([0-9])(?![0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9]/g, function (d) {
+            return supDigits[Number(d)];
+          });
+        })
+        .replace(/_\\{\\s*([0-9]+)\\s*\\}|_([0-9])(?![0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9]/g, function (d) {
+            return subDigits[Number(d)];
+          });
+        })
+        .replace(/\\s+/g, " ")
+        .trim();
+      if (!/[\\\\{}^_]/.test(cleaned)) {
+        return cleaned;
+      }
+      return "<code>" + escapeHtmlAttr(cleaned) + "</code>";
+    });
+    const bodyWithSup = bodyWithMath.replace(
       /\\[\\^([A-Za-z0-9_\\-]+)\\]/g,
       '<sup class="fn-ref"><a href="#fn-$1">[$1]</a></sup>'
     );
@@ -6579,13 +6625,17 @@ function escapeA2uiHtml(str: string): string {
  * and excess Markdown formatting from extracted checklist items for clean UI labels while preserving currency `$`.
  */
 export function cleanChecklistLabel(rawText: string): string {
+  const supDigits = '⁰¹²³⁴⁵⁶⁷⁸⁹';
+  const subDigits = '₀₁₂₃₄₅₆₇₈₉';
   let text = String(rawText || '').trim();
   // Remove footnote references like [^lovdata-brann], [^1]
   text = text.replace(/\[\^[^\]]+\]/g, '');
   // Unwrap LaTeX text/font macros anywhere in the string (\text{...}, \mathrm{...}, \textbf{...}, \textit{...}, \emph{...})
   text = text.replace(/\\(?:text|mathrm|textbf|textit|emph)\{([^}]*)\}/g, '$1');
-  // Replace common LaTeX symbol macros with clean Unicode equivalents
+  // Replace common LaTeX spacing and symbol macros with clean Unicode equivalents
   text = text
+    .replace(/\\[,;:]/g, ' ')
+    .replace(/\\!/g, '')
     .replace(/\\leftrightarrow/g, '↔')
     .replace(/\\Leftrightarrow/g, '⇔')
     .replace(/\\rightarrow|\\to\b/g, '→')
@@ -6598,10 +6648,26 @@ export function cleanChecklistLabel(rawText: string): string {
     .replace(/\\times\b/g, '×')
     .replace(/\\pm\b/g, '±')
     .replace(/\\cdot\b/g, '·')
-    .replace(/\\(?:circ|degree)\b/g, '°')
-    .replace(/\\%/g, '%');
-  // Strip inline TeX math delimiters $...$ only when valid math (no whitespace immediately after opening $ or before closing $)
-  text = text.replace(/\$(?!\s)([^$]*?\S)\$/g, '$1');
+    .replace(/\\(?:circ|degree)(?![a-z])/g, '°')
+    .replace(/\\%/g, '%')
+    .replace(/\^\{\s*(?:°|o)\s*\}|\^°/g, '°')
+    .replace(/\^\{\s*\+\s*\}|\^\+/g, '⁺')
+    .replace(/\^\{\s*-\s*\}|\^-/g, '⁻')
+    .replace(/\^\{\s*([0-9]+)\s*\}|\^([0-9])(?![0-9])/g, (_m, b: string, s: string) =>
+      String(b || s).replace(/[0-9]/g, (d) => supDigits[Number(d)])
+    )
+    .replace(/_\{\s*([0-9]+)\s*\}/g, (_m, b: string) =>
+      String(b).replace(/[0-9]/g, (d) => subDigits[Number(d)])
+    );
+  // Strip inline TeX math delimiters $...$ and convert _0.._9 subscripts inside math spans
+  text = text.replace(/\$(?!\s)([^$]*?\S)\$/g, (_m, inner: string) =>
+    String(inner).replace(/_([0-9])(?![0-9])/g, (_sub, s: string) => subDigits[Number(s)])
+  );
+  // Convert bare chemical/classification subscripts outside $...$ (e.g. CO_2, H_2O, O_2, A_2)
+  text = text.replace(
+    /\b(CO|H|O|N|SO|NO|CH|A|B|R|EI|REI)_([0-9])(?![0-9])/g,
+    (_m, prefix: string, s: string) => `${prefix}${subDigits[Number(s)]}`
+  );
   // Convert markdown links [label](url) -> label
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
   // Strip inline code backticks, bold-italic, bold, and italic markers without stripping spaced multiplication asterisks (e.g. "2 * 3 * 4")
@@ -7641,6 +7707,12 @@ body {
 
 const A2UI_STUDIO_JS = `
 (function () {
+  if (typeof window !== "undefined" && window.__ICM_TEST_HOOKS__) {
+    window.__ICM_TEST_HOOKS__.formatInlineLatexAndFootnotes = formatInlineLatexAndFootnotes;
+    window.__ICM_TEST_HOOKS__.cleanClientChecklistLabel = cleanClientChecklistLabel;
+    window.__ICM_TEST_HOOKS__.extractChecklistGroupsClient = extractChecklistGroupsClient;
+    return;
+  }
   const payload = window.A2UI_SURFACE_PAYLOAD;
   const messages = payload.messages || [];
   const bundleGraph = payload.bundleGraph || { nodes: [], edges: [], bodies: {}, types: [], palette: {} };
@@ -7844,10 +7916,14 @@ const A2UI_STUDIO_JS = `
   }
 
   function cleanClientChecklistLabel(rawText) {
+    const supDigits = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+    const subDigits = "₀₁₂₃₄₅₆₇₈₉";
     let text = String(rawText || "").trim();
     text = text.replace(/\\[\\^[^\\]]+\\]/g, "");
     text = text.replace(/\\\\(?:text|mathrm|textbf|textit|emph)\\{([^}]*)\\}/g, "$1");
     text = text
+      .replace(/\\\\[,;:]/g, " ")
+      .replace(/\\\\!/g, "")
       .replace(/\\\\leftrightarrow/g, "↔")
       .replace(/\\\\Leftrightarrow/g, "⇔")
       .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
@@ -7860,9 +7936,29 @@ const A2UI_STUDIO_JS = `
       .replace(/\\\\times\\b/g, "×")
       .replace(/\\\\pm\\b/g, "±")
       .replace(/\\\\cdot\\b/g, "·")
-      .replace(/\\\\(?:circ|degree)\\b/g, "°")
-      .replace(/\\%/g, "%");
-    text = text.replace(/\\$(?!\\s)([^$]*?\\S)\\$/g, "$1");
+      .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
+      .replace(/\\%/g, "%")
+      .replace(/\\^\\{\\s*(?:°|o)\\s*\\}|\\^°/g, "°")
+      .replace(/\\^\\{\\s*\\+\\s*\\}|\\^\\+/g, "⁺")
+      .replace(/\\^\\{\\s*-\\s*\\}|\\^-/g, "⁻")
+      .replace(/\\^\\{\\s*([0-9]+)\\s*\\}|\\^([0-9])(?![0-9])/g, function (_m, b, s) {
+        return String(b || s).replace(/[0-9]/g, function (d) {
+          return supDigits[Number(d)];
+        });
+      })
+      .replace(/_\\{\\s*([0-9]+)\\s*\\}/g, function (_m, b) {
+        return String(b).replace(/[0-9]/g, function (d) {
+          return subDigits[Number(d)];
+        });
+      });
+    text = text.replace(/\\$(?!\\s)([^$]*?\\S)\\$/g, function (_m, inner) {
+      return String(inner).replace(/_([0-9])(?![0-9])/g, function (_sub, s) {
+        return subDigits[Number(s)];
+      });
+    });
+    text = text.replace(/\\b(CO|H|O|N|SO|NO|CH|A|B|R|EI|REI)_([0-9])(?![0-9])/g, function (_m, prefix, s) {
+      return prefix + subDigits[Number(s)];
+    });
     text = text.replace(/\\[([^\\]]+)\\]\\([^)]+\\)/g, "$1");
     text = text
       .replace(/\\x60([^\\x60]+)\\x60/g, "$1")
@@ -8112,15 +8208,21 @@ const A2UI_STUDIO_JS = `
   }
 
   function formatInlineLatexAndFootnotes(md, sources) {
+    const supDigits = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+    const subDigits = "₀₁₂₃₄₅₆₇₈₉";
     let out = String(md || "");
+    // Strip redundant leading H1 heading (# <Title>) since the concept title is already rendered in the card/panel header
+    out = out.replace(/^\\s*#\\s+[^\\r\\n]+(?:\\r?\\n+---(?=\\r?\\n|$))?\\r?\\n*/, "");
     // Strip standalone bottom footnote definitions ([^id]: Title) so they don't render as raw lines below prose
     out = out.replace(/^\\s*\\[\\^([A-Za-z0-9_\\-]+)\\]:\\s*(.+)$/gm, "");
-    out = out.replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,3}\\s+(?:Kildehenvisninger|Kilder(?:\\s+og\\s+referanser)?|Referanser|Fotnoter|Sources(?:\\s*&\\s*Citations)?|Citations|Grounded\\s+Search\\s+References)\\s*$/i, "");
+    out = out.replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,3}\\s+(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:Sources?(?:\\s*(?:&|and)\\s*(?:Citations?|Footnotes?|References?))?|References?(?:\\s*(?:&|and)\\s*Footnotes?)?|Citations?|Footnotes?|Grounded\\s+Search\\s+References|Kildehenvisninger(?:\\s+og\\s+(?:referanser|fotnoter))?|Kilder(?:\\s+og\\s+(?:referanser|fotnoter|kildehenvisninger))?|Referanser(?:\\s+og\\s+(?:fotnoter|kilder))?|Fotnoter):?\\s*$/i, "");
     out = out.replace(/\\n+---\\s*$/g, "").trim();
     // Format inline TeX math spans ($...$)
     out = out.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_, inner) {
-      let cleaned = String(inner)
+      const cleaned = String(inner)
         .replace(/\\\\(?:text|mathrm|textbf|textit|emph)\\{([^}]*)\\}/g, "$1")
+        .replace(/\\\\[,;:]/g, " ")
+        .replace(/\\\\!/g, "")
         .replace(/\\\\leftrightarrow/g, "↔")
         .replace(/\\\\Leftrightarrow/g, "⇔")
         .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
@@ -8133,10 +8235,24 @@ const A2UI_STUDIO_JS = `
         .replace(/\\\\times\\b/g, "×")
         .replace(/\\\\pm\\b/g, "±")
         .replace(/\\\\cdot\\b/g, "·")
-        .replace(/\\\\(?:circ|degree)\\b/g, "°")
+        .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
         .replace(/\\%/g, "%")
+        .replace(/\\^\\{\\s*(?:°|o)\\s*\\}|\\^°/g, "°")
+        .replace(/\\^\\{\\s*\\+\\s*\\}|\\^\\+/g, "⁺")
+        .replace(/\\^\\{\\s*-\\s*\\}|\\^-/g, "⁻")
+        .replace(/\\^\\{\\s*([0-9]+)\\s*\\}|\\^([0-9])(?![0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9]/g, function (d) {
+            return supDigits[Number(d)];
+          });
+        })
+        .replace(/_\\{\\s*([0-9]+)\\s*\\}|_([0-9])(?![0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9]/g, function (d) {
+            return subDigits[Number(d)];
+          });
+        })
+        .replace(/\\s+/g, " ")
         .trim();
-      if (/^[↔⇔→⇒←≥≤≠≈×±·°]+$/.test(cleaned)) {
+      if (!/[\\\\{}^_]/.test(cleaned)) {
         return cleaned;
       }
       return "<code>" + escapeHtml(cleaned) + "</code>";
@@ -8233,7 +8349,7 @@ const A2UI_STUDIO_JS = `
       const el = document.createElement(tagMap[variant] || "div");
       el.className = "a2ui-" + (tagMap[variant] ? variant : "body");
       if (comp.markdown && window.marked) {
-        el.innerHTML = window.marked.parse(rawText);
+        el.innerHTML = window.marked.parse(formatInlineLatexAndFootnotes(rawText, []));
       } else {
         el.textContent = rawText;
       }
@@ -10834,13 +10950,15 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   ]);
   assert(invalidRes.valid === false && invalidRes.errors.length > 0, 'Missing root component is rejected by validator');
 
-  // Verify embedded A2UI_STUDIO_JS and OKF_VIZ_JS have zero JavaScript syntax errors
+  // Verify embedded A2UI_STUDIO_JS and OKF_VIZ_JS have zero JavaScript syntax errors and test their runtime formatting hooks
   let studioJsSyntaxValid = false;
+  const studioHooks: Record<string, any> = {};
+  const vizHooks: Record<string, any> = {};
   try {
     // eslint-disable-next-line no-new-func
-    new Function(A2UI_STUDIO_JS);
+    new Function('window', A2UI_STUDIO_JS)({ __ICM_TEST_HOOKS__: studioHooks });
     // eslint-disable-next-line no-new-func
-    new Function(OKF_VIZ_JS);
+    new Function('window', OKF_VIZ_JS)({ __ICM_TEST_HOOKS__: vizHooks });
     studioJsSyntaxValid = true;
   } catch (err: any) {
     throw new Error(`[ICM Self-Test FAILED] Embedded JS syntax error: ${err?.message || String(err)}`);
@@ -10849,8 +10967,83 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     studioJsSyntaxValid &&
       A2UI_STUDIO_JS.includes('okf-md-back-primary-btn') &&
       A2UI_STUDIO_JS.includes('okf-graph-back-btn') &&
-      OKF_VIZ_JS.includes('viz-stub-back-btn'),
-    'A2UI_STUDIO_JS and OKF_VIZ_JS parse with zero syntax errors and include back-to-concept navigation hooks'
+      OKF_VIZ_JS.includes('viz-stub-back-btn') &&
+      typeof studioHooks.formatInlineLatexAndFootnotes === 'function' &&
+      typeof studioHooks.cleanClientChecklistLabel === 'function' &&
+      typeof vizHooks.renderMarkdownWithOkfFootnotes === 'function',
+    'A2UI_STUDIO_JS and OKF_VIZ_JS parse with zero syntax errors and expose runtime test hooks'
+  );
+
+  // Verify compound trailing citation-section headings (## Kilder og fotnoter, ## Referanser og fotnoter, ## Sources and Footnotes, etc.)
+  assert(
+    stripTrailingEmptyCitationSection('Brødtekst her.\n\n---\n\n## Kilder og fotnoter\n') === 'Brødtekst her.' &&
+      stripTrailingEmptyCitationSection('Brødtekst her.\n\n## Referanser og fotnoter') === 'Brødtekst her.' &&
+      stripTrailingEmptyCitationSection('Brødtekst her.\n\n## Kildehenvisninger og fotnoter') === 'Brødtekst her.' &&
+      stripTrailingEmptyCitationSection('Brødtekst her.\n\n### 6. Sources and Footnotes:') === 'Brødtekst her.',
+    'stripTrailingEmptyCitationSection strips compound Norwegian and English trailing citation/footnote headings'
+  );
+
+  // Verify LaTeX superscripts/subscripts in cleanChecklistLabel and cleanClientChecklistLabel
+  const latexChecklistInput =
+    'Kontroller brannceller over $800\\text{ m}^2$, volum $100\\text{ m}^{3}$, temperatur $20^\\circ\\text{C}$, $\\text{H}_2\\text{O}$ og $\\text{CO}_2$-slokkere i sone_2 [^dibk-tek17]';
+  const expectedCleanChecklist =
+    'Kontroller brannceller over 800 m², volum 100 m³, temperatur 20°C, H₂O og CO₂-slokkere i sone_2';
+  const serverCleanedLatexChk = cleanChecklistLabel(latexChecklistInput);
+  const clientCleanedLatexChk = studioHooks.cleanClientChecklistLabel(latexChecklistInput);
+  assert(
+    serverCleanedLatexChk === expectedCleanChecklist &&
+      clientCleanedLatexChk === expectedCleanChecklist,
+    `cleanChecklistLabel and cleanClientChecklistLabel convert $800\\text{ m}^2$ -> 800 m², $100\\text{ m}^{3}$ -> 100 m³, $20^\\circ\\text{C}$ -> 20°C, $\\text{H}_2\\text{O}$ -> H₂O, and $\\text{CO}_2$ -> CO₂ while preserving sone_2 (got server="${serverCleanedLatexChk}", client="${clientCleanedLatexChk}")`
+  );
+
+  // Verify formatInlineLatexAndFootnotes (a2ui.html) and renderMarkdownWithOkfFootnotes (viz.html):
+  // 1) Strip redundant leading `# <Title>` heading while keeping `## 1. Deloverskrift`
+  // 2) Convert inline `$800\text{ m}^2$` -> `800 m²` and `$\text{CO}_2$` -> `CO₂` without raw `$` or `<code>`
+  // 3) Strip trailing `---\n\n## Kilder og fotnoter`
+  const samplePreviewMd = [
+    '# Systematisk brannforebyggende arbeid i næringsbygg',
+    '',
+    'Brannceller over $800\\text{ m}^2$ og $\\text{CO}_2$-slokkere ved el-tavler[^dibk-tek17].',
+    '',
+    '## 1. Tekniske krav',
+    '',
+    'Krav til $\\text{H}_2\\text{O}$ og $100\\text{ m}^3$.',
+    '',
+    '---',
+    '',
+    '## Kilder og fotnoter',
+    '',
+    '[^dibk-tek17]: Byggteknisk forskrift (TEK17)',
+  ].join('\n');
+  const formattedA2uiPreview = String(studioHooks.formatInlineLatexAndFootnotes(samplePreviewMd, []));
+  const renderedVizPreview = String(
+    vizHooks.renderMarkdownWithOkfFootnotes(samplePreviewMd, [
+      { id: 'dibk-tek17', title: 'Byggteknisk forskrift (TEK17)', resource: 'https://www.dibk.no/tek17' },
+    ])
+  );
+  assert(
+    !formattedA2uiPreview.includes('# Systematisk brannforebyggende arbeid') &&
+      formattedA2uiPreview.includes('## 1. Tekniske krav') &&
+      formattedA2uiPreview.includes('800 m²') &&
+      formattedA2uiPreview.includes('CO₂-slokkere') &&
+      formattedA2uiPreview.includes('H₂O') &&
+      formattedA2uiPreview.includes('100 m³') &&
+      !formattedA2uiPreview.includes('$800') &&
+      !formattedA2uiPreview.includes('<code>800') &&
+      !formattedA2uiPreview.includes('Kilder og fotnoter'),
+    `formatInlineLatexAndFootnotes strips leading H1 and trailing "## Kilder og fotnoter" and formats 800 m² / CO₂ cleanly (got: "${formattedA2uiPreview}")`
+  );
+  assert(
+    !renderedVizPreview.includes('# Systematisk brannforebyggende arbeid') &&
+      renderedVizPreview.includes('## 1. Tekniske krav') &&
+      renderedVizPreview.includes('800 m²') &&
+      renderedVizPreview.includes('CO₂-slokkere') &&
+      renderedVizPreview.includes('H₂O') &&
+      renderedVizPreview.includes('100 m³') &&
+      !renderedVizPreview.includes('$800') &&
+      !renderedVizPreview.includes('<code>800') &&
+      !renderedVizPreview.includes('Kilder og fotnoter'),
+    `renderMarkdownWithOkfFootnotes strips leading H1 and trailing "## Kilder og fotnoter" and formats 800 m² / CO₂ cleanly (got: "${renderedVizPreview}")`
   );
 
   // Verify package.json cli* scripts use --env-file-if-exists=.env.local (never bare --env-file=.env.local)
