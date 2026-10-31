@@ -1858,13 +1858,17 @@ function isBareDomainTitle(title?: string): boolean {
   if (/^(?:https?:\/\/)?(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}\/?$/i.test(t)) {
     return true;
   }
+  if (/\s+[—–-]\s+(?:id\d+|\w*servlet)$/i.test(t)) {
+    return true;
+  }
   const autoSlugMatch = t.match(/^[a-z0-9.-]+\.[a-z]{2,}\s+—\s+(.+)$/i);
   if (autoSlugMatch) {
     const slugPart = autoSlugMatch[1].trim();
     if (
       slugPart.length <= 1 ||
       /^(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\s+\d/i.test(slugPart) ||
-      /^[^\p{L}]+[\p{Ll}]/u.test(slugPart)
+      /^[^\p{L}]+[\p{Ll}]/u.test(slugPart) ||
+      /^(?:id\d+|\w*servlet)$/i.test(slugPart)
     ) {
       return true;
     }
@@ -1913,6 +1917,9 @@ export function enrichBareDomainSourceTitle(
           noExt
         )
       ) {
+        return true;
+      }
+      if (/^id\d+$/i.test(noExt) || /servlet$/i.test(noExt)) {
         return true;
       }
       if (/^[a-z]$/i.test(noExt) || /^(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)$/i.test(noExt)) {
@@ -1985,6 +1992,306 @@ export function enrichBareDomainSourceTitle(
     return cleanTitle || cleanUrl;
   }
 }
+
+const SOURCE_MATCH_STOP_WORDS = new Set([
+  'og',
+  'i',
+  'til',
+  'om',
+  'for',
+  'av',
+  'pa',
+  'med',
+  'ved',
+  'som',
+  'en',
+  'et',
+  'de',
+  'den',
+  'det',
+  'the',
+  'and',
+  'of',
+  'to',
+  'in',
+  'no',
+  'org',
+  'com',
+  'www',
+  'https',
+  'http',
+  'html',
+  'pdf',
+]);
+
+function normalizeTextForSourceMatch(raw: string): string {
+  return String(raw || '')
+    .toLowerCase()
+    .replace(/æ/g, 'ae')
+    .replace(/ø/g, 'o')
+    .replace(/å/g, 'a')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function tokenizeForSourceMatch(raw: string): string[] {
+  const norm = normalizeTextForSourceMatch(raw);
+  const tokens = norm
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 2 && !SOURCE_MATCH_STOP_WORDS.has(t));
+  const out = new Set<string>(tokens);
+  if (out.has('faq')) {
+    out.add('ofte');
+    out.add('stilte');
+    out.add('sporsmal');
+  }
+  if (out.has('ofte') && out.has('sporsmal')) {
+    out.add('faq');
+  }
+  return Array.from(out);
+}
+
+function matchOrphanFootnoteToSource(
+  orphanId: string,
+  orphanDefLabel: string | undefined,
+  sources: OKFSource[]
+): OKFSource | null {
+  if (!orphanId || !Array.isArray(sources) || sources.length === 0) return null;
+  const idTokens = tokenizeForSourceMatch(orphanId);
+  const labelTokens =
+    orphanDefLabel && orphanDefLabel.trim() !== orphanId.trim()
+      ? tokenizeForSourceMatch(orphanDefLabel)
+      : [];
+  const allOrphanTokens = Array.from(new Set([...idTokens, ...labelTokens]));
+  if (allOrphanTokens.length === 0) return null;
+
+  const stripParenthetical = (s?: string): string =>
+    normalizeTextForSourceMatch(String(s || '').replace(/\([^)]*\)/g, ''))
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+
+  const orphanCleanTitle =
+    orphanDefLabel && orphanDefLabel.trim() !== orphanId.trim()
+      ? stripParenthetical(orphanDefLabel)
+      : '';
+
+  let bestSrc: OKFSource | null = null;
+  let bestScore = 0;
+  let bestTotalMatch = 0;
+
+  for (const src of sources) {
+    if (!src || !src.id) continue;
+    const srcIdTokens = new Set(tokenizeForSourceMatch(src.id));
+    const srcTitleTokens = new Set(tokenizeForSourceMatch(src.title || ''));
+    const srcUrlTokens = new Set(tokenizeForSourceMatch(src.resource || ''));
+    const allSrcTokens = new Set([...srcIdTokens, ...srcTitleTokens, ...srcUrlTokens]);
+
+    let score = 0;
+    let idMatchCount = 0;
+    let totalMatchCount = 0;
+
+    for (const t of idTokens) {
+      if (srcIdTokens.has(t)) {
+        idMatchCount++;
+        totalMatchCount++;
+        score += t.length >= 8 ? 30 : 20;
+      } else if (srcUrlTokens.has(t) || srcTitleTokens.has(t)) {
+        idMatchCount++;
+        totalMatchCount++;
+        score += t.length >= 8 ? 25 : 15;
+      }
+    }
+
+    for (const t of labelTokens) {
+      if (idTokens.includes(t)) continue;
+      if (allSrcTokens.has(t)) {
+        totalMatchCount++;
+        score += t.length >= 8 ? 12 : 8;
+      }
+    }
+
+    if (orphanCleanTitle.length >= 15) {
+      const srcCleanTitle = stripParenthetical(src.title);
+      if (
+        srcCleanTitle.length >= 15 &&
+        (srcCleanTitle === orphanCleanTitle ||
+          srcCleanTitle.includes(orphanCleanTitle) ||
+          orphanCleanTitle.includes(srcCleanTitle))
+      ) {
+        score += 50;
+      }
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestSrc = src;
+      bestTotalMatch = totalMatchCount;
+    }
+  }
+
+  if (bestSrc && bestTotalMatch >= 2 && bestScore >= 25) {
+    return bestSrc;
+  }
+  return null;
+}
+
+/**
+ * Self-heals an OKF v0.2 document in-place by:
+ * 1. Enriching any bare-domain or CMS-polluted (`Id87138`, `ResourceServlet`) source titles in `doc.frontmatter.sources`.
+ * 2. Deduplicating `doc.frontmatter.sources` that share an identical `resource` URL and rewriting alias `[^id]` citations.
+ * 3. Resolving any orphan `[^id]` citations in `doc.body` against `doc.frontmatter.sources` (or stripping ungrounded orphans).
+ * 4. Synchronizing the bottom `[^id]: Title` footnote definitions so `citedFootnoteIds.size === doc.frontmatter.sources.length`.
+ */
+export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
+  if (!doc || !doc.frontmatter) return false;
+  const rawSources = Array.isArray(doc.frontmatter.sources) ? doc.frontmatter.sources : [];
+  if (rawSources.length === 0 && !doc.body) return false;
+
+  let modified = false;
+
+  // 1. Enrich bare-domain titles & deduplicate frontmatter sources by canonical resource URL
+  const aliasMap = new Map<string, string>();
+  const canonicalByUrl = new Map<string, OKFSource>();
+  const dedupedSources: OKFSource[] = [];
+
+  for (const s of rawSources) {
+    if (!s || typeof s !== 'object') continue;
+    const enrichedTitle = s.resource
+      ? enrichBareDomainSourceTitle(s.title, String(s.resource))
+      : s.title;
+    if (enrichedTitle && enrichedTitle !== s.title) {
+      s.title = enrichedTitle;
+      modified = true;
+    }
+    const resKey = String(s.resource || '').trim();
+    if (resKey && canonicalByUrl.has(resKey)) {
+      const existing = canonicalByUrl.get(resKey)!;
+      if (s.id && existing.id && s.id !== existing.id) {
+        aliasMap.set(s.id, existing.id);
+      }
+      if (
+        s.title &&
+        (!existing.title ||
+          existing.title === existing.resource ||
+          isBareDomainTitle(existing.title))
+      ) {
+        existing.title = s.title;
+      }
+      modified = true;
+    } else {
+      if (resKey) canonicalByUrl.set(resKey, s);
+      dedupedSources.push(s);
+    }
+  }
+
+  // 2. Separate body prose from bottom `[^id]: label` definitions
+  const rawBody = String(doc.body || '');
+  const existingDefs = new Map<string, string>();
+  const proseLines: string[] = [];
+  for (const line of rawBody.split(/\r?\n/)) {
+    const m = line.trim().match(/^\[\^([A-Za-z0-9_\-]+)\]:\s*(.+)$/);
+    if (m) {
+      existingDefs.set(m[1], m[2].trim());
+    } else {
+      proseLines.push(line);
+    }
+  }
+
+  let proseText = proseLines.join('\n');
+
+  // Snap footnotes out of slash-joined words (`overtredelser[^id]/avvik` -> `overtredelser/avvik[^id]`)
+  proseText = proseText.replace(
+    /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
+    '$1$3$2'
+  );
+
+  // Rewrite duplicate-URL source aliases
+  for (const [aliasId, canonicalId] of aliasMap.entries()) {
+    if (proseText.includes(`[^${aliasId}]`)) {
+      proseText = proseText.replaceAll(`[^${aliasId}]`, `[^${canonicalId}]`);
+      modified = true;
+    }
+  }
+
+  // 3. Resolve or strip orphan `[^id]` citations in proseText
+  const validSourceById = new Map<string, OKFSource>();
+  for (const s of dedupedSources) {
+    if (s.id) validSourceById.set(s.id, s);
+  }
+
+  const inlineFnIds = Array.from(
+    new Set(Array.from(proseText.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1]))
+  );
+  for (const fnId of inlineFnIds) {
+    if (!validSourceById.has(fnId)) {
+      const matched = matchOrphanFootnoteToSource(fnId, existingDefs.get(fnId), dedupedSources);
+      if (matched && matched.id) {
+        proseText = proseText.replaceAll(`[^${fnId}]`, `[^${matched.id}]`);
+      } else {
+        proseText = proseText.replaceAll(`[^${fnId}]`, '');
+        proseText = proseText.replace(
+          /[ \t]+(\[\^[A-Za-z0-9_\-]+\])/g,
+          (_m, fn: string, offset: number, str: string) =>
+            /\][ \t]*$/.test(str.slice(0, offset)) ? ` ${fn}` : fn
+        );
+        proseText = proseText.replace(/[ \t]+([.,;!?])/g, '$1');
+      }
+      modified = true;
+    }
+  }
+
+  // Collapse adjacent duplicate footnote citations (`[^a] [^a]` or `[^a][^a]` -> `[^a]`)
+  proseText = proseText.replace(/(?:\[\^[A-Za-z0-9_\-]+\][ \t]*){2,}/g, (cluster) => {
+    const trailingSpace = /[ \t]+$/.exec(cluster)?.[0] || '';
+    const seenFn = new Set<string>();
+    const uniqueRefs: string[] = [];
+    for (const m of cluster.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)) {
+      if (!seenFn.has(m[1])) {
+        seenFn.add(m[1]);
+        uniqueRefs.push(`[^${m[1]}]`);
+      }
+    }
+    return uniqueRefs.join(' ') + trailingSpace;
+  });
+
+  // 4. Filter uncited frontmatter sources & rebuild synchronized bottom footnote definitions
+  const finalCitedIds = Array.from(
+    new Set(Array.from(proseText.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1]))
+  );
+  const finalCitedSet = new Set(finalCitedIds);
+
+  const finalSources =
+    finalCitedSet.size > 0
+      ? dedupedSources.filter((s) => s.id && finalCitedSet.has(s.id))
+      : dedupedSources;
+  if (finalSources.length !== rawSources.length) {
+    modified = true;
+  }
+  doc.frontmatter.sources = finalSources;
+
+  const footnoteLines: string[] = [];
+  for (const fnId of finalCitedIds) {
+    const src = validSourceById.get(fnId);
+    const label = src?.title || existingDefs.get(fnId) || src?.resource || fnId;
+    footnoteLines.push(`[^${fnId}]: ${label}`);
+  }
+
+  const trimmedProse = proseText.trim();
+  const nextBody =
+    footnoteLines.length > 0
+      ? `${trimmedProse}\n\n${footnoteLines.join('\n')}\n`
+      : trimmedProse
+        ? `${trimmedProse}\n`
+        : '';
+
+  if (nextBody !== rawBody) {
+    doc.body = nextBody;
+    modified = true;
+  }
+
+  return modified;
+}
+
 
 /**
  * Parses markdown text and Interactions API grounding steps, resolves Vertex redirect URLs,
@@ -2338,7 +2645,10 @@ export async function cleanGroundingLinks(
   const usedIds = new Set<string>();
   const sourcesByUrl = new Map<string, OKFSource>();
   const sourcesById = new Map<string, OKFSource>();
+  const sourceIdAliases = new Map<string, string>();
   const orderedSources: OKFSource[] = [];
+  const isAutoDomainSlugTitle = (t?: string): boolean =>
+    /^[a-z0-9.-]+\.[a-z]{2,}\s+[—–-]\s+/i.test(String(t || '').trim());
 
   const registerSource = (
     rawUrl: string,
@@ -2396,7 +2706,10 @@ export async function cleanGroundingLinks(
         cleanTitle &&
         (!existingById.title ||
           existingById.title === existingById.resource ||
-          isBareDomainTitle(existingById.title))
+          isBareDomainTitle(existingById.title) ||
+          (isAutoDomainSlugTitle(existingById.title) &&
+            !isBareDomainTitle(cleanTitle) &&
+            !isAutoDomainSlugTitle(cleanTitle)))
       ) {
         existingById.title = enrichBareDomainSourceTitle(cleanTitle, existingById.resource);
       } else if (isBareDomainTitle(existingById.title)) {
@@ -2417,11 +2730,20 @@ export async function cleanGroundingLinks(
 
     if (sourcesByUrl.has(resolvedUrl)) {
       const existing = sourcesByUrl.get(resolvedUrl)!;
+      const prefId = preferredId?.trim();
+      if (prefId && existing.id && prefId !== existing.id) {
+        sourceIdAliases.set(prefId, existing.id);
+        sourcesById.set(prefId, existing);
+        usedIds.add(prefId);
+      }
       if (
         cleanTitle &&
         (!existing.title ||
           existing.title === existing.resource ||
-          isBareDomainTitle(existing.title))
+          isBareDomainTitle(existing.title) ||
+          (isAutoDomainSlugTitle(existing.title) &&
+            !isBareDomainTitle(cleanTitle) &&
+            !isAutoDomainSlugTitle(cleanTitle)))
       ) {
         existing.title = enrichBareDomainSourceTitle(cleanTitle, existing.resource);
       } else if (isBareDomainTitle(existing.title)) {
@@ -2807,6 +3129,7 @@ export async function cleanGroundingLinks(
         existingCanonical.last_modified = entry.last_modified;
       }
       if (entry.id && existingCanonical.id && entry.id !== existingCanonical.id) {
+        sourceIdAliases.set(entry.id, existingCanonical.id);
         bodyText = bodyText.replaceAll(`[^${entry.id}]`, `[^${existingCanonical.id}]`);
         existingFootnoteDefs.delete(entry.id);
         sourcesById.set(entry.id, existingCanonical);
@@ -2819,6 +3142,23 @@ export async function cleanGroundingLinks(
   }
   orderedSources.length = 0;
   orderedSources.push(...dedupedSources);
+
+  // Rewrite all duplicate-URL source aliases recorded in registerSource() or deduplication
+  for (const [aliasId, rawCanonicalId] of sourceIdAliases.entries()) {
+    let canonicalId = rawCanonicalId;
+    const seen = new Set<string>([aliasId]);
+    while (sourceIdAliases.has(canonicalId) && !seen.has(canonicalId)) {
+      seen.add(canonicalId);
+      canonicalId = sourceIdAliases.get(canonicalId)!;
+    }
+    bodyText = bodyText.replaceAll(`[^${aliasId}]`, `[^${canonicalId}]`);
+    existingFootnoteDefs.delete(aliasId);
+    const canonicalEntry = sourcesById.get(canonicalId);
+    if (canonicalEntry) {
+      sourcesById.set(aliasId, canonicalEntry);
+    }
+  }
+
   // Convert bare `.^id` typos (`/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/g`) to `.[^$1]`
   bodyText = bodyText.replace(/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/gi, '.[^$1]');
   bodyText = bodyText.replace(
@@ -2830,6 +3170,31 @@ export async function cleanGroundingLinks(
       return `[^${canonicalId}]${punct || ''}`;
     }
   );
+
+  // Resolve or strip any orphan `[^id]` citations in bodyText that do not exist in orderedSources
+  const canonicalSourceById = new Map<string, OKFSource>();
+  for (const s of orderedSources) {
+    if (s.id) canonicalSourceById.set(s.id, s);
+  }
+  const rawCitedFnIds = Array.from(
+    new Set(Array.from(bodyText.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1]))
+  );
+  for (const fnId of rawCitedFnIds) {
+    if (!canonicalSourceById.has(fnId)) {
+      const matched = matchOrphanFootnoteToSource(
+        fnId,
+        existingFootnoteDefs.get(fnId),
+        orderedSources
+      );
+      if (matched && matched.id) {
+        bodyText = bodyText.replaceAll(`[^${fnId}]`, `[^${matched.id}]`);
+      } else {
+        bodyText = bodyText.replaceAll(`[^${fnId}]`, '');
+      }
+      existingFootnoteDefs.delete(fnId);
+    }
+  }
+
   // Normalize trailing sentence punctuation (`word.[^id]` -> `word[^id].` and `[^a].[^b]` -> `[^a] [^b].`)
   let prevBodyText = '';
   while (prevBodyText !== bodyText) {
@@ -2860,6 +3225,12 @@ export async function cleanGroundingLinks(
     }
     return uniqueRefs.join(' ') + trailingSpace;
   });
+  bodyText = bodyText.replace(
+    /[ \t]+(\[\^[A-Za-z0-9_\-]+\])/g,
+    (_m, fn: string, offset: number, str: string) =>
+      /\][ \t]*$/.test(str.slice(0, offset)) ? ` ${fn}` : fn
+  );
+  bodyText = bodyText.replace(/[ \t]+([.,;!?])/g, '$1');
 
   // 7. Append OKF v0.2 footnote definitions (`[^id]: Title`) at the bottom of the body (SPEC.md §5.1)
   // Only emit definitions for footnote IDs actually cited (`[^id]`) in the body (`citedFootnoteIds`).
@@ -2870,7 +3241,7 @@ export async function cleanGroundingLinks(
 
   const footnoteLines: string[] = [];
   for (const fnId of citedFootnoteIds) {
-    const src = sourcesById.get(fnId);
+    const src = canonicalSourceById.get(fnId) || sourcesById.get(fnId);
     const label = src?.title || existingFootnoteDefs.get(fnId) || src?.resource || fnId;
     footnoteLines.push(`[^${fnId}]: ${label}`);
   }
@@ -3744,29 +4115,7 @@ export function syncRunToBundle(
     doc.frontmatter.type = 'Research Concept';
   }
 
-  let docHealed = false;
-  const healedBody = String(doc.body || '').replace(
-    /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
-    '$1$3$2'
-  );
-  if (healedBody !== doc.body) {
-    doc.body = healedBody;
-    docHealed = true;
-  }
-  if (Array.isArray(doc.frontmatter.sources)) {
-    doc.frontmatter.sources = doc.frontmatter.sources.map((s) => {
-      if (!s || typeof s !== 'object') return s;
-      const enriched = s.resource ? enrichBareDomainSourceTitle(s.title, String(s.resource)) : s.title;
-      if (enriched && s.title && enriched !== s.title) {
-        docHealed = true;
-        if (s.id) {
-          doc.body = doc.body.replaceAll(`[^${s.id}]: ${s.title}`, `[^${s.id}]: ${enriched}`);
-        }
-        return { ...s, title: enriched };
-      }
-      return s;
-    });
-  }
+  const docHealed = healOrphanOkfFootnotes(doc);
   if (docHealed) {
     fs.writeFileSync(researchPath, serializeOkfDocument(doc), 'utf-8');
   }
@@ -5006,6 +5355,14 @@ export function walkBundleConcepts(bundleRoot: string): OKFConceptNode[] {
       continue;
     }
 
+    if (healOrphanOkfFootnotes(doc)) {
+      try {
+        fs.writeFileSync(mdPath, serializeOkfDocument(doc), 'utf-8');
+      } catch {
+        // Ignore read-only bundle paths
+      }
+    }
+
     const fm = doc.frontmatter || {};
     const rawTags = fm.tags || [];
     const tags = Array.isArray(rawTags) ? rawTags.map(String) : [String(rawTags)];
@@ -5017,22 +5374,13 @@ export function walkBundleConcepts(bundleRoot: string): OKFConceptNode[] {
       : rawSources && typeof rawSources === 'object'
         ? [rawSources as OKFSource]
         : [];
-    let normalizedBody = (doc.body || '').replace(
-      /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
-      '$1$3$2'
-    );
+    const normalizedBody = doc.body || '';
     const sources: OKFSource[] = rawSourcesList.map((s) => {
       const validRetrieved = parseValidIsoTimestamp(s.retrieved_at) || genAtFallback;
       const validLm = parseValidIsoTimestamp(s.last_modified);
       const enrichedTitle = s.resource
         ? enrichBareDomainSourceTitle(s.title, String(s.resource))
         : s.title;
-      if (s.id && enrichedTitle && s.title && enrichedTitle !== s.title) {
-        normalizedBody = normalizedBody.replaceAll(
-          `[^${s.id}]: ${s.title}`,
-          `[^${s.id}]: ${enrichedTitle}`
-        );
-      }
       const nextSrc: OKFSource = {
         ...s,
         ...(enrichedTitle ? { title: enrichedTitle } : {}),
@@ -5666,6 +6014,8 @@ const OKF_VIZ_JS = `
     return event.at ? event.by + " · " + event.at : String(event.by);
   }
 
+  const selectNode = showDetail;
+
   function rewriteInternalLinks(root, currentConceptId) {
     root.querySelectorAll("a[href]").forEach((a) => {
       const href = a.getAttribute("href");
@@ -5677,6 +6027,45 @@ const OKF_VIZ_JS = `
         a.addEventListener("click", (e) => {
           e.preventDefault();
           showDetail(target);
+        });
+        return;
+      }
+      if (target) {
+        a.className = "internal stub-link";
+        a.style.color = "#f59e0b";
+        a.setAttribute("data-internal-href", href);
+        a.setAttribute("href", "javascript:void(0)");
+        const linkLabel = (a.textContent || target).trim();
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const titleEl = document.getElementById("detail-title");
+          if (titleEl) titleEl.textContent = linkLabel;
+          const idEl = document.getElementById("detail-id");
+          if (idEl) idEl.textContent = target;
+          const bodyEl = document.getElementById("detail-body");
+          if (!bodyEl) return;
+          bodyEl.innerHTML =
+            '<div style="padding:14px;border:1px solid #fde68a;background:#fefce8;border-radius:8px;margin-bottom:12px">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+            '<span class="badge status-draft">Linked Concept (Stub)</span>' +
+            '<button type="button" id="viz-stub-back-btn" style="cursor:pointer;padding:4px 10px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;font-size:12px;font-weight:600">← Tilbake til konsept</button>' +
+            "</div>" +
+            "<h2 style='margin:6px 0'>" +
+            escapeHtmlAttr(linkLabel) +
+            "</h2>" +
+            "<p class='muted' style='margin:4px 0'>Konsept-ID: <code>/" +
+            escapeHtmlAttr(target) +
+            ".md</code></p>" +
+            "<p style='margin:8px 0 0'>Dette OKF-konseptet er kryssreferert fra <code>" +
+            escapeHtmlAttr(currentConceptId) +
+            '</code>. Kjør <code>npm run cli:stage1 -- "' +
+            escapeHtmlAttr(linkLabel) +
+            '"</code> for å generere og verifisere dette konseptet i kunnskapsbunten.</p>' +
+            "</div>";
+          const backBtn = document.getElementById("viz-stub-back-btn");
+          if (backBtn) {
+            backBtn.addEventListener("click", () => selectNode(currentConceptId));
+          }
         });
         return;
       }
@@ -8398,6 +8787,7 @@ const A2UI_STUDIO_JS = `
       const isStale = Boolean(resolveDynamic(comp.isStale, surface, scopeData));
       const editModePath = "/okf/editMode";
       const isEditing = Boolean(resolvePointer(surface.dataModel, editModePath));
+      const viewingStub = Boolean(resolvePointer(surface.dataModel, "/okf/viewingStubConcept"));
 
       const mainCard = document.createElement("div");
       mainCard.className = "a2ui-card a2ui-col";
@@ -8418,6 +8808,29 @@ const A2UI_STUDIO_JS = `
       leftHead.appendChild(trustBadge);
       leftHead.appendChild(freshBadge);
 
+      const rightActions = document.createElement("div");
+      rightActions.className = "a2ui-row";
+      if (viewingStub) {
+        const backPrimaryBtn = document.createElement("button");
+        backPrimaryBtn.className = "a2ui-btn primary";
+        backPrimaryBtn.id = "okf-md-back-primary-btn";
+        backPrimaryBtn.textContent = "← Tilbake til hovedkonsept";
+        backPrimaryBtn.addEventListener("click", () => {
+          const origBody = resolvePointer(surface.dataModel, "/okf/primaryBody");
+          const origTitle = resolvePointer(surface.dataModel, "/okf/primaryTitle");
+          if (origBody !== undefined) {
+            setPointer(surface.dataModel, "/okf/body", origBody);
+          }
+          if (origTitle !== undefined) {
+            setPointer(surface.dataModel, "/okf/title", origTitle);
+          }
+          setPointer(surface.dataModel, "/okf/viewingStubConcept", false);
+          syncOkfBodyToChecklist(surface);
+          renderSurface();
+        });
+        rightActions.appendChild(backPrimaryBtn);
+      }
+
       const editBtn = document.createElement("button");
       editBtn.className = "a2ui-btn";
       editBtn.textContent = isEditing ? "👁 Forhåndsvis OKF Markdown" : "✏️ Rediger Layer 4 Markdown";
@@ -8428,8 +8841,9 @@ const A2UI_STUDIO_JS = `
         setPointer(surface.dataModel, editModePath, !isEditing);
         renderSurface();
       });
+      rightActions.appendChild(editBtn);
       toolbar.appendChild(leftHead);
-      toolbar.appendChild(editBtn);
+      toolbar.appendChild(rightActions);
       mainCard.appendChild(toolbar);
 
       if (isEditing) {
@@ -8476,8 +8890,13 @@ const A2UI_STUDIO_JS = `
               a.style.fontWeight = "600";
               a.addEventListener("click", (e) => {
                 e.preventDefault();
+                if (!resolvePointer(surface.dataModel, "/okf/viewingStubConcept")) {
+                  setPointer(surface.dataModel, "/okf/primaryBody", resolvePointer(surface.dataModel, "/okf/body") || "");
+                  setPointer(surface.dataModel, "/okf/primaryTitle", resolvePointer(surface.dataModel, "/okf/title") || "");
+                }
                 setPointer(surface.dataModel, "/okf/body", bundleGraph.bodies[conceptId]);
                 setPointer(surface.dataModel, "/okf/title", conceptId);
+                setPointer(surface.dataModel, "/okf/viewingStubConcept", true);
                 syncOkfBodyToChecklist(surface);
                 renderSurface();
               });
@@ -8548,6 +8967,7 @@ const A2UI_STUDIO_JS = `
       canvas.className = "okf-graph-canvas";
       const detail = document.createElement("div");
       detail.className = "okf-graph-detail";
+      detail.id = "okf-graph-detail-view";
       detail.innerHTML = '<div class="a2ui-caption">Klikk på en OKF-node i grafen for å inspisere konseptet og relasjoner.</div>';
       split.appendChild(canvas);
       split.appendChild(detail);
@@ -8563,7 +8983,8 @@ const A2UI_STUDIO_JS = `
         const rawBody = (bundleGraph.bodies && bundleGraph.bodies[d.id]) || "";
         const formattedBody = formatInlineLatexAndFootnotes(rawBody, []);
         const isSource = d.group === "source";
-        if (!isSource) {
+        const isSubNode = isSource || d.type === "Linked Concept";
+        if (!isSubNode) {
           lastConceptData = d;
         }
         const displayTitle = d.fullTitle || d.label || d.id;
@@ -8597,8 +9018,8 @@ const A2UI_STUDIO_JS = `
                 " ↗</a></p>"
               : "");
         } else {
-          headerHtml =
-            '<div class="a2ui-row" style="gap:6px;margin-bottom:6px">' +
+          const badgesHtml =
+            '<div class="a2ui-row" style="gap:6px">' +
             '<span class="a2ui-badge primary">' +
             escapeHtml(d.type || "Concept") +
             "</span>" +
@@ -8617,7 +9038,14 @@ const A2UI_STUDIO_JS = `
             '">' +
             (d.stale ? "STALE" : "fresh") +
             "</span>" +
-            "</div>" +
+            "</div>";
+          headerHtml =
+            (isSubNode
+              ? '<div class="a2ui-row justify-between" style="margin-bottom:6px">' +
+                badgesHtml +
+                '<button type="button" class="a2ui-btn" id="okf-graph-back-btn" style="padding:4px 10px;font-size:12px">← Tilbake til konsept</button>' +
+                "</div>"
+              : '<div style="margin-bottom:6px">' + badgesHtml + "</div>") +
             '<h3 class="a2ui-h3" style="margin-top:8px">' +
             escapeHtml(displayTitle) +
             "</h3>" +
@@ -8640,7 +9068,9 @@ const A2UI_STUDIO_JS = `
               ? (bundleGraph.nodes || []).find((n) => (n.data && n.data.id === d.parentConceptId) || n.id === d.parentConceptId)
               : null;
             const fallbackWrapper = (bundleGraph.nodes || []).find(
-              (n) => n.group === "concept" || (n.data && n.data.group === "concept")
+              (n) =>
+                (n.group === "concept" || (n.data && n.data.group === "concept")) &&
+                (!n.data || n.data.type !== "Linked Concept")
             );
             const conceptData =
               lastConceptData ||
@@ -8677,6 +9107,30 @@ const A2UI_STUDIO_JS = `
               detail.scrollTop = 0;
             }
           });
+        });
+        detail.querySelectorAll("a[href]").forEach((a) => {
+          const href = a.getAttribute("href") || "";
+          if (a.hasAttribute("data-fn") || href.startsWith("#") || /^https?:\\/\\//i.test(href)) {
+            return;
+          }
+          if (href.startsWith("/") || href.endsWith(".md")) {
+            a.style.color = "var(--accent)";
+            a.style.fontWeight = "600";
+            a.addEventListener("click", (ev) => {
+              ev.preventDefault();
+              const conceptId = href.replace(/^\\/+/, "").replace(/\\.md$/i, "");
+              const found = (bundleGraph.nodes || []).find((n) => n.data && n.data.id === conceptId);
+              const targetNode = found ? found.data : null;
+              if (targetNode) {
+                if (cy) {
+                  cy.elements().unselect();
+                  cy.getElementById(targetNode.id).select();
+                }
+                renderGraphNodeDetail(targetNode);
+                detail.scrollTop = 0;
+              }
+            });
+          }
         });
       }
 
@@ -8878,33 +9332,10 @@ export function generateA2uiSurface(
   const okfDoc = rawOkfMarkdown
     ? parseOkfDocument(rawOkfMarkdown)
     : { frontmatter: { title: resolvedRunId || 'ICM Studio', status: 'draft' }, body: '' };
-  let okfDocHealed = false;
-  const healedOkfBody = String(okfDoc.body || '').replace(
-    /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
-    '$1$3$2'
-  );
-  if (healedOkfBody !== okfDoc.body) {
-    okfDoc.body = healedOkfBody;
-    okfDocHealed = true;
-  }
+  const okfDocHealed = healOrphanOkfFootnotes(okfDoc);
   const okfTrustTier = getOkfTrustTier(okfDoc.frontmatter);
   const okfStale = isOkfStale(okfDoc.frontmatter);
-  const rawOkfSources = Array.isArray(okfDoc.frontmatter.sources) ? okfDoc.frontmatter.sources : [];
-  const okfSources = rawOkfSources.map((s) => {
-    if (!s || typeof s !== 'object') return s;
-    const enrichedTitle = s.resource
-      ? enrichBareDomainSourceTitle(s.title, String(s.resource))
-      : s.title;
-    if (s.id && enrichedTitle && s.title && enrichedTitle !== s.title) {
-      okfDocHealed = true;
-      okfDoc.body = okfDoc.body.replaceAll(
-        `[^${s.id}]: ${s.title}`,
-        `[^${s.id}]: ${enrichedTitle}`
-      );
-    }
-    return enrichedTitle ? { ...s, title: enrichedTitle } : s;
-  });
-  okfDoc.frontmatter.sources = okfSources;
+  const okfSources = Array.isArray(okfDoc.frontmatter.sources) ? okfDoc.frontmatter.sources : [];
   if (okfDocHealed && stage1OutputPath && fs.existsSync(stage1OutputPath)) {
     fs.writeFileSync(stage1OutputPath, serializeOkfDocument(okfDoc), 'utf-8');
   }
@@ -9050,6 +9481,7 @@ export function generateA2uiSurface(
             id: target,
             group: 'concept',
             label: shortLabel,
+            parentConceptId: c.id,
             type: 'Linked Concept',
             description: `Referert OKF-konsept fra ${c.id}`,
             status: 'draft',
@@ -9934,8 +10366,108 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       enrichBareDomainSourceTitle(
         'dibk.no',
         'https://www.dibk.no/contentassets/c50f3c7dcbaa47a3bf4221ee88196aa5/-12-13.-dor-port-og-lignende-01.10.2030.09.21.pdf'
-      ) === 'dibk.no — 12-13. Dor port og lignende 01.10.2030.09.21',
-    'enrichBareDomainSourceTitle decodes UTF-8, skips 1-char servlet and Roman-numeral sub-segments, pairs /1 and YYYY/MM/DD paths, uppercases first alphabetic char, and preserves full descriptive slugs'
+      ) === 'dibk.no — 12-13. Dor port og lignende 01.10.2030.09.21' &&
+      enrichBareDomainSourceTitle(
+        'regjeringen.no',
+        'https://www.regjeringen.no/no/dokumenter/brann--og-eksplosjonsvernloven/id87138/'
+      ) === 'regjeringen.no — Brann og eksplosjonsvernloven' &&
+      enrichBareDomainSourceTitle(
+        'regjeringen.no — Id87138',
+        'https://www.regjeringen.no/no/dokumenter/brann--og-eksplosjonsvernloven/id87138/'
+      ) === 'regjeringen.no — Brann og eksplosjonsvernloven' &&
+      enrichBareDomainSourceTitle(
+        'kniftrygghet.no',
+        'https://www.kniftrygghet.no/ResourceServlet/af1f7f4264e0453ea33e7e2d0dd8680e'
+      ) === 'kniftrygghet.no' &&
+      enrichBareDomainSourceTitle(
+        'kniftrygghet.no — ResourceServlet',
+        'https://www.kniftrygghet.no/ResourceServlet/af1f7f4264e0453ea33e7e2d0dd8680e'
+      ) === 'kniftrygghet.no',
+    'enrichBareDomainSourceTitle decodes UTF-8, skips 1-char servlet, Episerver /id<digits>/, and *Servlet paths, pairs /1 and YYYY/MM/DD paths, uppercases first alphabetic char, and self-heals polluted Id87138/ResourceServlet titles'
+  );
+
+  // 2b. Duplicate-URL footnote alias rewriting & orphan footnote healing (cleanGroundingLinks + healOrphanOkfFootnotes)
+  const dupAliasRawMd = [
+    '---',
+    'type: Research Concept',
+    'title: "Test Duplicate URL Alias & Orphan Footnote Healing"',
+    'status: draft',
+    'sources:',
+    '  - id: dsb-veiledning-brannforebygging',
+    '    title: "Veiledning til forskrift om brannforebygging"',
+    '    resource: "https://www.dsb.no/lover/brannvern-brannvesen-nodnett/veiledning-til-forskrift-om-brannforebygging/"',
+    '  - id: dsb-veiledning-kap3-4',
+    '    title: "Veiledning til forskrift om brannforebygging (§§ 13–15)"',
+    '    resource: "https://www.dsb.no/lover/brannvern-brannvesen-nodnett/veiledning-til-forskrift-om-brannforebygging/"',
+    '  - id: dsb-faq-brannforebygging',
+    '    title: "Ofte stilte spørsmål til forskrift om brannforebygging - DSB"',
+    '    resource: "https://www.dsb.no/lover/brannvern-brannvesen-nodnett/artikler/ofte-stilte-sporsmal-til-forskrift-om-brannforebygging/"',
+    '  - id: snl-no',
+    '    title: "snl.no — Internkontrollforskriften"',
+    '    resource: "https://snl.no/internkontrollforskriften"',
+    '  - id: regjeringen-no',
+    '    title: "regjeringen.no — Id87138"',
+    '    resource: "https://www.regjeringen.no/no/dokumenter/brann--og-eksplosjonsvernloven/id87138/"',
+    '  - id: kniftrygghet-no',
+    '    title: "kniftrygghet.no — ResourceServlet"',
+    '    resource: "https://www.kniftrygghet.no/ResourceServlet/af1f7f4264e0453ea33e7e2d0dd8680e"',
+    '---',
+    '',
+    'Eier har ansvar etter veiledningen[^dsb-veiledning-brannforebygging] og kapittel 3–4[^dsb-veiledning-kap3-4].',
+    'Slokkeutstyr kontrolleres jevnlig[^dsb-faq-slokkeutstyr] i tråd med internkontroll[^snl-internkontrollforskriften].',
+    'Brannloven[^regjeringen-no] og forsikringskrav[^kniftrygghet-no] gjelder også[^hallucinated-nonexistent-999].',
+    '',
+    '[^dsb-veiledning-brannforebygging]: Veiledning til forskrift om brannforebygging',
+    '[^dsb-veiledning-kap3-4]: Veiledning til forskrift om brannforebygging (§§ 13–15) - DSB',
+    '[^dsb-faq-slokkeutstyr]: Ofte stilte spørsmål til forskrift om brannforebygging (slokkeutstyr og NS 3910) - DSB',
+    '[^snl-internkontrollforskriften]: snl-internkontrollforskriften',
+    '[^regjeringen-no]: regjeringen.no — Id87138',
+    '[^kniftrygghet-no]: kniftrygghet.no — ResourceServlet',
+    '',
+  ].join('\n');
+
+  const cleanedDupMd = await cleanGroundingLinks(dupAliasRawMd, []);
+  const parsedCleanedDup = parseOkfDocument(cleanedDupMd);
+  assert(
+    !parsedCleanedDup.body.includes('[^dsb-veiledning-kap3-4]') &&
+      !parsedCleanedDup.body.includes('[^dsb-faq-slokkeutstyr]') &&
+      !parsedCleanedDup.body.includes('[^snl-internkontrollforskriften]') &&
+      !parsedCleanedDup.body.includes('[^hallucinated-nonexistent-999]'),
+    `cleanGroundingLinks rewrites duplicate-URL alias and orphan footnotes and strips ungrounded footnotes (got body: "${parsedCleanedDup.body}")`
+  );
+  assert(
+    parsedCleanedDup.body.includes('[^dsb-faq-brannforebygging]') &&
+      parsedCleanedDup.body.includes('[^snl-no]'),
+    'cleanGroundingLinks maps [^dsb-faq-slokkeutstyr] -> [^dsb-faq-brannforebygging] and [^snl-internkontrollforskriften] -> [^snl-no]'
+  );
+  const cleanedDupDefMatches = Array.from(parsedCleanedDup.body.matchAll(/^\[\^([^\]]+)\]:/gm));
+  assert(
+    Array.isArray(parsedCleanedDup.frontmatter.sources) &&
+      parsedCleanedDup.frontmatter.sources.length === 5 &&
+      cleanedDupDefMatches.length === 5,
+    `cleanGroundingLinks produces exact 1:1 parity between frontmatter sources (5) and footnote definitions (got sources=${parsedCleanedDup.frontmatter.sources?.length}, defs=${cleanedDupDefMatches.length})`
+  );
+
+  // Also test healOrphanOkfFootnotes() directly on an already-saved OKF document with 26-style sources and 3 orphan footnotes
+  const savedOrphanDoc = parseOkfDocument(
+    dupAliasRawMd.replace(
+      '  - id: dsb-veiledning-kap3-4\n    title: "Veiledning til forskrift om brannforebygging (§§ 13–15)"\n    resource: "https://www.dsb.no/lover/brannvern-brannvesen-nodnett/veiledning-til-forskrift-om-brannforebygging/"\n',
+      ''
+    )
+  );
+  const healedChanged = healOrphanOkfFootnotes(savedOrphanDoc);
+  const healedDefMatches = Array.from(savedOrphanDoc.body.matchAll(/^\[\^([^\]]+)\]:/gm));
+  const healedRegjeringen = savedOrphanDoc.frontmatter.sources?.find((s) => s.id === 'regjeringen-no');
+  const healedKnif = savedOrphanDoc.frontmatter.sources?.find((s) => s.id === 'kniftrygghet-no');
+  assert(
+    healedChanged === true &&
+      healedDefMatches.length === 5 &&
+      !savedOrphanDoc.body.includes('[^dsb-veiledning-kap3-4]') &&
+      !savedOrphanDoc.body.includes('[^dsb-faq-slokkeutstyr]') &&
+      !savedOrphanDoc.body.includes('[^snl-internkontrollforskriften]') &&
+      healedRegjeringen?.title === 'regjeringen.no — Brann og eksplosjonsvernloven' &&
+      healedKnif?.title === 'kniftrygghet.no',
+    `healOrphanOkfFootnotes self-heals orphan footnotes and polluted Episerver/Servlet titles on existing OKF documents (defs=${healedDefMatches.length}, reg="${healedRegjeringen?.title}", knif="${healedKnif?.title}")`
   );
   assert(
     truncateSlugAtWordBoundary(
@@ -10105,16 +10637,24 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   ]);
   assert(invalidRes.valid === false && invalidRes.errors.length > 0, 'Missing root component is rejected by validator');
 
-  // Verify embedded A2UI_STUDIO_JS has zero JavaScript syntax errors
+  // Verify embedded A2UI_STUDIO_JS and OKF_VIZ_JS have zero JavaScript syntax errors
   let studioJsSyntaxValid = false;
   try {
     // eslint-disable-next-line no-new-func
     new Function(A2UI_STUDIO_JS);
+    // eslint-disable-next-line no-new-func
+    new Function(OKF_VIZ_JS);
     studioJsSyntaxValid = true;
   } catch (err: any) {
-    throw new Error(`[ICM Self-Test FAILED] A2UI_STUDIO_JS syntax error: ${err?.message || String(err)}`);
+    throw new Error(`[ICM Self-Test FAILED] Embedded JS syntax error: ${err?.message || String(err)}`);
   }
-  assert(studioJsSyntaxValid, 'A2UI_STUDIO_JS parses with zero JavaScript syntax errors');
+  assert(
+    studioJsSyntaxValid &&
+      A2UI_STUDIO_JS.includes('okf-md-back-primary-btn') &&
+      A2UI_STUDIO_JS.includes('okf-graph-back-btn') &&
+      OKF_VIZ_JS.includes('viz-stub-back-btn'),
+    'A2UI_STUDIO_JS and OKF_VIZ_JS parse with zero syntax errors and include back-to-concept navigation hooks'
+  );
 
   console.log(`[ICM Self-Test] ✅ All ${assertions} assertions passed (0 tokens, including tsc --noEmit).`);
   return { passed: assertions };
