@@ -2258,10 +2258,12 @@ function shouldUpgradeSourceTitle(
 
 export function stripTrailingEmptyCitationSection(prose: string): string {
   return prose
+    .replace(/\r?\n+---\s*$/g, '')
     .replace(
-      /(?:\r?\n+---)?\r?\n+#{1,3}\s+(?:\d+(?:\.\d+)*\.?\s+)?(?:Sources?(?:\s*(?:&|and)\s*(?:Citations?|Footnotes?|References?))?|References?(?:\s*(?:&|and)\s*Footnotes?)?|Citations?|Footnotes?|Grounded\s+Search\s+References|Kildehenvisninger(?:\s+og\s+(?:referanser|fotnoter))?|Kilder(?:\s+og\s+(?:referanser|fotnoter|kildehenvisninger))?|Referanser(?:\s+og\s+(?:fotnoter|kilder))?|Fotnoter):?\s*$/i,
+      /(?:\r?\n+---)?\r?\n+#{1,4}\s+(?:\*\*|__)?(?:\d+(?:\.\d+)*\.?\s+)?(?:Sources?(?:\s*(?:&|and|\/)\s*(?:Citations?|Footnotes?|References?))?|References?(?:\s*(?:&|and|\/)\s*(?:Footnotes?|Citations?|Sources?))?|Citations?(?:\s*(?:&|and|\/)\s*(?:Footnotes?|References?))?|Footnotes?(?:\s*(?:&|and|\/)\s*(?:References?|Sources?))?|Grounded\s+Search\s+References|Kildehenvisninger(?:\s*(?:og|&|\/)\s*(?:referanser|fotnoter))?|Kilder(?:\s*(?:og|&|\/)\s*(?:referanser|fotnoter|kildehenvisninger))?|Kildeliste(?:\s*(?:og|&|\/)\s*fotnoter)?|Referanser(?:\s*(?:og|&|\/)\s*(?:fotnoter|kilder))?|Referanseliste(?:\s*(?:og|&|\/)\s*fotnoter)?|Fotnoter(?:\s*(?:og|&|\/)\s*(?:kilder|referanser))?):?(?:\*\*|__)?(?:\r?\n+---)?\s*$/i,
       ''
     )
+    .replace(/\r?\n+---\s*$/g, '')
     .trim();
 }
 
@@ -5952,8 +5954,9 @@ const OKF_VIZ_JS = `
     const joinedBody = bodyLines
       .join("\\n")
       .replace(/^\\s*#\\s+[^\\r\\n]+(?:\\r?\\n+---(?=\\r?\\n|$))?\\r?\\n*/, "")
-      .replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,3}\\s+(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:Sources?(?:\\s*(?:&|and)\\s*(?:Citations?|Footnotes?|References?))?|References?(?:\\s*(?:&|and)\\s*Footnotes?)?|Citations?|Footnotes?|Grounded\\s+Search\\s+References|Kildehenvisninger(?:\\s+og\\s+(?:referanser|fotnoter))?|Kilder(?:\\s+og\\s+(?:referanser|fotnoter|kildehenvisninger))?|Referanser(?:\\s+og\\s+(?:fotnoter|kilder))?|Fotnoter):?\\s*$/i, "")
-      .replace(/\\n+---\\s*$/g, "");
+      .replace(/\\r?\\n+---\\s*$/g, "")
+      .replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,4}\\s+(?:\\*\\*|__)?(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:Sources?(?:\\s*(?:&|and|\\/)\\s*(?:Citations?|Footnotes?|References?))?|References?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|Citations?|Sources?))?|Citations?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|References?))?|Footnotes?(?:\\s*(?:&|and|\\/)\\s*(?:References?|Sources?))?|Grounded\\s+Search\\s+References|Kildehenvisninger(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter))?|Kilder(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter|kildehenvisninger))?|Kildeliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Referanser(?:\\s*(?:og|&|\\/)\\s*(?:fotnoter|kilder))?|Referanseliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Fotnoter(?:\\s*(?:og|&|\\/)\\s*(?:kilder|referanser))?):?(?:\\*\\*|__)?(?:\\r?\\n+---)?\\s*$/i, "")
+      .replace(/\\r?\\n+---\\s*$/g, "");
     const inlineMatches = joinedBody.matchAll(/\\[\\^([A-Za-z0-9_\\-]+)\\]/g);
     for (const im of inlineMatches) {
       const cid = im[1];
@@ -5965,40 +5968,63 @@ const OKF_VIZ_JS = `
         });
       }
     }
-    const supDigits = "⁰¹²³⁴⁵⁶⁷⁸⁹";
-    const subDigits = "₀₁₂₃₄₅₆₇₈₉";
+    const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻" };
+    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "⁷", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     const bodyWithMath = joinedBody.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_, inner) {
       const cleaned = String(inner)
-        .replace(/\\\\(?:text|mathrm|textbf|textit|emph)\\{([^}]*)\\}/g, "$1")
-        .replace(/\\\\[,;:]/g, " ")
+        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+        .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
+        .replace(/\\\\(?:[,;:]|\\s+|quad\\b|qquad\\b)/g, " ")
+        .replace(/~/g, " ")
         .replace(/\\\\!/g, "")
+        .replace(/\\\\sim\\b/g, "~")
         .replace(/\\\\leftrightarrow/g, "↔")
         .replace(/\\\\Leftrightarrow/g, "⇔")
         .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
         .replace(/\\\\Rightarrow/g, "⇒")
         .replace(/\\\\leftarrow/g, "←")
+        .replace(/\\\\Leftarrow/g, "⇐")
         .replace(/\\\\(?:ge|geq)\\b/g, "≥")
         .replace(/\\\\(?:le|leq)\\b/g, "≤")
         .replace(/\\\\(?:neq|ne)\\b/g, "≠")
         .replace(/\\\\approx\\b/g, "≈")
         .replace(/\\\\times\\b/g, "×")
+        .replace(/\\\\div\\b/g, "÷")
         .replace(/\\\\pm\\b/g, "±")
         .replace(/\\\\cdot\\b/g, "·")
+        .replace(/\\\\(?:dots|ldots|cdots)\\b/g, "…")
+        .replace(/\\\\infty\\b/g, "∞")
+        .replace(/\\\\Delta\\b/g, "Δ")
+        .replace(/\\\\delta\\b/g, "δ")
+        .replace(/\\\\mu\\b/g, "μ")
+        .replace(/\\\\Omega\\b/g, "Ω")
+        .replace(/\\\\omega\\b/g, "ω")
+        .replace(/\\\\alpha\\b/g, "α")
+        .replace(/\\\\beta\\b/g, "β")
+        .replace(/\\\\gamma\\b/g, "γ")
+        .replace(/\\\\lambda\\b/g, "λ")
+        .replace(/\\\\pi\\b/g, "π")
+        .replace(/\\\\sigma\\b/g, "σ")
         .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
         .replace(/\\%/g, "%")
-        .replace(/\\^\\{\\s*(?:°|o)\\s*\\}|\\^°/g, "°")
-        .replace(/\\^\\{\\s*\\+\\s*\\}|\\^\\+/g, "⁺")
-        .replace(/\\^\\{\\s*-\\s*\\}|\\^-/g, "⁻")
-        .replace(/\\^\\{\\s*([0-9]+)\\s*\\}|\\^([0-9])(?![0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9]/g, function (d) {
-            return supDigits[Number(d)];
+        .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
+        .replace(/\\^\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|\\^([+-]?[0-9]|[+-])(?![0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9+-]/g, function (d) {
+            return supMap[d] || d;
           });
         })
-        .replace(/_\\{\\s*([0-9]+)\\s*\\}|_([0-9])(?![0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9]/g, function (d) {
-            return subDigits[Number(d)];
+        .replace(/_\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|_([+-]?[0-9])(?![0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9+-]/g, function (d) {
+            return subMap[d] || d;
           });
         })
+        .replace(/_\\{\\s*([aehijklmnoprstuvx]+)\\s*\\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[aehijklmnoprstuvx]/g, function (d) {
+            return subMap[d] || d;
+          });
+        })
+        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\s+/g, " ")
         .trim();
       if (!/[\\\\{}^_]/.test(cleaned)) {
@@ -6625,48 +6651,128 @@ function escapeA2uiHtml(str: string): string {
  * and excess Markdown formatting from extracted checklist items for clean UI labels while preserving currency `$`.
  */
 export function cleanChecklistLabel(rawText: string): string {
-  const supDigits = '⁰¹²³⁴⁵⁶⁷⁸⁹';
-  const subDigits = '₀₁₂₃₄₅₆₇₈₉';
+  const supMap: Record<string, string> = {
+    '0': '⁰',
+    '1': '¹',
+    '2': '²',
+    '3': '³',
+    '4': '⁴',
+    '5': '⁵',
+    '6': '⁶',
+    '7': '⁷',
+    '8': '⁸',
+    '9': '⁹',
+    '+': '⁺',
+    '-': '⁻',
+  };
+  const subMap: Record<string, string> = {
+    '0': '₀',
+    '1': '₁',
+    '2': '₂',
+    '3': '₃',
+    '4': '₄',
+    '5': '₅',
+    '6': '₆',
+    '7': '⁷',
+    '8': '₈',
+    '9': '₉',
+    '+': '₊',
+    '-': '₋',
+    a: 'ₐ',
+    e: 'ₑ',
+    h: 'ₕ',
+    i: 'ᵢ',
+    j: 'ⱼ',
+    k: 'ₖ',
+    l: 'ₗ',
+    m: 'ₘ',
+    n: 'ₙ',
+    o: 'ₒ',
+    p: 'ₚ',
+    r: 'ᵣ',
+    s: 'ₛ',
+    t: 'ₜ',
+    u: 'ᵤ',
+    v: 'ᵥ',
+    x: 'ₓ',
+  };
+  const cleanLatexFragment = (frag: string, isInsideMathSpan: boolean): string => {
+    let out = String(frag || '')
+      .replace(/\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\{([^{}]*)\}/g, '$1')
+      .replace(/\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\{([^{}]*)\}/g, '$1')
+      .replace(/\\frac\{\s*([^{}]+?)\s*\}\{\s*([^{}]+?)\s*\}/g, '$1/$2')
+      .replace(/\\(?:[,;:]|\s+|quad\b|qquad\b)/g, ' ')
+      .replace(/\\!/g, '')
+      .replace(/\\sim\b/g, '~')
+      .replace(/\\leftrightarrow/g, '↔')
+      .replace(/\\Leftrightarrow/g, '⇔')
+      .replace(/\\rightarrow|\\to\b/g, '→')
+      .replace(/\\Rightarrow/g, '⇒')
+      .replace(/\\leftarrow/g, '←')
+      .replace(/\\Leftarrow/g, '⇐')
+      .replace(/\\(?:ge|geq)\b/g, '≥')
+      .replace(/\\(?:le|leq)\b/g, '≤')
+      .replace(/\\(?:neq|ne)\b/g, '≠')
+      .replace(/\\approx\b/g, '≈')
+      .replace(/\\times\b/g, '×')
+      .replace(/\\div\b/g, '÷')
+      .replace(/\\pm\b/g, '±')
+      .replace(/\\cdot\b/g, '·')
+      .replace(/\\(?:dots|ldots|cdots)\b/g, '…')
+      .replace(/\\infty\b/g, '∞')
+      .replace(/\\Delta\b/g, 'Δ')
+      .replace(/\\delta\b/g, 'δ')
+      .replace(/\\mu\b/g, 'μ')
+      .replace(/\\Omega\b/g, 'Ω')
+      .replace(/\\omega\b/g, 'ω')
+      .replace(/\\alpha\b/g, 'α')
+      .replace(/\\beta\b/g, 'β')
+      .replace(/\\gamma\b/g, 'γ')
+      .replace(/\\lambda\b/g, 'λ')
+      .replace(/\\pi\b/g, 'π')
+      .replace(/\\sigma\b/g, 'σ')
+      .replace(/\\(?:circ|degree)(?![a-z])/g, '°')
+      .replace(/\\%/g, '%')
+      .replace(/\^\{\s*(?:°|o)\s*([CFK])?\s*\}|\^°/g, '°$1')
+      .replace(
+        /\^\{\s*([+-]?[0-9]+|[+-])\s*\}|\^([+-]?[0-9]|[+-])(?![0-9])/g,
+        (_m, b: string, s: string) =>
+          String(b || s).replace(/[0-9+-]/g, (d) => supMap[d] || d)
+      )
+      .replace(/_\{\s*([+-]?[0-9]+|[+-])\s*\}/g, (_m, b: string) =>
+        String(b).replace(/[0-9+-]/g, (d) => subMap[d] || d)
+      );
+    if (isInsideMathSpan) {
+      out = out
+        .replace(/~/g, ' ')
+        .replace(/_([+-]?[0-9])(?![0-9])/g, (_sub, s: string) =>
+          String(s).replace(/[0-9+-]/g, (d) => subMap[d] || d)
+        )
+        .replace(
+          /_\{\s*([aehijklmnoprstuvx]+)\s*\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g,
+          (_m, b: string, s: string) =>
+            String(b || s).replace(/[aehijklmnoprstuvx]/g, (d) => subMap[d] || d)
+        );
+    }
+    return out.replace(
+      /\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\{([^{}]*)\}/g,
+      '$1'
+    );
+  };
+
   let text = String(rawText || '').trim();
   // Remove footnote references like [^lovdata-brann], [^1]
   text = text.replace(/\[\^[^\]]+\]/g, '');
-  // Unwrap LaTeX text/font macros anywhere in the string (\text{...}, \mathrm{...}, \textbf{...}, \textit{...}, \emph{...})
-  text = text.replace(/\\(?:text|mathrm|textbf|textit|emph)\{([^}]*)\}/g, '$1');
-  // Replace common LaTeX spacing and symbol macros with clean Unicode equivalents
-  text = text
-    .replace(/\\[,;:]/g, ' ')
-    .replace(/\\!/g, '')
-    .replace(/\\leftrightarrow/g, '↔')
-    .replace(/\\Leftrightarrow/g, '⇔')
-    .replace(/\\rightarrow|\\to\b/g, '→')
-    .replace(/\\Rightarrow/g, '⇒')
-    .replace(/\\leftarrow/g, '←')
-    .replace(/\\(?:ge|geq)\b/g, '≥')
-    .replace(/\\(?:le|leq)\b/g, '≤')
-    .replace(/\\(?:neq|ne)\b/g, '≠')
-    .replace(/\\approx\b/g, '≈')
-    .replace(/\\times\b/g, '×')
-    .replace(/\\pm\b/g, '±')
-    .replace(/\\cdot\b/g, '·')
-    .replace(/\\(?:circ|degree)(?![a-z])/g, '°')
-    .replace(/\\%/g, '%')
-    .replace(/\^\{\s*(?:°|o)\s*\}|\^°/g, '°')
-    .replace(/\^\{\s*\+\s*\}|\^\+/g, '⁺')
-    .replace(/\^\{\s*-\s*\}|\^-/g, '⁻')
-    .replace(/\^\{\s*([0-9]+)\s*\}|\^([0-9])(?![0-9])/g, (_m, b: string, s: string) =>
-      String(b || s).replace(/[0-9]/g, (d) => supDigits[Number(d)])
-    )
-    .replace(/_\{\s*([0-9]+)\s*\}/g, (_m, b: string) =>
-      String(b).replace(/[0-9]/g, (d) => subDigits[Number(d)])
-    );
-  // Strip inline TeX math delimiters $...$ and convert _0.._9 subscripts inside math spans
-  text = text.replace(/\$(?!\s)([^$]*?\S)\$/g, (_m, inner: string) =>
-    String(inner).replace(/_([0-9])(?![0-9])/g, (_sub, s: string) => subDigits[Number(s)])
+  // Process inline TeX math spans $...$ first (before unwrapping outer \text{...} so leading/trailing spaces inside \text{...} don't break $...$ matching)
+  text = text.replace(/\$(?!\s)([^$\n]*?\S)\$/g, (_m, inner: string) =>
+    cleanLatexFragment(inner, true).trim()
   );
-  // Convert bare chemical/classification subscripts outside $...$ (e.g. CO_2, H_2O, O_2, A_2)
+  // Clean any remaining bare LaTeX macros/superscripts outside $...$
+  text = cleanLatexFragment(text, false);
+  // Convert bare chemical/classification subscripts outside $...$ (e.g. CO_2, H_2O, O_2, NO_x, A_2) while preserving sone_2
   text = text.replace(
-    /\b(CO|H|O|N|SO|NO|CH|A|B|R|EI|REI)_([0-9])(?![0-9])/g,
-    (_m, prefix: string, s: string) => `${prefix}${subDigits[Number(s)]}`
+    /\b(CO|H|O|N|SO|NO|CH|A|B|R|EI|REI)_([0-9]|x)(?![a-zA-Z0-9])/g,
+    (_m, prefix: string, s: string) => `${prefix}${subMap[s] || s}`
   );
   // Convert markdown links [label](url) -> label
   text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
@@ -7916,48 +8022,81 @@ const A2UI_STUDIO_JS = `
   }
 
   function cleanClientChecklistLabel(rawText) {
-    const supDigits = "⁰¹²³⁴⁵⁶⁷⁸⁹";
-    const subDigits = "₀₁₂₃₄₅₆₇₈₉";
+    const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻" };
+    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "⁷", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
+    function cleanLatexFrag(frag, isInsideMathSpan) {
+      let out = String(frag || "")
+        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+        .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
+        .replace(/\\\\(?:[,;:]|\\s+|quad\\b|qquad\\b)/g, " ")
+        .replace(/\\\\!/g, "")
+        .replace(/\\\\sim\\b/g, "~")
+        .replace(/\\\\leftrightarrow/g, "↔")
+        .replace(/\\\\Leftrightarrow/g, "⇔")
+        .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
+        .replace(/\\\\Rightarrow/g, "⇒")
+        .replace(/\\\\leftarrow/g, "←")
+        .replace(/\\\\Leftarrow/g, "⇐")
+        .replace(/\\\\(?:ge|geq)\\b/g, "≥")
+        .replace(/\\\\(?:le|leq)\\b/g, "≤")
+        .replace(/\\\\(?:neq|ne)\\b/g, "≠")
+        .replace(/\\\\approx\\b/g, "≈")
+        .replace(/\\\\times\\b/g, "×")
+        .replace(/\\\\div\\b/g, "÷")
+        .replace(/\\\\pm\\b/g, "±")
+        .replace(/\\\\cdot\\b/g, "·")
+        .replace(/\\\\(?:dots|ldots|cdots)\\b/g, "…")
+        .replace(/\\\\infty\\b/g, "∞")
+        .replace(/\\\\Delta\\b/g, "Δ")
+        .replace(/\\\\delta\\b/g, "δ")
+        .replace(/\\\\mu\\b/g, "μ")
+        .replace(/\\\\Omega\\b/g, "Ω")
+        .replace(/\\\\omega\\b/g, "ω")
+        .replace(/\\\\alpha\\b/g, "α")
+        .replace(/\\\\beta\\b/g, "β")
+        .replace(/\\\\gamma\\b/g, "γ")
+        .replace(/\\\\lambda\\b/g, "λ")
+        .replace(/\\\\pi\\b/g, "π")
+        .replace(/\\\\sigma\\b/g, "σ")
+        .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
+        .replace(/\\%/g, "%")
+        .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
+        .replace(/\\^\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|\\^([+-]?[0-9]|[+-])(?![0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9+-]/g, function (d) {
+            return supMap[d] || d;
+          });
+        })
+        .replace(/_\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}/g, function (_m, b) {
+          return String(b).replace(/[0-9+-]/g, function (d) {
+            return subMap[d] || d;
+          });
+        });
+      if (isInsideMathSpan) {
+        out = out
+          .replace(/~/g, " ")
+          .replace(/_([+-]?[0-9])(?![0-9])/g, function (_sub, s) {
+            return String(s).replace(/[0-9+-]/g, function (d) {
+              return subMap[d] || d;
+            });
+          })
+          .replace(/_\\{\\s*([aehijklmnoprstuvx]+)\\s*\\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+            return String(b || s).replace(/[aehijklmnoprstuvx]/g, function (d) {
+              return subMap[d] || d;
+            });
+          });
+      }
+      return out.replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1");
+    }
+
     let text = String(rawText || "").trim();
     text = text.replace(/\\[\\^[^\\]]+\\]/g, "");
-    text = text.replace(/\\\\(?:text|mathrm|textbf|textit|emph)\\{([^}]*)\\}/g, "$1");
-    text = text
-      .replace(/\\\\[,;:]/g, " ")
-      .replace(/\\\\!/g, "")
-      .replace(/\\\\leftrightarrow/g, "↔")
-      .replace(/\\\\Leftrightarrow/g, "⇔")
-      .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
-      .replace(/\\\\Rightarrow/g, "⇒")
-      .replace(/\\\\leftarrow/g, "←")
-      .replace(/\\\\(?:ge|geq)\\b/g, "≥")
-      .replace(/\\\\(?:le|leq)\\b/g, "≤")
-      .replace(/\\\\(?:neq|ne)\\b/g, "≠")
-      .replace(/\\\\approx\\b/g, "≈")
-      .replace(/\\\\times\\b/g, "×")
-      .replace(/\\\\pm\\b/g, "±")
-      .replace(/\\\\cdot\\b/g, "·")
-      .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
-      .replace(/\\%/g, "%")
-      .replace(/\\^\\{\\s*(?:°|o)\\s*\\}|\\^°/g, "°")
-      .replace(/\\^\\{\\s*\\+\\s*\\}|\\^\\+/g, "⁺")
-      .replace(/\\^\\{\\s*-\\s*\\}|\\^-/g, "⁻")
-      .replace(/\\^\\{\\s*([0-9]+)\\s*\\}|\\^([0-9])(?![0-9])/g, function (_m, b, s) {
-        return String(b || s).replace(/[0-9]/g, function (d) {
-          return supDigits[Number(d)];
-        });
-      })
-      .replace(/_\\{\\s*([0-9]+)\\s*\\}/g, function (_m, b) {
-        return String(b).replace(/[0-9]/g, function (d) {
-          return subDigits[Number(d)];
-        });
-      });
-    text = text.replace(/\\$(?!\\s)([^$]*?\\S)\\$/g, function (_m, inner) {
-      return String(inner).replace(/_([0-9])(?![0-9])/g, function (_sub, s) {
-        return subDigits[Number(s)];
-      });
+    text = text.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_m, inner) {
+      return cleanLatexFrag(inner, true).trim();
     });
-    text = text.replace(/\\b(CO|H|O|N|SO|NO|CH|A|B|R|EI|REI)_([0-9])(?![0-9])/g, function (_m, prefix, s) {
-      return prefix + subDigits[Number(s)];
+    text = cleanLatexFrag(text, false);
+    text = text.replace(/\\b(CO|H|O|N|SO|NO|CH|A|B|R|EI|REI)_([0-9]|x)(?![a-zA-Z0-9])/g, function (_m, prefix, s) {
+      return prefix + (subMap[s] || s);
     });
     text = text.replace(/\\[([^\\]]+)\\]\\([^)]+\\)/g, "$1");
     text = text
@@ -8208,48 +8347,72 @@ const A2UI_STUDIO_JS = `
   }
 
   function formatInlineLatexAndFootnotes(md, sources) {
-    const supDigits = "⁰¹²³⁴⁵⁶⁷⁸⁹";
-    const subDigits = "₀₁₂₃₄₅₆₇₈₉";
+    const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻" };
+    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "⁷", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     let out = String(md || "");
     // Strip redundant leading H1 heading (# <Title>) since the concept title is already rendered in the card/panel header
     out = out.replace(/^\\s*#\\s+[^\\r\\n]+(?:\\r?\\n+---(?=\\r?\\n|$))?\\r?\\n*/, "");
     // Strip standalone bottom footnote definitions ([^id]: Title) so they don't render as raw lines below prose
     out = out.replace(/^\\s*\\[\\^([A-Za-z0-9_\\-]+)\\]:\\s*(.+)$/gm, "");
-    out = out.replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,3}\\s+(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:Sources?(?:\\s*(?:&|and)\\s*(?:Citations?|Footnotes?|References?))?|References?(?:\\s*(?:&|and)\\s*Footnotes?)?|Citations?|Footnotes?|Grounded\\s+Search\\s+References|Kildehenvisninger(?:\\s+og\\s+(?:referanser|fotnoter))?|Kilder(?:\\s+og\\s+(?:referanser|fotnoter|kildehenvisninger))?|Referanser(?:\\s+og\\s+(?:fotnoter|kilder))?|Fotnoter):?\\s*$/i, "");
-    out = out.replace(/\\n+---\\s*$/g, "").trim();
+    out = out.replace(/\\r?\\n+---\\s*$/g, "");
+    out = out.replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,4}\\s+(?:\\*\\*|__)?(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:Sources?(?:\\s*(?:&|and|\\/)\\s*(?:Citations?|Footnotes?|References?))?|References?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|Citations?|Sources?))?|Citations?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|References?))?|Footnotes?(?:\\s*(?:&|and|\\/)\\s*(?:References?|Sources?))?|Grounded\\s+Search\\s+References|Kildehenvisninger(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter))?|Kilder(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter|kildehenvisninger))?|Kildeliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Referanser(?:\\s*(?:og|&|\\/)\\s*(?:fotnoter|kilder))?|Referanseliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Fotnoter(?:\\s*(?:og|&|\\/)\\s*(?:kilder|referanser))?):?(?:\\*\\*|__)?(?:\\r?\\n+---)?\\s*$/i, "");
+    out = out.replace(/\\r?\\n+---\\s*$/g, "").trim();
     // Format inline TeX math spans ($...$)
     out = out.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_, inner) {
       const cleaned = String(inner)
-        .replace(/\\\\(?:text|mathrm|textbf|textit|emph)\\{([^}]*)\\}/g, "$1")
-        .replace(/\\\\[,;:]/g, " ")
+        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+        .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
+        .replace(/\\\\(?:[,;:]|\\s+|quad\\b|qquad\\b)/g, " ")
+        .replace(/~/g, " ")
         .replace(/\\\\!/g, "")
+        .replace(/\\\\sim\\b/g, "~")
         .replace(/\\\\leftrightarrow/g, "↔")
         .replace(/\\\\Leftrightarrow/g, "⇔")
         .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
         .replace(/\\\\Rightarrow/g, "⇒")
         .replace(/\\\\leftarrow/g, "←")
+        .replace(/\\\\Leftarrow/g, "⇐")
         .replace(/\\\\(?:ge|geq)\\b/g, "≥")
         .replace(/\\\\(?:le|leq)\\b/g, "≤")
         .replace(/\\\\(?:neq|ne)\\b/g, "≠")
         .replace(/\\\\approx\\b/g, "≈")
         .replace(/\\\\times\\b/g, "×")
+        .replace(/\\\\div\\b/g, "÷")
         .replace(/\\\\pm\\b/g, "±")
         .replace(/\\\\cdot\\b/g, "·")
+        .replace(/\\\\(?:dots|ldots|cdots)\\b/g, "…")
+        .replace(/\\\\infty\\b/g, "∞")
+        .replace(/\\\\Delta\\b/g, "Δ")
+        .replace(/\\\\delta\\b/g, "δ")
+        .replace(/\\\\mu\\b/g, "μ")
+        .replace(/\\\\Omega\\b/g, "Ω")
+        .replace(/\\\\omega\\b/g, "ω")
+        .replace(/\\\\alpha\\b/g, "α")
+        .replace(/\\\\beta\\b/g, "β")
+        .replace(/\\\\gamma\\b/g, "γ")
+        .replace(/\\\\lambda\\b/g, "λ")
+        .replace(/\\\\pi\\b/g, "π")
+        .replace(/\\\\sigma\\b/g, "σ")
         .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
         .replace(/\\%/g, "%")
-        .replace(/\\^\\{\\s*(?:°|o)\\s*\\}|\\^°/g, "°")
-        .replace(/\\^\\{\\s*\\+\\s*\\}|\\^\\+/g, "⁺")
-        .replace(/\\^\\{\\s*-\\s*\\}|\\^-/g, "⁻")
-        .replace(/\\^\\{\\s*([0-9]+)\\s*\\}|\\^([0-9])(?![0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9]/g, function (d) {
-            return supDigits[Number(d)];
+        .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
+        .replace(/\\^\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|\\^([+-]?[0-9]|[+-])(?![0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9+-]/g, function (d) {
+            return supMap[d] || d;
           });
         })
-        .replace(/_\\{\\s*([0-9]+)\\s*\\}|_([0-9])(?![0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9]/g, function (d) {
-            return subDigits[Number(d)];
+        .replace(/_\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|_([+-]?[0-9])(?![0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9+-]/g, function (d) {
+            return subMap[d] || d;
           });
         })
+        .replace(/_\\{\\s*([aehijklmnoprstuvx]+)\\s*\\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[aehijklmnoprstuvx]/g, function (d) {
+            return subMap[d] || d;
+          });
+        })
+        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\s+/g, " ")
         .trim();
       if (!/[\\\\{}^_]/.test(cleaned)) {
@@ -10974,13 +11137,14 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     'A2UI_STUDIO_JS and OKF_VIZ_JS parse with zero syntax errors and expose runtime test hooks'
   );
 
-  // Verify compound trailing citation-section headings (## Kilder og fotnoter, ## Referanser og fotnoter, ## Sources and Footnotes, etc.)
+  // Verify compound trailing citation-section headings (## Kilder og fotnoter, ## Referanser og fotnoter, ## Sources and Footnotes, bold headings, trailing ---, etc.)
   assert(
     stripTrailingEmptyCitationSection('Brødtekst her.\n\n---\n\n## Kilder og fotnoter\n') === 'Brødtekst her.' &&
       stripTrailingEmptyCitationSection('Brødtekst her.\n\n## Referanser og fotnoter') === 'Brødtekst her.' &&
       stripTrailingEmptyCitationSection('Brødtekst her.\n\n## Kildehenvisninger og fotnoter') === 'Brødtekst her.' &&
-      stripTrailingEmptyCitationSection('Brødtekst her.\n\n### 6. Sources and Footnotes:') === 'Brødtekst her.',
-    'stripTrailingEmptyCitationSection strips compound Norwegian and English trailing citation/footnote headings'
+      stripTrailingEmptyCitationSection('Brødtekst her.\n\n### 6. Sources and Footnotes:') === 'Brødtekst her.' &&
+      stripTrailingEmptyCitationSection('Brødtekst her.\n\n#### **Kildeliste / fotnoter**\n\n---\n') === 'Brødtekst her.',
+    'stripTrailingEmptyCitationSection strips compound Norwegian and English trailing citation/footnote headings (including bolded headings and trailing ---)'
   );
 
   // Verify LaTeX superscripts/subscripts in cleanChecklistLabel and cleanClientChecklistLabel
@@ -10996,22 +11160,36 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     `cleanChecklistLabel and cleanClientChecklistLabel convert $800\\text{ m}^2$ -> 800 m², $100\\text{ m}^{3}$ -> 100 m³, $20^\\circ\\text{C}$ -> 20°C, $\\text{H}_2\\text{O}$ -> H₂O, and $\\text{CO}_2$ -> CO₂ while preserving sone_2 (got server="${serverCleanedLatexChk}", client="${clientCleanedLatexChk}")`
   );
 
+  // Verify edge-case LaTeX patterns: leading/trailing space inside \text{...}, nested braces inside \text{...}, signed exponents, escaped spaces, and alphabetic subscripts
+  const edgeLatexChecklistInput =
+    'Kontroller $\\text{ EI 60}$ og $800\\text{ m }$, lekkasje $10^{-3}$, luftveksling $2\\text{ h}^{-1}$, areal $800\\ \\text{m}^2$, temp $20^{\\circ\\text{C}}$, $\\text{areal > 800 m^{2} i bygg}$, utslipp $\\text{NO}_x$ og sone $x_i$';
+  const expectedEdgeCleanChecklist =
+    'Kontroller EI 60 og 800 m, lekkasje 10⁻³, luftveksling 2 h⁻¹, areal 800 m², temp 20°C, areal > 800 m² i bygg, utslipp NOₓ og sone xᵢ';
+  const serverEdgeChk = cleanChecklistLabel(edgeLatexChecklistInput);
+  const clientEdgeChk = studioHooks.cleanClientChecklistLabel(edgeLatexChecklistInput);
+  assert(
+    serverEdgeChk === expectedEdgeCleanChecklist && clientEdgeChk === expectedEdgeCleanChecklist,
+    `cleanChecklistLabel and cleanClientChecklistLabel handle leading/trailing spaces inside \\text{...}, nested braces, signed exponents, escaped spaces, and alphabetic subscripts (got server="${serverEdgeChk}", client="${clientEdgeChk}")`
+  );
+
   // Verify formatInlineLatexAndFootnotes (a2ui.html) and renderMarkdownWithOkfFootnotes (viz.html):
   // 1) Strip redundant leading `# <Title>` heading while keeping `## 1. Deloverskrift`
-  // 2) Convert inline `$800\text{ m}^2$` -> `800 m²` and `$\text{CO}_2$` -> `CO₂` without raw `$` or `<code>`
-  // 3) Strip trailing `---\n\n## Kilder og fotnoter`
+  // 2) Convert inline `$800\text{ m}^2$` -> `800 m²`, `$\text{CO}_2$` -> `CO₂`, `$10^{-3}$` -> `10⁻³`, `$800\ \text{m}^2$` -> `800 m²`, `$\text{NO}_x$` -> `NOₓ` without raw `$` or `<code>`
+  // 3) Strip trailing `---\n\n## **Kilder og fotnoter**\n\n---\n\n[^id]: ...`
   const samplePreviewMd = [
     '# Systematisk brannforebyggende arbeid i næringsbygg',
     '',
-    'Brannceller over $800\\text{ m}^2$ og $\\text{CO}_2$-slokkere ved el-tavler[^dibk-tek17].',
+    'Brannceller over $800\\text{ m}^2$, $800\\ \\text{m}^2$ og $\\text{CO}_2$-slokkere ved el-tavler[^dibk-tek17].',
     '',
     '## 1. Tekniske krav',
     '',
-    'Krav til $\\text{H}_2\\text{O}$ og $100\\text{ m}^3$.',
+    'Krav til $\\text{H}_2\\text{O}$, $100\\text{ m}^3$, luftveksling $2\\text{ h}^{-1}$, temperatur $20^{\\circ\\text{C}}$, $\\text{areal > 800 m^{2} i bygg}$ og $\\text{NO}_x$.',
     '',
     '---',
     '',
-    '## Kilder og fotnoter',
+    '## **Kilder og fotnoter**',
+    '',
+    '---',
     '',
     '[^dibk-tek17]: Byggteknisk forskrift (TEK17)',
   ].join('\n');
@@ -11028,10 +11206,14 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       formattedA2uiPreview.includes('CO₂-slokkere') &&
       formattedA2uiPreview.includes('H₂O') &&
       formattedA2uiPreview.includes('100 m³') &&
+      formattedA2uiPreview.includes('2 h⁻¹') &&
+      formattedA2uiPreview.includes('20°C') &&
+      formattedA2uiPreview.includes('areal > 800 m² i bygg') &&
+      formattedA2uiPreview.includes('NOₓ') &&
       !formattedA2uiPreview.includes('$800') &&
-      !formattedA2uiPreview.includes('<code>800') &&
+      !formattedA2uiPreview.includes('<code>') &&
       !formattedA2uiPreview.includes('Kilder og fotnoter'),
-    `formatInlineLatexAndFootnotes strips leading H1 and trailing "## Kilder og fotnoter" and formats 800 m² / CO₂ cleanly (got: "${formattedA2uiPreview}")`
+    `formatInlineLatexAndFootnotes strips leading H1 and trailing "## **Kilder og fotnoter**" and formats 800 m² / CO₂ / 2 h⁻¹ / 20°C / NOₓ cleanly (got: "${formattedA2uiPreview}")`
   );
   assert(
     !renderedVizPreview.includes('# Systematisk brannforebyggende arbeid') &&
@@ -11040,10 +11222,17 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       renderedVizPreview.includes('CO₂-slokkere') &&
       renderedVizPreview.includes('H₂O') &&
       renderedVizPreview.includes('100 m³') &&
+      renderedVizPreview.includes('2 h⁻¹') &&
+      renderedVizPreview.includes('20°C') &&
+      renderedVizPreview.includes('areal > 800 m² i bygg') &&
+      renderedVizPreview.includes('NOₓ') &&
       !renderedVizPreview.includes('$800') &&
       !renderedVizPreview.includes('<code>800') &&
+      !renderedVizPreview.includes('<code>2') &&
+      !renderedVizPreview.includes('<code>NO') &&
+      !renderedVizPreview.includes('<code>areal') &&
       !renderedVizPreview.includes('Kilder og fotnoter'),
-    `renderMarkdownWithOkfFootnotes strips leading H1 and trailing "## Kilder og fotnoter" and formats 800 m² / CO₂ cleanly (got: "${renderedVizPreview}")`
+    `renderMarkdownWithOkfFootnotes strips leading H1 and trailing "## **Kilder og fotnoter**" and formats 800 m² / CO₂ / 2 h⁻¹ / 20°C / NOₓ cleanly (got: "${renderedVizPreview}")`
   );
 
   // Verify package.json cli* scripts use --env-file-if-exists=.env.local (never bare --env-file=.env.local)
