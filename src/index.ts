@@ -2,6 +2,58 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 
+/**
+ * Lightweight, zero-dependency `.env.local` / `.env` loader.
+ * Safely reads `.env.local` and `.env` in `cwd` (default `process.cwd()`) if present,
+ * populating `envTarget[key]` only for keys not already set in `envTarget`.
+ * Supports UTF-8, UTF-8 BOM, and UTF-16LE BOM (e.g. Windows PowerShell `>`).
+ */
+export function loadDotEnvIfExists(
+  cwd: string = process.cwd(),
+  envTarget: Record<string, string | undefined> = process.env
+): Record<string, string> {
+  const loaded: Record<string, string> = {};
+  for (const fileName of ['.env.local', '.env']) {
+    const filePath = path.resolve(cwd, fileName);
+    if (!fs.existsSync(filePath)) continue;
+    try {
+      const rawBuf = fs.readFileSync(filePath);
+      const rawContent =
+        rawBuf.length >= 2 && rawBuf[0] === 0xff && rawBuf[1] === 0xfe
+          ? rawBuf.subarray(2).toString('utf16le')
+          : rawBuf.toString('utf-8').replace(/^\uFEFF/, '');
+      for (const rawLine of rawContent.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+        const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+        if (!match) continue;
+        const key = match[1];
+        let val = match[2].trim();
+        if (
+          (val.startsWith('"') && val.endsWith('"') && val.length >= 2) ||
+          (val.startsWith("'") && val.endsWith("'") && val.length >= 2)
+        ) {
+          val = val.slice(1, -1);
+        } else {
+          const commentIdx = val.search(/\s+#/);
+          if (commentIdx !== -1) {
+            val = val.slice(0, commentIdx).trim();
+          }
+        }
+        if (envTarget[key] === undefined || envTarget[key] === '') {
+          envTarget[key] = val;
+          loaded[key] = val;
+        }
+      }
+    } catch {
+      // Ignore unreadable dotenv file
+    }
+  }
+  return loaded;
+}
+
+loadDotEnvIfExists();
+
 export const GEMINI_4_ARGON_MODEL = 'gemini-4-argon' as const;
 const INTERACTIONS_API_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const INTERACTIONS_API_REVISION = '2026-05-20';
@@ -288,6 +340,9 @@ export interface Gemini4ArgonRequestOptions {
 }
 
 function getApiKey(): string {
+  if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY && !process.env.GOOGLE_GENAI_API_KEY) {
+    loadDotEnvIfExists();
+  }
   const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENAI_API_KEY;
   if (!key) {
     throw new Error(
@@ -10756,6 +10811,68 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       OKF_VIZ_JS.includes('viz-stub-back-btn'),
     'A2UI_STUDIO_JS and OKF_VIZ_JS parse with zero syntax errors and include back-to-concept navigation hooks'
   );
+
+  // Verify package.json cli* scripts use --env-file-if-exists=.env.local (never bare --env-file=.env.local)
+  const pkgJsonPath = path.resolve('./package.json');
+  const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+  const cliScriptKeys = ['cli', 'cli:stage1', 'cli:stage2', 'cli:verify', 'cli:viz', 'cli:a2ui'];
+  for (const scriptKey of cliScriptKeys) {
+    const scriptCmd = String(pkgJson?.scripts?.[scriptKey] || '');
+    assert(
+      scriptCmd.includes('--env-file-if-exists=.env.local') &&
+        !scriptCmd.includes('--env-file=.env.local'),
+      `package.json script "${scriptKey}" uses --env-file-if-exists=.env.local instead of bare --env-file=.env.local`
+    );
+  }
+
+  // Verify loadDotEnvIfExists() precedence (.env.local > .env, existing env preserved, quotes/comments/UTF-16LE BOM handled)
+  const tmpDotEnvDir = path.resolve(`./workspace/runs/_dotenv_test_${Date.now()}`);
+  fs.mkdirSync(tmpDotEnvDir, { recursive: true });
+  try {
+    fs.writeFileSync(
+      path.join(tmpDotEnvDir, '.env.local'),
+      [
+        '# Comment line',
+        'GEMINI_API_KEY="from-dotenv-local"',
+        'export PRESERVED_KEY="should-not-overwrite"',
+        'INLINE_KEY=unquoted-val # inline comment',
+      ].join('\n'),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(tmpDotEnvDir, '.env'),
+      ['GEMINI_API_KEY="from-dotenv-fallback"', "FALLBACK_ONLY='single-quoted'"].join('\n'),
+      'utf-8'
+    );
+    const mockEnv: Record<string, string | undefined> = {
+      PRESERVED_KEY: 'already-set-in-shell',
+    };
+    const loadedVars = loadDotEnvIfExists(tmpDotEnvDir, mockEnv);
+    assert(
+      mockEnv.GEMINI_API_KEY === 'from-dotenv-local' &&
+        mockEnv.PRESERVED_KEY === 'already-set-in-shell' &&
+        mockEnv.INLINE_KEY === 'unquoted-val' &&
+        mockEnv.FALLBACK_ONLY === 'single-quoted' &&
+        loadedVars.GEMINI_API_KEY === 'from-dotenv-local' &&
+        loadedVars.PRESERVED_KEY === undefined,
+      `loadDotEnvIfExists loads .env.local and .env while preserving existing process.env keys (got: ${JSON.stringify(mockEnv)})`
+    );
+
+    // Also test UTF-16LE BOM (Windows PowerShell 5.1 ">" redirection)
+    const utf16Content = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('GEMINI_API_KEY="utf16le-key"\r\n', 'utf16le'),
+    ]);
+    fs.writeFileSync(path.join(tmpDotEnvDir, '.env.local'), utf16Content);
+    const mockUtf16Env: Record<string, string | undefined> = {};
+    loadDotEnvIfExists(tmpDotEnvDir, mockUtf16Env);
+    assert(
+      mockUtf16Env.GEMINI_API_KEY === 'utf16le-key',
+      `loadDotEnvIfExists decodes UTF-16LE BOM .env.local cleanly (got: "${mockUtf16Env.GEMINI_API_KEY}")`
+    );
+  } finally {
+    fs.rmSync(tmpDotEnvDir, { recursive: true, force: true });
+  }
 
   console.log(`[ICM Self-Test] ✅ All ${assertions} assertions passed (0 tokens, including tsc --noEmit).`);
   return { passed: assertions };
