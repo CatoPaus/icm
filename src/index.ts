@@ -6982,16 +6982,28 @@ export function normalizeStage2ForA2ui(
   const rawEstDur = scriptDraft.estimatedDuration ?? scriptDraft.duration;
 
   let estimatedDuration: number | string = '';
-  if (typeof rawMinField === 'number' && rawMinField > 0) {
+  let hasExplicitMinutesField = false;
+  if (typeof rawMinField === 'number' && Number.isFinite(rawMinField) && rawMinField > 0) {
     estimatedDuration = `${rawMinField} min`;
+    hasExplicitMinutesField = true;
   } else if (typeof rawMinField === 'string' && rawMinField.trim()) {
     const trimmed = rawMinField.trim();
-    estimatedDuration = /[a-zA-Z]/.test(trimmed) ? trimmed : `${trimmed} min`;
-  } else if (typeof rawEstDur === 'number' && rawEstDur > 0) {
+    if (/^\d+(\.\d+)?$/.test(trimmed) && Number(trimmed) > 0) {
+      estimatedDuration = `${Number(trimmed)} min`;
+      hasExplicitMinutesField = true;
+    } else if (/^\d/.test(trimmed) && /[a-zA-Z]/.test(trimmed)) {
+      estimatedDuration = trimmed;
+      hasExplicitMinutesField = true;
+    }
+  } else if (typeof rawEstDur === 'number' && Number.isFinite(rawEstDur) && rawEstDur > 0) {
     estimatedDuration = `${rawEstDur}s`;
   } else if (typeof rawEstDur === 'string' && rawEstDur.trim()) {
     const trimmed = rawEstDur.trim();
-    estimatedDuration = /[a-zA-Z]/.test(trimmed) ? trimmed : `${trimmed}s`;
+    if (/^\d+(\.\d+)?$/.test(trimmed) && Number(trimmed) > 0) {
+      estimatedDuration = `${Number(trimmed)}s`;
+    } else if (/^\d/.test(trimmed) && /[a-zA-Z]/.test(trimmed)) {
+      estimatedDuration = trimmed;
+    }
   }
 
   const scriptBody = String(
@@ -7055,10 +7067,22 @@ export function normalizeStage2ForA2ui(
         rawMod.subtitle ||
         ''
     );
-    const durationOrMeta = rawMod.durationMinutes
-      ? `${rawMod.durationMinutes} min`
-      : rawMod.estimatedDuration
-        ? `${rawMod.estimatedDuration}s`
+    const rawModDurMin =
+      rawMod.durationMinutes !== undefined && rawMod.durationMinutes !== null
+        ? String(rawMod.durationMinutes).trim()
+        : '';
+    const rawModEstDur =
+      rawMod.estimatedDuration !== undefined && rawMod.estimatedDuration !== null
+        ? String(rawMod.estimatedDuration).trim()
+        : '';
+    const durationOrMeta = rawModDurMin
+      ? /[a-zA-Z]/.test(rawModDurMin)
+        ? rawModDurMin
+        : `${rawModDurMin} min`
+      : rawModEstDur
+        ? /[a-zA-Z]/.test(rawModEstDur)
+          ? rawModEstDur
+          : `${rawModEstDur}s`
         : '';
     const narration = String(
       rawMod.spokenNarration ||
@@ -7111,7 +7135,12 @@ export function normalizeStage2ForA2ui(
       }));
       const rawCorrectIdx =
         rawMod.quizCorrectIndex ?? rawMod.correctOptionIndex ?? rawMod.correctIndex;
-      const correctIdx = typeof rawCorrectIdx === 'number' ? String(rawCorrectIdx) : '0';
+      const correctIdx =
+        typeof rawCorrectIdx === 'number' && Number.isFinite(rawCorrectIdx)
+          ? String(rawCorrectIdx)
+          : typeof rawCorrectIdx === 'string' && /^\d+$/.test(rawCorrectIdx.trim())
+            ? rawCorrectIdx.trim()
+            : '0';
       quiz.push({
         id: `quiz_mod_${idx + 1}`,
         question: rawMod.quizQuestion,
@@ -7185,12 +7214,18 @@ export function normalizeStage2ForA2ui(
 
   if (rawModules.length > 0) {
     const totalModMinutes = rawModules.reduce((acc: number, rm: any) => {
-      const dm = Number(rm?.durationMinutes);
+      const rawDm = rm?.durationMinutes;
+      const dm =
+        typeof rawDm === 'number'
+          ? rawDm
+          : typeof rawDm === 'string'
+            ? Number(rawDm.replace(/[^\d.]+/g, ''))
+            : NaN;
       return Number.isFinite(dm) && dm > 0 ? acc + dm : acc;
     }, 0);
     if (totalModMinutes > 0) {
       if (
-        rawMinField === undefined &&
+        !hasExplicitMinutesField &&
         rawEstDur !== undefined &&
         rawEstDur !== null &&
         rawEstDur !== '' &&
@@ -8312,6 +8347,12 @@ const A2UI_STUDIO_JS = `
   }
 
   function syncChecklistToOkfBody(surface) {
+    if (
+      resolvePointer(surface.dataModel, "/checklist/fromStage2") &&
+      !resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
+    ) {
+      return;
+    }
     const targetBodyPath = resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
       ? "/okf/primaryBody"
       : "/okf/body";
@@ -8357,6 +8398,12 @@ const A2UI_STUDIO_JS = `
   }
 
   function syncOkfBodyToChecklist(surface) {
+    if (
+      resolvePointer(surface.dataModel, "/checklist/fromStage2") &&
+      !resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
+    ) {
+      return;
+    }
     const body = resolvePointer(surface.dataModel, "/okf/body");
     if (typeof body !== "string") return;
     const newGroups = extractChecklistGroupsClient(body);
@@ -9946,8 +9993,10 @@ export function generateA2uiSurface(
   );
   const stage2Norm = normalizeStage2ForA2ui(rawStage2, fallbackTitle);
   const mdChecklistGroups = extractChecklistGroupsFromMarkdown(okfDoc.body);
-  const checklistGroups =
-    mdChecklistGroups.length > 0 ? mdChecklistGroups : stage2Norm.checklistGroups;
+  const checklistFromStage2 = stage2Norm.checklistGroups.length > 0;
+  const checklistGroups = checklistFromStage2
+    ? stage2Norm.checklistGroups
+    : mdChecklistGroups;
 
   let totalChecklistItems = 0;
   for (const g of checklistGroups) {
@@ -10377,6 +10426,7 @@ export function generateA2uiSurface(
     },
     checklist: {
       groups: checklistGroups,
+      fromStage2: checklistFromStage2,
       completedCount: completedChecklistCount,
       totalCount: totalChecklistItems,
       percent: checklistPct,
@@ -11224,6 +11274,42 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   assert(
     estDur90s.estimatedDuration === '90s',
     `estimatedDuration: 90 without module durationMinutes (totalModMinutes = 0) formats as "90s" (got: "${estDur90s.estimatedDuration}")`
+  );
+
+  const estDurInvalidFallback = normalizeStage2ForA2ui(
+    {
+      title: 'Kurs med ugyldig estimatedDuration-streng',
+      estimatedDuration: '-10',
+      modules: [
+        { moduleNumber: 1, title: 'M1', durationMinutes: '50 min', quizQuestion: 'Q1?', quizOptions: ['A', 'B', 'C'], quizCorrectIndex: '2' },
+        { moduleNumber: 2, title: 'M2', durationMinutes: 50 },
+      ],
+    },
+    'Fallback'
+  );
+  const estDurAbcFallback = normalizeStage2ForA2ui(
+    {
+      title: 'Kurs med ikke-numerisk estimatedDuration',
+      estimatedDuration: 'abc',
+      modules: [{ moduleNumber: 1, title: 'M1', durationMinutes: 60 }],
+    },
+    'Fallback'
+  );
+  const estDurUnitPreserved = normalizeStage2ForA2ui(
+    {
+      title: 'Kurs med eksplisitt tidsenhet',
+      estimatedDuration: '2 timer',
+      modules: [{ moduleNumber: 1, title: 'M1', durationMinutes: 60 }],
+    },
+    'Fallback'
+  );
+  assert(
+    estDurInvalidFallback.estimatedDuration === '100 min' &&
+      estDurInvalidFallback.modules[0].durationOrMeta === '50 min' &&
+      estDurInvalidFallback.quiz[0].correctValue === '2' &&
+      estDurAbcFallback.estimatedDuration === '60 min' &&
+      estDurUnitPreserved.estimatedDuration === '2 timer',
+    `Invalid/negative estimatedDuration ("-10", "abc") falls back to totalModMinutes while preserving valid unit strings ("2 timer") and string quizCorrectIndex ("2")`
   );
 
   const validMessages: A2uiEnvelopeMessage[] = [
