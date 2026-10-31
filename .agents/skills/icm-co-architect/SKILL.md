@@ -82,6 +82,9 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
 2. **Update Layer 3 & Stage 2:**
    - Update [`workspace/_config/voice_guide.md`](../../workspace/_config/voice_guide.md).
    - Update [`prompts/02_script.md`](../../prompts/02_script.md) (`model: gemini-4-argon`, `thinkingLevel: MEDIUM`, `maxOutputTokens: 32768` or up to `65536`).
+   - **Canonical Stage 2 JSON Schema Keys Recognized Automatically by `normalizeStage2ForA2ui()`** (use these directly in `prompts/02_script.md` frontmatter `output.schema` without reading or patching `src/index.ts`):
+     - **Top-level:** `title` (or `courseTitle`), `subtitle` (or `description`), `targetAudience` (or `audience`), `totalEstimatedMinutes` / `durationMinutes` (for duration in minutes; `estimatedDuration` is in seconds for short scripts or auto-inferred as minutes when modules have `durationMinutes`), `scriptBody` (or `executiveSummary` / `overview`), `learningObjectives` (or `keyTakeaways`: `string[]`), `checklistGroups` (`{ category, items: string[] }[]`, or auto-extracted from Stage 1 Markdown `- [ ]` checklists).
+     - **Module items (`trainingModules` / `modules` / `lessons` / `sections`):** `moduleNumber`, `title` (or `moduleTitle`), `durationMinutes`, `legalBasis` (or `regulatoryBasis` / `legalReference` / `statute`), `narration` (or `spokenNarration` / `content` / `summary`), `slideCues` (or `keyPoints`: `string[]`), `actionItem` (or `practicalTask` / `exercise` / `boardActionItem`), `caseScenario` (or `dilemma`), `caseResolution` (or `recommendedAction` / `solution`), `quizQuestion`, `quizOptions` (`string[]`), `quizCorrectIndex` (`0`-based integer), `quizExplanation`.
 3. **Test Stage 2 Standalone (Zero Stage 1 Cost):**
    - First verify with `--dry-run`, then run Stage 2 standalone against the existing `<runId>`:
      ```bash

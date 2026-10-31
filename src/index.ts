@@ -6952,6 +6952,7 @@ export function normalizeStage2ForA2ui(
   modules: NormalizedA2uiModule[];
   quiz: NormalizedA2uiQuizQuestion[];
   cases: NormalizedA2uiCaseItem[];
+  checklistGroups: A2uiChecklistGroup[];
 } {
   if (!scriptDraft || typeof scriptDraft !== 'object') {
     return {
@@ -6964,6 +6965,7 @@ export function normalizeStage2ForA2ui(
       modules: [],
       quiz: [],
       cases: [],
+      checklistGroups: [],
     };
   }
 
@@ -6977,7 +6979,7 @@ export function normalizeStage2ForA2ui(
     scriptDraft.totalEstimatedMinutes ??
     scriptDraft.totalDurationMinutes ??
     scriptDraft.durationMinutes;
-  const rawEstDur = scriptDraft.estimatedDuration;
+  const rawEstDur = scriptDraft.estimatedDuration ?? scriptDraft.duration;
 
   let estimatedDuration: number | string = '';
   if (typeof rawMinField === 'number' && rawMinField > 0) {
@@ -6993,7 +6995,11 @@ export function normalizeStage2ForA2ui(
   }
 
   const scriptBody = String(
-    scriptDraft.scriptBody || scriptDraft.executiveSummary || scriptDraft.narration || ''
+    scriptDraft.scriptBody ||
+      scriptDraft.executiveSummary ||
+      scriptDraft.overview ||
+      scriptDraft.narration ||
+      ''
   );
 
   // Extract highlights (`keyTakeaways` or `learningObjectives`)
@@ -7006,16 +7012,18 @@ export function normalizeStage2ForA2ui(
         : [];
   const highlights = rawHighlights.map((h) => String(h || '').trim()).filter(Boolean);
 
-  // Extract modules from `trainingModules`, `lessons`, `modules`, or `slides`
+  // Extract modules from `trainingModules`, `modules`, `lessons`, `sections`, or `slides`
   const rawModules = Array.isArray(scriptDraft.trainingModules)
     ? scriptDraft.trainingModules
-    : Array.isArray(scriptDraft.lessons)
-      ? scriptDraft.lessons
-      : Array.isArray(scriptDraft.modules)
-        ? scriptDraft.modules
-        : Array.isArray(scriptDraft.slides)
-          ? scriptDraft.slides
-          : [];
+    : Array.isArray(scriptDraft.modules)
+      ? scriptDraft.modules
+      : Array.isArray(scriptDraft.lessons)
+        ? scriptDraft.lessons
+        : Array.isArray(scriptDraft.sections)
+          ? scriptDraft.sections
+          : Array.isArray(scriptDraft.slides)
+            ? scriptDraft.slides
+            : [];
 
   const modules: NormalizedA2uiModule[] = [];
   const quiz: NormalizedA2uiQuizQuestion[] = [];
@@ -7023,12 +7031,29 @@ export function normalizeStage2ForA2ui(
 
   rawModules.forEach((rawMod: any, idx: number) => {
     if (!rawMod || typeof rawMod !== 'object') return;
-    const modNum = Number(rawMod.moduleNumber ?? rawMod.lessonNumber ?? rawMod.slideNumber ?? idx + 1);
+    const modNum = Number(
+      rawMod.moduleNumber ??
+        rawMod.lessonNumber ??
+        rawMod.sectionNumber ??
+        rawMod.slideNumber ??
+        idx + 1
+    );
     const modTitle = String(
-      rawMod.moduleTitle || rawMod.lessonTitle || rawMod.title || `Module ${modNum}`
+      rawMod.moduleTitle ||
+        rawMod.lessonTitle ||
+        rawMod.sectionTitle ||
+        rawMod.title ||
+        `Module ${modNum}`
     );
     const subtitleOrBasis = String(
-      rawMod.regulatoryBasis || rawMod.lawReference || rawMod.coreConcept || rawMod.subtitle || ''
+      rawMod.regulatoryBasis ||
+        rawMod.legalBasis ||
+        rawMod.legalReference ||
+        rawMod.lawReference ||
+        rawMod.statute ||
+        rawMod.coreConcept ||
+        rawMod.subtitle ||
+        ''
     );
     const durationOrMeta = rawMod.durationMinutes
       ? `${rawMod.durationMinutes} min`
@@ -7036,24 +7061,35 @@ export function normalizeStage2ForA2ui(
         ? `${rawMod.estimatedDuration}s`
         : '';
     const narration = String(
-      rawMod.spokenNarration || rawMod.narrationScript || rawMod.scriptBody || rawMod.content || ''
+      rawMod.spokenNarration ||
+        rawMod.narrationScript ||
+        rawMod.narration ||
+        rawMod.scriptBody ||
+        rawMod.content ||
+        rawMod.summary ||
+        ''
     );
     const actionItem = String(
       rawMod.boardActionItem ||
         rawMod.actionItem ||
+        rawMod.practicalTask ||
         rawMod.exercise ||
         rawMod.caseActionItem ||
         rawMod.caseResolution ||
+        rawMod.recommendedAction ||
         rawMod.caseSolution ||
+        rawMod.solution ||
         ''
     ).trim();
     const bulletsRaw = Array.isArray(rawMod.slideCues)
       ? rawMod.slideCues
-      : Array.isArray(rawMod.keyTakeaways)
-        ? rawMod.keyTakeaways
-        : Array.isArray(rawMod.bullets)
-          ? rawMod.bullets
-          : [];
+      : Array.isArray(rawMod.keyPoints)
+        ? rawMod.keyPoints
+        : Array.isArray(rawMod.keyTakeaways)
+          ? rawMod.keyTakeaways
+          : Array.isArray(rawMod.bullets)
+            ? rawMod.bullets
+            : [];
     const bullets = bulletsRaw.map((b: unknown) => String(b || '').trim()).filter(Boolean);
 
     modules.push({
@@ -7086,11 +7122,15 @@ export function normalizeStage2ForA2ui(
       });
     }
 
-    // If module has a boardActionItem (or explicit caseScenario), populate a concise situational scenario case
-    const explicitCaseScenario = String(rawMod.caseScenario || rawMod.scenario || '').trim();
+    // If module has a boardActionItem (or explicit caseScenario / dilemma), populate a concise situational scenario case
+    const explicitCaseScenario = String(
+      rawMod.caseScenario || rawMod.dilemma || rawMod.scenario || ''
+    ).trim();
     const explicitCaseResolution =
       String(rawMod.caseResolution ?? '').trim() ||
+      String(rawMod.recommendedAction ?? '').trim() ||
       String(rawMod.caseSolution ?? '').trim() ||
+      String(rawMod.solution ?? '').trim() ||
       String(rawMod.caseActionItem ?? '').trim();
     const caseActionText = explicitCaseResolution || actionItem;
     if (caseActionText || explicitCaseScenario) {
@@ -7143,14 +7183,27 @@ export function normalizeStage2ForA2ui(
     }
   });
 
-  if (!estimatedDuration && rawModules.length > 0) {
+  if (rawModules.length > 0) {
     const totalModMinutes = rawModules.reduce((acc: number, rm: any) => {
       const dm = Number(rm?.durationMinutes);
       return Number.isFinite(dm) && dm > 0 ? acc + dm : acc;
     }, 0);
     if (totalModMinutes > 0) {
-      estimatedDuration = `${totalModMinutes} min`;
-    } else {
+      if (
+        rawMinField === undefined &&
+        rawEstDur !== undefined &&
+        rawEstDur !== null &&
+        rawEstDur !== '' &&
+        ((typeof rawEstDur === 'number' && Number.isFinite(rawEstDur) && rawEstDur > 0) ||
+          (typeof rawEstDur === 'string' &&
+            /^\d+(\.\d+)?$/.test(rawEstDur.trim()) &&
+            Number(rawEstDur.trim()) > 0))
+      ) {
+        estimatedDuration = `${Number(String(rawEstDur).trim())} min`;
+      } else if (!estimatedDuration) {
+        estimatedDuration = `${totalModMinutes} min`;
+      }
+    } else if (!estimatedDuration) {
       const totalModSeconds = rawModules.reduce((acc: number, rm: any) => {
         const ds = Number(rm?.estimatedDuration);
         return Number.isFinite(ds) && ds > 0 ? acc + ds : acc;
@@ -7213,11 +7266,52 @@ export function normalizeStage2ForA2ui(
     cases.push({
       id: `case_${idx + 1}`,
       title: String(c.title || c.caseTitle || `Scenario ${idx + 1}`),
-      basisOrContext: String(c.regulatoryBasis || c.context || c.category || ''),
-      scenario: String(c.scenario || c.description || c.prompt || ''),
-      recommendedAction: String(c.recommendedAction || c.resolution || c.boardActionItem || ''),
+      basisOrContext: String(
+        c.regulatoryBasis || c.legalBasis || c.legalReference || c.statute || c.context || c.category || ''
+      ),
+      scenario: String(c.scenario || c.caseScenario || c.dilemma || c.description || c.prompt || ''),
+      recommendedAction: String(
+        c.recommendedAction || c.caseResolution || c.resolution || c.solution || c.boardActionItem || ''
+      ),
     });
   });
+
+  // Top-level `checklistGroups` (`{ category, items: string[] }[]`)
+  const checklistGroups: A2uiChecklistGroup[] = [];
+  if (Array.isArray(scriptDraft.checklistGroups)) {
+    let chkCounter = 0;
+    scriptDraft.checklistGroups.forEach((rawGrp: any, gIdx: number) => {
+      if (!rawGrp || typeof rawGrp !== 'object') return;
+      const grpTitle =
+        cleanChecklistLabel(
+          String(rawGrp.category || rawGrp.title || rawGrp.groupTitle || `Gruppe ${gIdx + 1}`)
+        ) || `Gruppe ${gIdx + 1}`;
+      const rawItems = Array.isArray(rawGrp.items) ? rawGrp.items : [];
+      const items: A2uiChecklistItem[] = [];
+      rawItems.forEach((it: any) => {
+        const rawLabel =
+          typeof it === 'object' && it !== null
+            ? String(it.label || it.text || it.item || '')
+            : String(it || '');
+        const cleaned = cleanChecklistLabel(rawLabel);
+        if (!cleaned) return;
+        chkCounter++;
+        items.push({
+          id: `chk_s2_${chkCounter}`,
+          label: cleaned,
+          checked: Boolean(typeof it === 'object' && it !== null && it.checked),
+          category: grpTitle,
+        });
+      });
+      if (items.length > 0) {
+        checklistGroups.push({
+          id: `chk_s2_grp_${checklistGroups.length + 1}`,
+          title: grpTitle,
+          items,
+        });
+      }
+    });
+  }
 
   return {
     title,
@@ -7229,6 +7323,7 @@ export function normalizeStage2ForA2ui(
     modules,
     quiz,
     cases,
+    checklistGroups,
   };
 }
 
@@ -9850,7 +9945,9 @@ export function generateA2uiSurface(
     okfDoc.frontmatter.title || meta.topic || resolvedRunId || 'ICM Studio Surface'
   );
   const stage2Norm = normalizeStage2ForA2ui(rawStage2, fallbackTitle);
-  const checklistGroups = extractChecklistGroupsFromMarkdown(okfDoc.body);
+  const mdChecklistGroups = extractChecklistGroupsFromMarkdown(okfDoc.body);
+  const checklistGroups =
+    mdChecklistGroups.length > 0 ? mdChecklistGroups : stage2Norm.checklistGroups;
 
   let totalChecklistItems = 0;
   for (const g of checklistGroups) {
@@ -11070,6 +11167,63 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         'Stans ombyggingen og krev revidert brannkonsept for RKL 5.' &&
       !stage2Norm.cases[1].recommendedAction.includes('📌 Faglig begrunnelse:'),
     'Explicit caseScenario uses non-empty caseSolution fallback and does NOT append unrelated quizExplanation'
+  );
+
+  // Verify estimatedDuration minute inference when modules have durationMinutes vs short script in seconds
+  const estDur100 = normalizeStage2ForA2ui(
+    {
+      title: 'Kurs 100 min',
+      estimatedDuration: 100,
+      trainingModules: [
+        { moduleNumber: 1, title: 'M1', durationMinutes: 50 },
+        { moduleNumber: 2, title: 'M2', durationMinutes: 50 },
+      ],
+    },
+    'Fallback'
+  );
+  assert(
+    estDur100.estimatedDuration === '100 min',
+    `estimatedDuration: 100 with module durationMinutes (totalModMinutes = 100) formats as "100 min" (got: "${estDur100.estimatedDuration}")`
+  );
+
+  const estDur105 = normalizeStage2ForA2ui(
+    {
+      title: 'Kurs 105 min (med intro/outro)',
+      estimatedDuration: 105,
+      sections: [
+        { moduleNumber: 1, title: 'S1', durationMinutes: 50, legalBasis: 'FOB § 4', narration: 'Tekst', keyPoints: ['P1'], practicalTask: 'Oppgave', dilemma: 'Dilemma', recommendedAction: 'Tiltak' },
+        { moduleNumber: 2, title: 'S2', durationMinutes: 50, statute: 'FOB § 11', summary: 'Oppsummering', solution: 'Løsning' },
+      ],
+      overview: 'Kursoversikt',
+      checklistGroups: [{ category: 'Daglig kontroll', items: ['Sjekk rømningsveier'] }],
+    },
+    'Fallback'
+  );
+  assert(
+    estDur105.estimatedDuration === '105 min' &&
+      estDur105.scriptBody === 'Kursoversikt' &&
+      estDur105.modules.length === 2 &&
+      estDur105.modules[0].subtitleOrBasis === 'FOB § 4' &&
+      estDur105.modules[0].bullets[0] === 'P1' &&
+      estDur105.modules[0].actionItem === 'Oppgave' &&
+      estDur105.cases[0].scenario === 'Dilemma' &&
+      estDur105.cases[0].recommendedAction === 'Tiltak' &&
+      estDur105.checklistGroups.length === 1 &&
+      estDur105.checklistGroups[0].title === 'Daglig kontroll',
+    `estimatedDuration: 105 with module durationMinutes (totalModMinutes = 100) formats as "105 min" and maps documented Stage 2 A2UI schema keys cleanly (got: "${estDur105.estimatedDuration}")`
+  );
+
+  const estDur90s = normalizeStage2ForA2ui(
+    {
+      title: 'Kort videomanus',
+      estimatedDuration: 90,
+      scriptBody: 'Kort fortellertekst på 90 sekunder.',
+    },
+    'Fallback'
+  );
+  assert(
+    estDur90s.estimatedDuration === '90s',
+    `estimatedDuration: 90 without module durationMinutes (totalModMinutes = 0) formats as "90s" (got: "${estDur90s.estimatedDuration}")`
   );
 
   const validMessages: A2uiEnvelopeMessage[] = [
