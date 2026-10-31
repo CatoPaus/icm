@@ -2135,6 +2135,40 @@ function matchOrphanFootnoteToSource(
   return null;
 }
 
+function isAutoDomainSlugTitle(title?: string): boolean {
+  return /^[a-z0-9.-]+\.[a-z]{2,}\s+[—–-]\s+/i.test(String(title || '').trim());
+}
+
+function shouldUpgradeSourceTitle(
+  existingTitle: string | undefined,
+  candidateTitle: string | undefined,
+  resourceUrl?: string
+): boolean {
+  const cand = String(candidateTitle || '').trim();
+  if (!cand || isBareDomainTitle(cand)) return false;
+  if (resourceUrl && cand === resourceUrl.trim()) return false;
+  const cur = String(existingTitle || '').trim();
+  if (!cur || (resourceUrl && cur === resourceUrl.trim()) || isBareDomainTitle(cur)) {
+    return true;
+  }
+  if (isAutoDomainSlugTitle(cur) && !isAutoDomainSlugTitle(cand)) {
+    return true;
+  }
+  if (cur.length < 18 && !isAutoDomainSlugTitle(cand) && cand.length >= cur.length + 10) {
+    return true;
+  }
+  return false;
+}
+
+function stripTrailingEmptyCitationSection(prose: string): string {
+  return prose
+    .replace(
+      /(?:\r?\n+---)?\r?\n+#{1,3}\s+(?:Kildehenvisninger|Kilder(?:\s+og\s+referanser)?|Referanser|Fotnoter|Sources(?:\s*&\s*Citations)?|Citations|Grounded\s+Search\s+References)\s*$/i,
+      ''
+    )
+    .trim();
+}
+
 /**
  * Self-heals an OKF v0.2 document in-place by:
  * 1. Enriching any bare-domain or CMS-polluted (`Id87138`, `ResourceServlet`) source titles in `doc.frontmatter.sources`.
@@ -2156,6 +2190,7 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
 
   for (const s of rawSources) {
     if (!s || typeof s !== 'object') continue;
+    const rawCandidateTitle = s.title;
     const enrichedTitle = s.resource
       ? enrichBareDomainSourceTitle(s.title, String(s.resource))
       : s.title;
@@ -2169,13 +2204,10 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
       if (s.id && existing.id && s.id !== existing.id) {
         aliasMap.set(s.id, existing.id);
       }
-      if (
-        s.title &&
-        (!existing.title ||
-          existing.title === existing.resource ||
-          isBareDomainTitle(existing.title))
-      ) {
-        existing.title = s.title;
+      const candidateForUpgrade =
+        rawCandidateTitle && !isBareDomainTitle(rawCandidateTitle) ? rawCandidateTitle : s.title;
+      if (shouldUpgradeSourceTitle(existing.title, candidateForUpgrade, resKey)) {
+        existing.title = enrichBareDomainSourceTitle(candidateForUpgrade, resKey);
       }
       modified = true;
     } else {
@@ -2204,6 +2236,9 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
     /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
     '$1$3$2'
   );
+
+  // Convert bare `.^id` typos to `.[^id]` before rewriting aliases
+  proseText = proseText.replace(/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/gi, '.[^$1]');
 
   // Rewrite duplicate-URL source aliases
   for (const [aliasId, canonicalId] of aliasMap.entries()) {
@@ -2276,7 +2311,7 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
     footnoteLines.push(`[^${fnId}]: ${label}`);
   }
 
-  const trimmedProse = proseText.trim();
+  const trimmedProse = stripTrailingEmptyCitationSection(proseText);
   const nextBody =
     footnoteLines.length > 0
       ? `${trimmedProse}\n\n${footnoteLines.join('\n')}\n`
@@ -2647,8 +2682,6 @@ export async function cleanGroundingLinks(
   const sourcesById = new Map<string, OKFSource>();
   const sourceIdAliases = new Map<string, string>();
   const orderedSources: OKFSource[] = [];
-  const isAutoDomainSlugTitle = (t?: string): boolean =>
-    /^[a-z0-9.-]+\.[a-z]{2,}\s+[—–-]\s+/i.test(String(t || '').trim());
 
   const registerSource = (
     rawUrl: string,
@@ -2702,15 +2735,7 @@ export async function cleanGroundingLinks(
         sourcesByUrl.set(resolvedUrl, existingById);
         existingById.retrieved_at = nowIso;
       }
-      if (
-        cleanTitle &&
-        (!existingById.title ||
-          existingById.title === existingById.resource ||
-          isBareDomainTitle(existingById.title) ||
-          (isAutoDomainSlugTitle(existingById.title) &&
-            !isBareDomainTitle(cleanTitle) &&
-            !isAutoDomainSlugTitle(cleanTitle)))
-      ) {
+      if (shouldUpgradeSourceTitle(existingById.title, cleanTitle, existingById.resource)) {
         existingById.title = enrichBareDomainSourceTitle(cleanTitle, existingById.resource);
       } else if (isBareDomainTitle(existingById.title)) {
         existingById.title = enrichBareDomainSourceTitle(existingById.title, existingById.resource);
@@ -2736,15 +2761,7 @@ export async function cleanGroundingLinks(
         sourcesById.set(prefId, existing);
         usedIds.add(prefId);
       }
-      if (
-        cleanTitle &&
-        (!existing.title ||
-          existing.title === existing.resource ||
-          isBareDomainTitle(existing.title) ||
-          (isAutoDomainSlugTitle(existing.title) &&
-            !isBareDomainTitle(cleanTitle) &&
-            !isAutoDomainSlugTitle(cleanTitle)))
-      ) {
+      if (shouldUpgradeSourceTitle(existing.title, cleanTitle, existing.resource)) {
         existing.title = enrichBareDomainSourceTitle(cleanTitle, existing.resource);
       } else if (isBareDomainTitle(existing.title)) {
         existing.title = enrichBareDomainSourceTitle(existing.title, existing.resource);
@@ -2771,12 +2788,7 @@ export async function cleanGroundingLinks(
             sourcesByUrl.delete(existing.resource);
             existing.resource = resolvedUrl;
             sourcesByUrl.set(resolvedUrl, existing);
-            if (
-              cleanTitle &&
-              (!existing.title ||
-                existing.title === existing.resource ||
-                isBareDomainTitle(existing.title))
-            ) {
+            if (shouldUpgradeSourceTitle(existing.title, cleanTitle, resolvedUrl)) {
               existing.title = enrichBareDomainSourceTitle(cleanTitle, resolvedUrl);
             } else if (isBareDomainTitle(existing.title)) {
               existing.title = enrichBareDomainSourceTitle(existing.title, resolvedUrl);
@@ -3111,16 +3123,14 @@ export async function cleanGroundingLinks(
   const dedupedSources: OKFSource[] = [];
   const canonicalByResource = new Map<string, OKFSource>();
   for (const entry of orderedSources) {
+    const rawEntryTitle = entry.title;
     entry.title = enrichBareDomainSourceTitle(entry.title, entry.resource);
     const existingCanonical = canonicalByResource.get(entry.resource);
     if (existingCanonical && existingCanonical !== entry) {
-      if (
-        entry.title &&
-        (!existingCanonical.title ||
-          existingCanonical.title === existingCanonical.resource ||
-          isBareDomainTitle(existingCanonical.title))
-      ) {
-        existingCanonical.title = entry.title;
+      const candidateForUpgrade =
+        rawEntryTitle && !isBareDomainTitle(rawEntryTitle) ? rawEntryTitle : entry.title;
+      if (shouldUpgradeSourceTitle(existingCanonical.title, candidateForUpgrade, entry.resource)) {
+        existingCanonical.title = enrichBareDomainSourceTitle(candidateForUpgrade, entry.resource);
       }
       if (entry.retrieved_at === nowIso || !existingCanonical.retrieved_at) {
         existingCanonical.retrieved_at = entry.retrieved_at || nowIso;
@@ -3131,7 +3141,6 @@ export async function cleanGroundingLinks(
       if (entry.id && existingCanonical.id && entry.id !== existingCanonical.id) {
         sourceIdAliases.set(entry.id, existingCanonical.id);
         bodyText = bodyText.replaceAll(`[^${entry.id}]`, `[^${existingCanonical.id}]`);
-        existingFootnoteDefs.delete(entry.id);
         sourcesById.set(entry.id, existingCanonical);
       }
     } else {
@@ -3142,6 +3151,18 @@ export async function cleanGroundingLinks(
   }
   orderedSources.length = 0;
   orderedSources.push(...dedupedSources);
+
+  // Convert bare `.^id` typos (`/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/g`) to `.[^$1]` before alias rewriting
+  bodyText = bodyText.replace(/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/gi, '.[^$1]');
+  bodyText = bodyText.replace(
+    /([.?!:;]?)(?<!\[)\^([A-Za-z0-9_\-]+)(?!\])/g,
+    (fullMatch, punct: string, rawId: string) => {
+      const mapped = sourcesById.get(rawId);
+      if (!mapped) return fullMatch;
+      const canonicalId = mapped.id || rawId;
+      return `[^${canonicalId}]${punct || ''}`;
+    }
+  );
 
   // Rewrite all duplicate-URL source aliases recorded in registerSource() or deduplication
   for (const [aliasId, rawCanonicalId] of sourceIdAliases.entries()) {
@@ -3158,18 +3179,6 @@ export async function cleanGroundingLinks(
       sourcesById.set(aliasId, canonicalEntry);
     }
   }
-
-  // Convert bare `.^id` typos (`/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/g`) to `.[^$1]`
-  bodyText = bodyText.replace(/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/gi, '.[^$1]');
-  bodyText = bodyText.replace(
-    /([.?!:;]?)(?<!\[)\^([A-Za-z0-9_\-]+)(?!\])/g,
-    (fullMatch, punct: string, rawId: string) => {
-      const mapped = sourcesById.get(rawId);
-      if (!mapped) return fullMatch;
-      const canonicalId = mapped.id || rawId;
-      return `[^${canonicalId}]${punct || ''}`;
-    }
-  );
 
   // Resolve or strip any orphan `[^id]` citations in bodyText that do not exist in orderedSources
   const canonicalSourceById = new Map<string, OKFSource>();
@@ -3246,7 +3255,7 @@ export async function cleanGroundingLinks(
     footnoteLines.push(`[^${fnId}]: ${label}`);
   }
 
-  bodyText = bodyText.trim();
+  bodyText = stripTrailingEmptyCitationSection(bodyText);
   if (footnoteLines.length > 0) {
     bodyText = `${bodyText}\n\n${footnoteLines.join('\n')}\n`;
   } else {
@@ -5593,73 +5602,92 @@ const OKF_VIZ_JS = `
   const nodeIndex = {};
   for (const n of bundle.nodes) nodeIndex[n.data.id] = n.data;
 
-  const cy = cytoscape({
-    container: document.getElementById("graph"),
-    elements: [...bundle.nodes, ...bundle.edges],
-    style: [
-      {
-        selector: "node",
-        style: {
-          "background-color": "data(color)",
-          "label": "data(label)",
-          "color": "#0f172a",
-          "font-size": 11,
-          "text-valign": "bottom",
-          "text-margin-y": 4,
-          "text-wrap": "wrap",
-          "text-max-width": 120,
-          "width": "data(size)",
-          "height": "data(size)",
-          "border-width": 1,
-          "border-color": "#0f172a",
-        },
-      },
-      {
-        selector: "node[?stale]",
-        style: {
-          "border-width": 2,
-          "border-color": "#b91c1c",
-          "border-style": "dashed",
-        },
-      },
-      {
-        selector: 'node[status = "deprecated"]',
-        style: { "opacity": 0.55 },
-      },
-      {
-        selector: "node:selected",
-        style: {
-          "border-width": 3,
-          "border-color": "#f59e0b",
-        },
-      },
-      {
-        selector: "edge",
-        style: {
-          "width": 1.5,
-          "line-color": "#cbd5e1",
-          "target-arrow-color": "#cbd5e1",
-          "target-arrow-shape": "triangle",
-          "curve-style": "bezier",
-          "arrow-scale": 0.9,
-        },
-      },
-      {
-        selector: "edge:selected",
-        style: {
-          "line-color": "#f59e0b",
-          "target-arrow-color": "#f59e0b",
-          "width": 2.5,
-        },
-      },
-      {
-        selector: ".dim",
-        style: { "opacity": 0.15 },
-      },
-    ],
-    layout: { name: "cose", animate: false, padding: 30 },
-    wheelSensitivity: 0.2,
-  });
+  const noopCollection = {
+    unselect: () => {},
+    removeClass: () => {},
+    forEach: () => {},
+    select: () => {},
+  };
+  const cy =
+    typeof cytoscape === "function"
+      ? cytoscape({
+          container: document.getElementById("graph"),
+          elements: [...bundle.nodes, ...bundle.edges],
+          style: [
+            {
+              selector: "node",
+              style: {
+                "background-color": "data(color)",
+                "label": "data(label)",
+                "color": "#0f172a",
+                "font-size": 11,
+                "text-valign": "bottom",
+                "text-margin-y": 4,
+                "text-wrap": "wrap",
+                "text-max-width": 120,
+                "width": "data(size)",
+                "height": "data(size)",
+                "border-width": 1,
+                "border-color": "#0f172a",
+              },
+            },
+            {
+              selector: "node[?stale]",
+              style: {
+                "border-width": 2,
+                "border-color": "#b91c1c",
+                "border-style": "dashed",
+              },
+            },
+            {
+              selector: 'node[status = "deprecated"]',
+              style: { "opacity": 0.55 },
+            },
+            {
+              selector: "node:selected",
+              style: {
+                "border-width": 3,
+                "border-color": "#f59e0b",
+              },
+            },
+            {
+              selector: "edge",
+              style: {
+                "width": 1.5,
+                "line-color": "#cbd5e1",
+                "target-arrow-color": "#cbd5e1",
+                "target-arrow-shape": "triangle",
+                "curve-style": "bezier",
+                "arrow-scale": 0.9,
+              },
+            },
+            {
+              selector: "edge:selected",
+              style: {
+                "line-color": "#f59e0b",
+                "target-arrow-color": "#f59e0b",
+                "width": 2.5,
+              },
+            },
+            {
+              selector: ".dim",
+              style: { "opacity": 0.15 },
+            },
+          ],
+          layout: { name: "cose", animate: false, padding: 30 },
+          wheelSensitivity: 0.2,
+        })
+      : {
+          on: () => {},
+          layout: () => ({ run: () => {} }),
+          fit: () => {},
+          elements: () => noopCollection,
+          nodes: () => noopCollection,
+          edges: () => noopCollection,
+          getElementById: () => noopCollection,
+          animate: () => {},
+          zoom: () => 1,
+        };
 
   cy.on("tap", "node", (evt) => showDetail(evt.target.id()));
   cy.on("tap", (evt) => {
@@ -5821,7 +5849,10 @@ const OKF_VIZ_JS = `
         bodyLines.push(line);
       }
     }
-    const joinedBody = bodyLines.join("\\n");
+    const joinedBody = bodyLines
+      .join("\\n")
+      .replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,3}\\s+(?:Kildehenvisninger|Kilder(?:\\s+og\\s+referanser)?|Referanser|Fotnoter|Sources(?:\\s*&\\s*Citations)?|Citations|Grounded\\s+Search\\s+References)\\s*$/i, "")
+      .replace(/\\n+---\\s*$/g, "");
     const inlineMatches = joinedBody.matchAll(/\\[\\^([A-Za-z0-9_\\-]+)\\]/g);
     for (const im of inlineMatches) {
       const cid = im[1];
@@ -5837,7 +5868,12 @@ const OKF_VIZ_JS = `
       /\\[\\^([A-Za-z0-9_\\-]+)\\]/g,
       '<sup class="fn-ref"><a href="#fn-$1">[$1]</a></sup>'
     );
-    let html = marked.parse(bodyWithSup, { breaks: false, gfm: true });
+    let html =
+      typeof marked !== "undefined" && marked && typeof marked.parse === "function"
+        ? marked.parse(bodyWithSup, { breaks: false, gfm: true })
+        : bodyWithSup
+            .replace(/\\x60(\\/[A-Za-z0-9_\\-\\/]+\\.md)\\x60/g, '<a href="$1"><code>$1</code></a>')
+            .replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, '<a href="$2">$1</a>');
     if (fnDefs.length > 0) {
       const items = fnDefs
         .map((fn) => {
@@ -7850,7 +7886,10 @@ const A2UI_STUDIO_JS = `
   }
 
   function syncChecklistToOkfBody(surface) {
-    const body = resolvePointer(surface.dataModel, "/okf/body");
+    const targetBodyPath = resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
+      ? "/okf/primaryBody"
+      : "/okf/body";
+    const body = resolvePointer(surface.dataModel, targetBodyPath);
     if (typeof body !== "string" || !body) return;
     const groups = resolvePointer(surface.dataModel, "/checklist/groups") || [];
     const flatChecked = [];
@@ -7888,7 +7927,7 @@ const A2UI_STUDIO_JS = `
         leafIdx++;
       }
     }
-    setPointer(surface.dataModel, "/okf/body", lines.join("\\n"));
+    setPointer(surface.dataModel, targetBodyPath, lines.join("\\n"));
   }
 
   function syncOkfBodyToChecklist(surface) {
@@ -7980,6 +8019,7 @@ const A2UI_STUDIO_JS = `
     let out = String(md || "");
     // Strip standalone bottom footnote definitions ([^id]: Title) so they don't render as raw lines below prose
     out = out.replace(/^\\s*\\[\\^([A-Za-z0-9_\\-]+)\\]:\\s*(.+)$/gm, "");
+    out = out.replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,3}\\s+(?:Kildehenvisninger|Kilder(?:\\s+og\\s+referanser)?|Referanser|Fotnoter|Sources(?:\\s*&\\s*Citations)?|Citations|Grounded\\s+Search\\s+References)\\s*$/i, "");
     out = out.replace(/\\n+---\\s*$/g, "").trim();
     // Format inline TeX math spans ($...$)
     out = out.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_, inner) {
@@ -8010,6 +8050,13 @@ const A2UI_STUDIO_JS = `
       const safeId = escapeHtml(id);
       return '<sup class="fn-ref"><a href="#okf-src-' + safeId + '" data-fn="' + safeId + '">[' + safeId + "]</a></sup>";
     });
+    if (!window.marked) {
+      out = out.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, '<a href="$2">$1</a>');
+      out = out.replace(/^(\\s*[-*+]\\s+)\\[([ xX])\\]\\s+(.+)$/gm, function (_, prefix, mark, text) {
+        const isChecked = mark.toLowerCase() === "x" ? " checked" : "";
+        return prefix + '<input type="checkbox" disabled' + isChecked + "> " + text;
+      });
+    }
     return out;
   }
 
@@ -8885,22 +8932,38 @@ const A2UI_STUDIO_JS = `
           }
           if (href.startsWith("/") || href.endsWith(".md")) {
             const conceptId = href.replace(/^\\/+/, "").replace(/\\.md$/i, "");
-            if (bundleGraph.bodies && bundleGraph.bodies[conceptId]) {
-              a.style.color = "var(--accent)";
-              a.style.fontWeight = "600";
-              a.addEventListener("click", (e) => {
-                e.preventDefault();
-                if (!resolvePointer(surface.dataModel, "/okf/viewingStubConcept")) {
-                  setPointer(surface.dataModel, "/okf/primaryBody", resolvePointer(surface.dataModel, "/okf/body") || "");
-                  setPointer(surface.dataModel, "/okf/primaryTitle", resolvePointer(surface.dataModel, "/okf/title") || "");
-                }
-                setPointer(surface.dataModel, "/okf/body", bundleGraph.bodies[conceptId]);
+            a.style.color = "var(--accent)";
+            a.style.fontWeight = "600";
+            a.addEventListener("click", (e) => {
+              e.preventDefault();
+              if (!resolvePointer(surface.dataModel, "/okf/viewingStubConcept")) {
+                setPointer(surface.dataModel, "/okf/primaryBody", resolvePointer(surface.dataModel, "/okf/body") || "");
+                setPointer(surface.dataModel, "/okf/primaryTitle", resolvePointer(surface.dataModel, "/okf/title") || "");
+              }
+              const targetBody =
+                (bundleGraph.bodies && bundleGraph.bodies[conceptId]) ||
+                "# " +
+                  (a.textContent || conceptId).trim() +
+                  "\\n\\n*Dette OKF-konseptet (\\x60/" +
+                  conceptId +
+                  ".md\\x60) er kryssreferert fra hovedkonseptet.*";
+              const primaryBody = resolvePointer(surface.dataModel, "/okf/primaryBody");
+              if (primaryBody && targetBody === primaryBody) {
+                setPointer(surface.dataModel, "/okf/body", primaryBody);
+                setPointer(
+                  surface.dataModel,
+                  "/okf/title",
+                  resolvePointer(surface.dataModel, "/okf/primaryTitle") || conceptId
+                );
+                setPointer(surface.dataModel, "/okf/viewingStubConcept", false);
+              } else {
+                setPointer(surface.dataModel, "/okf/body", targetBody);
                 setPointer(surface.dataModel, "/okf/title", conceptId);
                 setPointer(surface.dataModel, "/okf/viewingStubConcept", true);
-                syncOkfBodyToChecklist(surface);
-                renderSurface();
-              });
-            }
+              }
+              syncOkfBodyToChecklist(surface);
+              renderSurface();
+            });
           }
         });
         mainCard.appendChild(mdBody);
@@ -9058,7 +9121,7 @@ const A2UI_STUDIO_JS = `
           headerHtml +
           "<hr class='a2ui-divider'>" +
           '<div class="okf-md-body">' +
-          (window.marked ? window.marked.parse(formattedBody) : escapeHtml(rawBody)) +
+          (window.marked ? window.marked.parse(formattedBody) : formattedBody) +
           "</div>";
 
         const backBtn = detail.querySelector("#okf-graph-back-btn");
@@ -10468,6 +10531,44 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       healedRegjeringen?.title === 'regjeringen.no — Brann og eksplosjonsvernloven' &&
       healedKnif?.title === 'kniftrygghet.no',
     `healOrphanOkfFootnotes self-heals orphan footnotes and polluted Episerver/Servlet titles on existing OKF documents (defs=${healedDefMatches.length}, reg="${healedRegjeringen?.title}", knif="${healedKnif?.title}")`
+  );
+
+  // Test duplicate-URL title upgrade (bare-domain/short generic title -> rich descriptive title),
+  // 1-token `.^alias` typo rewriting before alias cleanup, and trailing empty `## Kildehenvisninger` removal
+  const shortTitleAndDotAliasMd = [
+    '---',
+    'type: Research Concept',
+    'title: "Test Duplicate URL Title Upgrade & Dot-Caret Alias"',
+    'status: draft',
+    'sources:',
+    '  - id: dsb-short',
+    '    title: "DSB"',
+    '    resource: "https://www.dsb.no/brannsikkerhet/veiledning-til-forskrift-om-brannforebygging/"',
+    '  - id: dup1',
+    '    title: "Veiledning til forskrift om brannforebygging (§§ 13–15) - DSB"',
+    '    resource: "https://www.dsb.no/brannsikkerhet/veiledning-til-forskrift-om-brannforebygging/"',
+    '---',
+    '',
+    'Første krav[^dsb-short] og andre krav.^dup1',
+    '',
+    '---',
+    '',
+    '## Kildehenvisninger',
+    '',
+    '[^dsb-short]: DSB',
+    '[^dup1]: Veiledning til forskrift om brannforebygging (§§ 13–15) - DSB',
+    '',
+  ].join('\n');
+  const cleanedShortAliasMd = await cleanGroundingLinks(shortTitleAndDotAliasMd, []);
+  const parsedShortAlias = parseOkfDocument(cleanedShortAliasMd);
+  assert(
+    parsedShortAlias.frontmatter.sources?.length === 1 &&
+      parsedShortAlias.frontmatter.sources[0]?.id === 'dsb-short' &&
+      parsedShortAlias.frontmatter.sources[0]?.title ===
+        'Veiledning til forskrift om brannforebygging (§§ 13–15) - DSB' &&
+      !parsedShortAlias.body.includes('dup1') &&
+      !parsedShortAlias.body.includes('## Kildehenvisninger'),
+    `cleanGroundingLinks upgrades short generic duplicate-URL title, rewrites 1-token .^dup1 typo via sourceIdAliases, and strips trailing empty ## Kildehenvisninger (got: "${cleanedShortAliasMd}")`
   );
   assert(
     truncateSlugAtWordBoundary(
