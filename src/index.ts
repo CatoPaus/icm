@@ -3736,33 +3736,84 @@ export function syncRunToBundle(
     doc.frontmatter.type = 'Research Concept';
   }
 
-  let slug = options?.conceptSlug || '';
-  if (!slug) {
-    const metaPath = path.join(runDir, 'meta.json');
-    if (fs.existsSync(metaPath)) {
-      try {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        const existingCid = String(meta?.okf?.bundleConceptId || '').trim();
-        if (existingCid.startsWith('research/')) {
-          slug = existingCid.slice('research/'.length);
+  let docHealed = false;
+  const healedBody = String(doc.body || '').replace(
+    /([\p{L}\p{N}_\-]+)((?:\[\^[A-Za-z0-9_\-]+\])+)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
+    '$1$3$2'
+  );
+  if (healedBody !== doc.body) {
+    doc.body = healedBody;
+    docHealed = true;
+  }
+  if (Array.isArray(doc.frontmatter.sources)) {
+    doc.frontmatter.sources = doc.frontmatter.sources.map((s) => {
+      if (!s || typeof s !== 'object') return s;
+      const enriched = s.resource ? enrichBareDomainSourceTitle(s.title, String(s.resource)) : s.title;
+      if (enriched && s.title && enriched !== s.title) {
+        docHealed = true;
+        if (s.id) {
+          doc.body = doc.body.replaceAll(`[^${s.id}]: ${s.title}`, `[^${s.id}]: ${enriched}`);
         }
-      } catch {
-        // Ignore unreadable meta.json
+        return { ...s, title: enriched };
       }
+      return s;
+    });
+  }
+  if (docHealed) {
+    fs.writeFileSync(researchPath, serializeOkfDocument(doc), 'utf-8');
+  }
+
+  const rawTitleSlug = String(doc.frontmatter.title || runId)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/-\d{10,}$/, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const canonicalTitleSlug = truncateSlugAtWordBoundary(rawTitleSlug, 48) || 'research-concept';
+
+  let slug = options?.conceptSlug || '';
+  const metaPath = path.join(runDir, 'meta.json');
+  if (!slug && fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      const existingCid = String(meta?.okf?.bundleConceptId || '').trim();
+      if (existingCid.startsWith('research/')) {
+        const existingSlug = existingCid.slice('research/'.length);
+        if (rawTitleSlug.startsWith(existingSlug) && existingSlug !== canonicalTitleSlug) {
+          const oldBundleFile = path.join(bundleRoot, 'research', `${existingSlug}.md`);
+          const newBundleFile = path.join(bundleRoot, 'research', `${canonicalTitleSlug}.md`);
+          if (fs.existsSync(oldBundleFile)) {
+            if (!fs.existsSync(newBundleFile)) {
+              fs.renameSync(oldBundleFile, newBundleFile);
+            } else {
+              fs.unlinkSync(oldBundleFile);
+            }
+          }
+          meta.okf.bundleConceptId = `research/${canonicalTitleSlug}`;
+          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+          const logPath = path.join(bundleRoot, 'log.md');
+          if (fs.existsSync(logPath)) {
+            const logTxt = fs.readFileSync(logPath, 'utf-8');
+            const updatedLog = logTxt.replaceAll(
+              `/research/${existingSlug}.md`,
+              `/research/${canonicalTitleSlug}.md`
+            );
+            if (updatedLog !== logTxt) {
+              fs.writeFileSync(logPath, updatedLog, 'utf-8');
+            }
+          }
+          slug = canonicalTitleSlug;
+        } else {
+          slug = existingSlug;
+        }
+      }
+    } catch {
+      // Ignore unreadable meta.json
     }
   }
   if (!slug) {
-    const baseSource = truncateSlugAtWordBoundary(
-      String(doc.frontmatter.title || runId)
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/-\d{10,}$/, '')
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, ''),
-      48
-    );
-    slug = baseSource || 'research-concept';
+    slug = canonicalTitleSlug;
   }
 
   const conceptId = `research/${slug}`;
@@ -8821,10 +8872,15 @@ export function generateA2uiSurface(
   const okfDoc = rawOkfMarkdown
     ? parseOkfDocument(rawOkfMarkdown)
     : { frontmatter: { title: resolvedRunId || 'ICM Studio', status: 'draft' }, body: '' };
-  okfDoc.body = String(okfDoc.body || '').replace(
+  let okfDocHealed = false;
+  const healedOkfBody = String(okfDoc.body || '').replace(
     /([\p{L}\p{N}_\-]+)((?:\[\^[A-Za-z0-9_\-]+\])+)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
     '$1$3$2'
   );
+  if (healedOkfBody !== okfDoc.body) {
+    okfDoc.body = healedOkfBody;
+    okfDocHealed = true;
+  }
   const okfTrustTier = getOkfTrustTier(okfDoc.frontmatter);
   const okfStale = isOkfStale(okfDoc.frontmatter);
   const rawOkfSources = Array.isArray(okfDoc.frontmatter.sources) ? okfDoc.frontmatter.sources : [];
@@ -8834,6 +8890,7 @@ export function generateA2uiSurface(
       ? enrichBareDomainSourceTitle(s.title, String(s.resource))
       : s.title;
     if (s.id && enrichedTitle && s.title && enrichedTitle !== s.title) {
+      okfDocHealed = true;
       okfDoc.body = okfDoc.body.replaceAll(
         `[^${s.id}]: ${s.title}`,
         `[^${s.id}]: ${enrichedTitle}`
@@ -8841,6 +8898,66 @@ export function generateA2uiSurface(
     }
     return enrichedTitle ? { ...s, title: enrichedTitle } : s;
   });
+  okfDoc.frontmatter.sources = okfSources;
+  if (okfDocHealed && stage1OutputPath && fs.existsSync(stage1OutputPath)) {
+    fs.writeFileSync(stage1OutputPath, serializeOkfDocument(okfDoc), 'utf-8');
+  }
+  if (fs.existsSync(bundleRoot) && stage1OutputPath && fs.existsSync(stage1OutputPath)) {
+    const rawTitleSlug = String(okfDoc.frontmatter.title || resolvedRunId)
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/-\d{10,}$/, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    const canonicalTitleSlug = truncateSlugAtWordBoundary(rawTitleSlug, 48) || 'research-concept';
+    const existingCid = String(meta?.okf?.bundleConceptId || '').trim();
+    const existingSlug = existingCid.startsWith('research/')
+      ? existingCid.slice('research/'.length)
+      : '';
+    let migratedSlug = false;
+    if (existingSlug && rawTitleSlug.startsWith(existingSlug) && existingSlug !== canonicalTitleSlug) {
+      const oldBundleFile = path.join(bundleRoot, 'research', `${existingSlug}.md`);
+      const newBundleFile = path.join(bundleRoot, 'research', `${canonicalTitleSlug}.md`);
+      if (fs.existsSync(oldBundleFile)) {
+        if (!fs.existsSync(newBundleFile)) {
+          fs.renameSync(oldBundleFile, newBundleFile);
+        } else {
+          fs.unlinkSync(oldBundleFile);
+        }
+        migratedSlug = true;
+      }
+      if (meta?.okf) {
+        meta.okf.bundleConceptId = `research/${canonicalTitleSlug}`;
+        const metaPath = path.join(resolvedRunDir, 'meta.json');
+        if (fs.existsSync(metaPath)) {
+          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+        }
+      }
+      const logPath = path.join(bundleRoot, 'log.md');
+      if (fs.existsSync(logPath)) {
+        const logTxt = fs.readFileSync(logPath, 'utf-8');
+        const updatedLog = logTxt.replaceAll(
+          `/research/${existingSlug}.md`,
+          `/research/${canonicalTitleSlug}.md`
+        );
+        if (updatedLog !== logTxt) {
+          fs.writeFileSync(logPath, updatedLog, 'utf-8');
+        }
+      }
+    }
+    const targetSlug =
+      existingSlug && (!rawTitleSlug.startsWith(existingSlug) || existingSlug === canonicalTitleSlug)
+        ? existingSlug
+        : canonicalTitleSlug;
+    const targetBundleFile = path.join(bundleRoot, 'research', `${targetSlug}.md`);
+    if ((okfDocHealed || migratedSlug) && fs.existsSync(targetBundleFile)) {
+      fs.writeFileSync(targetBundleFile, serializeOkfDocument(okfDoc), 'utf-8');
+      regenerateBundleIndexes(bundleRoot);
+    } else if (migratedSlug) {
+      regenerateBundleIndexes(bundleRoot);
+    }
+  }
 
   let rawStage2: Record<string, unknown> | null = null;
   const stage2OutputPath = resolvedRunDir
