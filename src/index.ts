@@ -1929,31 +1929,39 @@ export function enrichBareDomainSourceTitle(
       return domain || cleanTitle;
     }
 
-    const lastSeg = meaningful[meaningful.length - 1].replace(
-      /\.(?:pdf|html?|aspx?|php|md|docx?)$/i,
-      ''
-    );
-    const prevSeg =
-      meaningful.length >= 2
-        ? meaningful[meaningful.length - 2].replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '')
-        : '';
+    if (
+      meaningful.length >= 2 &&
+      meaningful[meaningful.length - 1].replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '') === '1' &&
+      /\d/.test(meaningful[meaningful.length - 2])
+    ) {
+      meaningful.pop();
+    }
+
+    const stripExt = (seg: string): string =>
+      seg.replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
+
+    const lastSeg = stripExt(meaningful[meaningful.length - 1]);
+    const prevSeg = meaningful.length >= 2 ? stripExt(meaningful[meaningful.length - 2]) : '';
 
     let chosenSlug = lastSeg;
-    if (prevSeg) {
-      if (lastSeg === '1' && /\d/.test(prevSeg)) {
-        chosenSlug = prevSeg;
-      } else if (/^[0-9-]+$/.test(lastSeg)) {
-        let alphaPrev = prevSeg;
-        if (!/[\p{L}]/u.test(alphaPrev)) {
-          for (let k = meaningful.length - 3; k >= 0; k--) {
-            const candidate = meaningful[k].replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
-            if (/[\p{L}]/u.test(candidate)) {
-              alphaPrev = candidate;
-              break;
-            }
-          }
+    if (prevSeg && /^[0-9-]+$/.test(lastSeg)) {
+      let alphaIdx = -1;
+      for (let k = meaningful.length - 2; k >= 0; k--) {
+        if (/[\p{L}]/u.test(stripExt(meaningful[k]))) {
+          alphaIdx = k;
+          break;
         }
-        chosenSlug = `${alphaPrev} ${lastSeg}`;
+      }
+      if (alphaIdx >= 0) {
+        const alphaPrev = stripExt(meaningful[alphaIdx]);
+        const numericTail = meaningful.slice(alphaIdx + 1).map(stripExt);
+        if (numericTail.length >= 2 && /^(?:19|20)\d{2}$/.test(numericTail[0])) {
+          chosenSlug = `${alphaPrev} ${numericTail.join('-')}`;
+        } else {
+          chosenSlug = `${alphaPrev} ${lastSeg}`;
+        }
+      } else {
+        chosenSlug = `${prevSeg} ${lastSeg}`;
       }
     }
 
@@ -2837,7 +2845,7 @@ export async function cleanGroundingLinks(
       `${before}${fns.trimStart()}${(trailingPunct || punct)[0]}`
   );
   bodyText = bodyText.replace(
-    /([\p{L}\p{N}_\-]+)((?:\[\^[A-Za-z0-9_\-]+\])+)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
+    /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
     '$1$3$2'
   );
   bodyText = bodyText.replace(/(?:\[\^[A-Za-z0-9_\-]+\][ \t]*){2,}/g, (cluster) => {
@@ -3738,7 +3746,7 @@ export function syncRunToBundle(
 
   let docHealed = false;
   const healedBody = String(doc.body || '').replace(
-    /([\p{L}\p{N}_\-]+)((?:\[\^[A-Za-z0-9_\-]+\])+)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
+    /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
     '$1$3$2'
   );
   if (healedBody !== doc.body) {
@@ -5010,7 +5018,7 @@ export function walkBundleConcepts(bundleRoot: string): OKFConceptNode[] {
         ? [rawSources as OKFSource]
         : [];
     let normalizedBody = (doc.body || '').replace(
-      /([\p{L}\p{N}_\-]+)((?:\[\^[A-Za-z0-9_\-]+\])+)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
+      /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
       '$1$3$2'
     );
     const sources: OKFSource[] = rawSourcesList.map((s) => {
@@ -6125,7 +6133,7 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
       continue;
     }
 
-    const checkboxMatch = line.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.+?)\s*$/);
+    const checkboxMatch = line.match(/^(\s*)(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s+(.+?)\s*$/);
     if (!checkboxMatch) continue;
 
     const indent = checkboxMatch[1].length;
@@ -6142,7 +6150,7 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
     for (let j = i + 1; j < lines.length; j++) {
       const nextLine = lines[j];
       if (!nextLine.trim()) continue;
-      const nextCheckbox = nextLine.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.+?)\s*$/);
+      const nextCheckbox = nextLine.match(/^(\s*)(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s+(.+?)\s*$/);
       if (nextCheckbox && nextCheckbox[1].length > indent) {
         hasIndentedSubItems = true;
       }
@@ -6151,9 +6159,8 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
 
     const contentWithoutFootnotes = rawContent.replace(/\[\^[^\]]+\]/g, '').trim();
     const isBoldColonHeader = /^\*\*[^*]+\*\*:?\s*$/.test(contentWithoutFootnotes);
-    const endsWithColon = /:\s*$/.test(contentWithoutFootnotes);
 
-    if (isBoldColonHeader || (hasIndentedSubItems && (endsWithColon || indent === 0))) {
+    if (isBoldColonHeader || hasIndentedSubItems) {
       const headerTitle = cleanChecklistLabel(
         contentWithoutFootnotes.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:+\s*$/, '').trim()
       );
@@ -6388,9 +6395,10 @@ export function normalizeStage2ForA2ui(
 
     // If module has a boardActionItem (or explicit caseScenario), populate a concise situational scenario case
     const explicitCaseScenario = String(rawMod.caseScenario || rawMod.scenario || '').trim();
-    const explicitCaseResolution = String(
-      rawMod.caseResolution ?? rawMod.caseSolution ?? rawMod.caseActionItem ?? ''
-    ).trim();
+    const explicitCaseResolution =
+      String(rawMod.caseResolution ?? '').trim() ||
+      String(rawMod.caseSolution ?? '').trim() ||
+      String(rawMod.caseActionItem ?? '').trim();
     const caseActionText = explicitCaseResolution || actionItem;
     if (caseActionText || explicitCaseScenario) {
       let synthesizedScenario = explicitCaseScenario;
@@ -7377,7 +7385,7 @@ const A2UI_STUDIO_JS = `
         sectionHasSubgroups = false;
         continue;
       }
-      const checkboxMatch = line.match(/^(\\s*)[-*]\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
+      const checkboxMatch = line.match(/^(\\s*)(?:[-*+]|\\d+[.)])\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
       if (!checkboxMatch) continue;
 
       const indent = checkboxMatch[1].length;
@@ -7392,7 +7400,7 @@ const A2UI_STUDIO_JS = `
       for (let j = i + 1; j < lines.length; j++) {
         const nextLine = lines[j];
         if (!nextLine.trim()) continue;
-        const nextCheckbox = nextLine.match(/^(\\s*)[-*]\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
+        const nextCheckbox = nextLine.match(/^(\\s*)(?:[-*+]|\\d+[.)])\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
         if (nextCheckbox && nextCheckbox[1].length > indent) {
           hasIndentedSubItems = true;
         }
@@ -7401,9 +7409,8 @@ const A2UI_STUDIO_JS = `
 
       const contentWithoutFootnotes = rawContent.replace(/\\[\\^[^\\]]+\\]/g, "").trim();
       const isBoldColonHeader = /^\\*\\*[^*]+\\*\\*:?\\s*$/.test(contentWithoutFootnotes);
-      const endsWithColon = /:\\s*$/.test(contentWithoutFootnotes);
 
-      if (isBoldColonHeader || (hasIndentedSubItems && (endsWithColon || indent === 0))) {
+      if (isBoldColonHeader || hasIndentedSubItems) {
         const headerTitle = cleanClientChecklistLabel(
           contentWithoutFootnotes.replace(/\\*\\*([^*]+)\\*\\*/g, "$1").replace(/:+\\s*$/, "").trim()
         );
@@ -7468,7 +7475,7 @@ const A2UI_STUDIO_JS = `
     const lines = body.split(/\\r?\\n/);
     let leafIdx = 0;
     for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(/^(\\s*[-*]\\s+\\[)([ xX])(\\]\\s+)(.+?)\\s*$/);
+      const m = lines[i].match(/^(\\s*(?:[-*+]|\\d+[.)])\\s+\\[)([ xX])(\\]\\s+)(.+?)\\s*$/);
       if (!m) continue;
       const indent = (lines[i].match(/^(\\s*)/) || ["", ""])[1].length;
       const rawContent = m[4].trim();
@@ -7476,7 +7483,7 @@ const A2UI_STUDIO_JS = `
       for (let j = i + 1; j < lines.length; j++) {
         const nextLine = lines[j];
         if (!nextLine.trim()) continue;
-        const nextCheckbox = nextLine.match(/^(\\s*)[-*]\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
+        const nextCheckbox = nextLine.match(/^(\\s*)(?:[-*+]|\\d+[.)])\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
         if (nextCheckbox && nextCheckbox[1].length > indent) {
           hasIndentedSubItems = true;
         }
@@ -7484,8 +7491,7 @@ const A2UI_STUDIO_JS = `
       }
       const contentWithoutFootnotes = rawContent.replace(/\\[\\^[^\\]]+\\]/g, "").trim();
       const isBoldColonHeader = /^\\*\\*[^*]+\\*\\*:?\\s*$/.test(contentWithoutFootnotes);
-      const endsWithColon = /:\\s*$/.test(contentWithoutFootnotes);
-      if (isBoldColonHeader || (hasIndentedSubItems && (endsWithColon || indent === 0))) {
+      if (isBoldColonHeader || hasIndentedSubItems) {
         continue;
       }
       if (leafIdx < flatChecked.length) {
@@ -8874,7 +8880,7 @@ export function generateA2uiSurface(
     : { frontmatter: { title: resolvedRunId || 'ICM Studio', status: 'draft' }, body: '' };
   let okfDocHealed = false;
   const healedOkfBody = String(okfDoc.body || '').replace(
-    /([\p{L}\p{N}_\-]+)((?:\[\^[A-Za-z0-9_\-]+\])+)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
+    /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
     '$1$3$2'
   );
   if (healedOkfBody !== okfDoc.body) {
@@ -9920,10 +9926,16 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       enrichBareDomainSourceTitle('dibk.no', 'https://www.dibk.no/regelverk/tek/3/11/iv/11-12') ===
         'dibk.no — Tek 11-12' &&
       enrichBareDomainSourceTitle(
+        'lovdata.no',
+        'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710/1'
+      ) === 'lovdata.no — Forskrift 2015-12-17-1710' &&
+      enrichBareDomainSourceTitle('example.no', 'https://example.no/nyheter/2024/11/12') ===
+        'example.no — Nyheter 2024-11-12' &&
+      enrichBareDomainSourceTitle(
         'dibk.no',
         'https://www.dibk.no/contentassets/c50f3c7dcbaa47a3bf4221ee88196aa5/-12-13.-dor-port-og-lignende-01.10.2030.09.21.pdf'
       ) === 'dibk.no — 12-13. Dor port og lignende 01.10.2030.09.21',
-    'enrichBareDomainSourceTitle decodes UTF-8, skips 1-char servlet and Roman-numeral sub-segments, uppercases first alphabetic char, and preserves full descriptive slugs'
+    'enrichBareDomainSourceTitle decodes UTF-8, skips 1-char servlet and Roman-numeral sub-segments, pairs /1 and YYYY/MM/DD paths, uppercases first alphabetic char, and preserves full descriptive slugs'
   );
   assert(
     truncateSlugAtWordBoundary(
@@ -9958,16 +9970,22 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     '### 4.3 Halvårlig og årlig kontroll',
     '- [ ] **Brannøvelse (`FOB § 12`)**:',
     '  - [ ] Er årlig evakueringsøvelse gjennomført?',
+    '- [ ] **Tekniske anlegg**:',
+    '  - [ ] **Brannalarmanlegg** (`NS 3960`)',
+    '    1. [ ] Foreligger årsrapport uten åpne avvik?',
   ].join('\n');
   const chkGroups = extractChecklistGroupsFromMarkdown(sampleChecklistMd);
   assert(
-    chkGroups.length === 5 &&
+    chkGroups.length === 6 &&
       chkGroups[0].title === 'Daglig og ukentlig kontroll' &&
       chkGroups[1].title === 'Månedlig og kvartalsvis kontroll' &&
       chkGroups[2].title === 'Månedlig og kvartalsvis kontroll — Manuelt slokkeutstyr' &&
       chkGroups[3].title === 'Månedlig og kvartalsvis kontroll — Tekniske rom og tavlerom' &&
-      chkGroups[4].title === 'Halvårlig og årlig kontroll — Brannøvelse (FOB § 12)',
-    `extractChecklistGroupsFromMarkdown preserves currentHeading prefix and exact document order (got: ${chkGroups.map((g) => g.title).join(' | ')})`
+      chkGroups[4].title === 'Halvårlig og årlig kontroll — Brannøvelse (FOB § 12)' &&
+      chkGroups[5].title ===
+        'Halvårlig og årlig kontroll — Tekniske anlegg — Brannalarmanlegg (NS 3960)' &&
+      chkGroups[5].items[0]?.label === 'Foreligger årsrapport uten åpne avvik?',
+    `extractChecklistGroupsFromMarkdown preserves currentHeading prefix, 3-level hierarchy, and exact document order (got: ${chkGroups.map((g) => g.title).join(' | ')})`
   );
 
   const stage2Norm = normalizeStage2ForA2ui(
@@ -9997,7 +10015,9 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
           regulatoryBasis: 'TEK17 § 11-2',
           spokenNarration: 'Kort fortelling.',
           caseScenario: 'Leietaker vil bygge om kontor i 1. etasje til treningssenter for 180 personer.',
-          boardActionItem: 'Stans ombyggingen og krev revidert brannkonsept for RKL 5.',
+          caseResolution: '   ',
+          caseSolution: 'Stans ombyggingen og krev revidert brannkonsept for RKL 5.',
+          boardActionItem: 'Generisk handlingspunkt for styret.',
           quizQuestion: 'Hvilken brannklasse gjelder for 4 etasjer?',
           quizOptions: ['BKL 1', 'BKL 2'],
           correctOptionIndex: 1,
@@ -10041,7 +10061,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       stage2Norm.cases[1].recommendedAction ===
         'Stans ombyggingen og krev revidert brannkonsept for RKL 5.' &&
       !stage2Norm.cases[1].recommendedAction.includes('📌 Faglig begrunnelse:'),
-    'Explicit caseScenario does NOT append unrelated quizExplanation onto recommendedAction'
+    'Explicit caseScenario uses non-empty caseSolution fallback and does NOT append unrelated quizExplanation'
   );
 
   const validMessages: A2uiEnvelopeMessage[] = [
