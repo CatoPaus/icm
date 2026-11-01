@@ -5681,12 +5681,25 @@ hr { border: none; border-top: 1px solid #e2e8f0; margin: 14px 0; }
  */
 export function detectIcmLanguage(text: string): 'no' | 'en' {
   const sample = String(text || '');
-  if (/[æøåÆØÅ]/.test(sample)) return 'no';
-  const noMatches = sample.match(
-    /\b(og|det|som|med|ikke|eller|til|fra|brann|styret|virksomhet|krav|forskrift|lov|sjekkliste|kurset|deltaker|modul|kontroll|ansvar|tiltak)\b/gi
-  );
-  if (noMatches && noMatches.length >= 3) return 'no';
-  return 'en';
+  const noCharCount = (sample.match(/[æøåÆØÅ]/g) || []).length;
+  const noStopMatches =
+    sample.match(
+      /\b(ikke|eller|brann\w*|styret|virksomhet\w*|forskrift\w*|sjekkliste\w*|kurset|kursdeltaker\w*|deltaker\w*|opplæring\w*|ansvar\w*|tiltak\w*|arbeidsgiver\w*|krav(?:ene|et)?|kontroll(?:en|er)?|lovpålagt\w*|vurdering\w*|gjennomfør\w*)\b/gi
+    ) || [];
+  const noShortMatches =
+    sample.match(/\b(og|det|som|med|til|fra|lov|skal|må|kan|ved|av|på|en|et)\b/g) || [];
+  const enStopMatches =
+    sample.match(
+      /\b(the|and|with|from|that|this|are|was|were|have|has|had|will|would|should|could|which|their|there|about|into|between|without|within|through|during|before|after|under|above|below|while|where|when|what|these|those)\b/gi
+    ) || [];
+  const noScore = noCharCount * 2 + noStopMatches.length * 3 + noShortMatches.length;
+  const enScore = enStopMatches.length * 2;
+  if (noScore === 0) return 'en';
+  if (enScore === 0) {
+    if (noCharCount >= 1 || noStopMatches.length >= 1 || noShortMatches.length >= 2) return 'no';
+    return 'en';
+  }
+  return noScore >= enScore ? 'no' : 'en';
 }
 
 /**
@@ -5732,20 +5745,44 @@ export function detectIcmDomainMode(
 
 const OKF_VIZ_JS = `
 (function () {
+  function detectTextLang(text) {
+    const sample = String(text || "");
+    const noCharCount = (sample.match(/[æøåÆØÅ]/g) || []).length;
+    const noStopMatches =
+      sample.match(
+        /\\b(ikke|eller|brann\\w*|styret|virksomhet\\w*|forskrift\\w*|sjekkliste\\w*|kurset|kursdeltaker\\w*|deltaker\\w*|opplæring\\w*|ansvar\\w*|tiltak\\w*|arbeidsgiver\\w*|krav(?:ene|et)?|kontroll(?:en|er)?|lovpålagt\\w*|vurdering\\w*|gjennomfør\\w*)\\b/gi
+      ) || [];
+    const noShortMatches =
+      sample.match(/\\b(og|det|som|med|til|fra|lov|skal|må|kan|ved|av|på|en|et)\\b/g) || [];
+    const enStopMatches =
+      sample.match(
+        /\\b(the|and|with|from|that|this|are|was|were|have|has|had|will|would|should|could|which|their|there|about|into|between|without|within|through|during|before|after|under|above|below|while|where|when|what|these|those)\\b/gi
+      ) || [];
+    const noScore = noCharCount * 2 + noStopMatches.length * 3 + noShortMatches.length;
+    const enScore = enStopMatches.length * 2;
+    if (noScore === 0) return "en";
+    if (enScore === 0) {
+      if (noCharCount >= 1 || noStopMatches.length >= 1 || noShortMatches.length >= 2) return "no";
+      return "en";
+    }
+    return noScore >= enScore ? "no" : "en";
+  }
+
   function isInlineLatexMath(inner) {
     if (!inner || typeof inner !== "string") return false;
     if (/^\\s|\\s$/.test(inner)) return false;
     if (/[\\r\\n|]/.test(inner)) return false;
     if (inner.indexOf("[^") !== -1) return false;
     if (/\\*\\*|__/.test(inner)) return false;
-    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt]\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\/|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|-|–|—|\\)|\\s*$))/i.test(inner)) {
+    if (/(?:^|[^\\\\])~$/.test(inner)) return false;
+    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt](?![\\^_])\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\/|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|-|–|—|\\)|\\s*$))/i.test(inner)) {
       return false;
     }
-    if (!/(?:\\\\[a-zA-Z !,;:%]|[A-Za-z0-9)\\]}][\\^_](?:\\{[^{}\\r\\n]+\\}|[A-Za-z0-9+\\-°]))/.test(inner)) {
+    if (!/(?:\\\\[a-zA-Z !,;:%$&_#]|[A-Za-z0-9)\\]}][\\^_](?:\\{[^{}\\r\\n]+\\}|[A-Za-z0-9+\\-°]))/.test(inner)) {
       return false;
     }
     if (/^\\d/.test(inner)) {
-      if (!/^\\d+(?:[.,]\\d+)?(?:\\s*(?:\\\\|[\\^_])|\\s+[a-zA-Z]{1,3}[\\^_])/.test(inner)) {
+      if (!/^\\d+(?:[.,]\\d+)*(?:\\s*(?:\\\\|[\\^_])|\\s+[a-zA-Z]{1,3}[\\^_])/.test(inner)) {
         return false;
       }
     }
@@ -5797,13 +5834,15 @@ const OKF_VIZ_JS = `
     window.__ICM_TEST_HOOKS__.renderMarkdownWithOkfFootnotes = renderMarkdownWithOkfFootnotes;
     window.__ICM_TEST_HOOKS__.isInlineLatexMath = isInlineLatexMath;
     window.__ICM_TEST_HOOKS__.replaceInlineLatexSpans = replaceInlineLatexSpans;
+    window.__ICM_TEST_HOOKS__.detectTextLang = detectTextLang;
     return;
   }
   const bundle = window.BUNDLE;
   const bundleName = window.BUNDLE_NAME;
   const isNo =
     (bundle && bundle.lang === "no") ||
-    /[æøåÆØÅ]/.test(Object.values((bundle && bundle.bodies) || {}).join(" "));
+    ((!bundle || bundle.lang !== "en") &&
+      detectTextLang(Object.values((bundle && bundle.bodies) || {}).join(" ")) === "no");
   document.title = bundleName + " — OKF v0.2 Viewer";
   document.getElementById("bundle-name").textContent = bundleName;
 
@@ -6088,10 +6127,11 @@ const OKF_VIZ_JS = `
         });
       }
     }
-    const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻" };
-    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "⁷", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
+    const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", a: "ᵃ", b: "ᵇ", c: "ᶜ", d: "ᵈ", e: "ᵉ", f: "ᶠ", g: "ᵍ", h: "ʰ", i: "ⁱ", j: "ʲ", k: "ᵏ", l: "ˡ", m: "ᵐ", n: "ⁿ", o: "ᵒ", p: "ᵖ", r: "ʳ", s: "ˢ", t: "ᵗ", u: "ᵘ", v: "ᵛ", w: "ʷ", x: "ˣ", y: "ʸ", z: "ᶻ" };
+    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     const bodyWithMath = replaceInlineLatexSpans(joinedBody, function (_, inner) {
       const cleaned = String(inner)
+        .replace(/\\\\(?:left|right)\\s*([()[\\]|.])?/g, "$1")
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
@@ -6127,10 +6167,10 @@ const OKF_VIZ_JS = `
         .replace(/\\\\pi\\b/g, "π")
         .replace(/\\\\sigma\\b/g, "σ")
         .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
-        .replace(/\\%/g, "%")
+        .replace(/\\\\([$&%_#{}])/g, "$1")
         .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
-        .replace(/\\^\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|\\^([+-]?[0-9]|[+-])(?![0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9+-]/g, function (d) {
+        .replace(/\\^\\{\\s*([0-9+\\-=()a-pr-z]+)\\s*\\}|\\^([0-9+\\-a-pr-z])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9+\\-=()a-pr-z]/g, function (d) {
             return supMap[d] || d;
           });
         })
@@ -6196,9 +6236,15 @@ const OKF_VIZ_JS = `
     return fallbackPalette[(hash >>> 0) % fallbackPalette.length];
   }
 
+  let lastConceptId = null;
+
   function showDetail(conceptId) {
     const data = nodeIndex[conceptId];
     if (!data) return;
+    const isSourceNode = data.group === "source" || String(conceptId).startsWith("source:");
+    if (!isSourceNode) {
+      lastConceptId = conceptId;
+    }
     cy.elements().unselect();
     const node = cy.getElementById(conceptId);
     if (node) node.select();
@@ -6298,7 +6344,7 @@ const OKF_VIZ_JS = `
     const html = renderMarkdownWithOkfFootnotes(body, sources);
     const bodyEl = document.getElementById("detail-body");
     const backBtnLabel = isNo ? "← Tilbake til konsept" : "← Back to concept";
-    if (data.group === "source" || String(conceptId).startsWith("source:")) {
+    if (isSourceNode) {
       bodyEl.innerHTML =
         '<div style="margin-bottom:10px"><button type="button" id="viz-source-back-btn" style="cursor:pointer;padding:4px 10px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;font-size:12px;font-weight:600">' +
         backBtnLabel +
@@ -6307,6 +6353,7 @@ const OKF_VIZ_JS = `
       const srcBackBtn = document.getElementById("viz-source-back-btn");
       if (srcBackBtn) {
         const targetConcept =
+          lastConceptId ||
           data.parentConceptId ||
           (backlinks[conceptId] && backlinks[conceptId][0]) ||
           (bundle.nodes[0] && bundle.nodes[0].data.id);
@@ -6898,20 +6945,21 @@ export function isInlineLatexMathSpan(inner: string): boolean {
   if (/[\r\n|]/.test(inner)) return false;
   if (inner.includes('[^')) return false;
   if (/\*\*|__/.test(inner)) return false;
+  if (/(?:^|[^\\])~$/.test(inner)) return false;
   if (
-    /^\d[\d,.]*(?:\s*(?:[BMKTbmkt]\b|billion|million|trillion|thousand|bn\b|mn\b|\/|\s+(?:per|to|and|or|in|at|for|from|of|vs)\b|-|–|—|\)|\s*$))/i.test(
+    /^\d[\d,.]*(?:\s*(?:[BMKTbmkt](?![\^_])\b|billion|million|trillion|thousand|bn\b|mn\b|\/|\s+(?:per|to|and|or|in|at|for|from|of|vs)\b|-|–|—|\)|\s*$))/i.test(
       inner
     )
   ) {
     return false;
   }
   if (
-    !/(?:\\[a-zA-Z !,;:%]|[A-Za-z0-9)\]}][\^_](?:\{[^{}\r\n]+\}|[A-Za-z0-9+\-°]))/.test(inner)
+    !/(?:\\[a-zA-Z !,;:%$&_#]|[A-Za-z0-9)\]}][\^_](?:\{[^{}\r\n]+\}|[A-Za-z0-9+\-°]))/.test(inner)
   ) {
     return false;
   }
   if (/^\d/.test(inner)) {
-    if (!/^\d+(?:[.,]\d+)?(?:\s*(?:\\|[\^_])|\s+[a-zA-Z]{1,3}[\^_])/.test(inner)) {
+    if (!/^\d+(?:[.,]\d+)*(?:\s*(?:\\|[\^_])|\s+[a-zA-Z]{1,3}[\^_])/.test(inner)) {
       return false;
     }
   }
@@ -6985,6 +7033,34 @@ export function cleanChecklistLabel(rawText: string): string {
     '9': '⁹',
     '+': '⁺',
     '-': '⁻',
+    '=': '⁼',
+    '(': '⁽',
+    ')': '⁾',
+    a: 'ᵃ',
+    b: 'ᵇ',
+    c: 'ᶜ',
+    d: 'ᵈ',
+    e: 'ᵉ',
+    f: 'ᶠ',
+    g: 'ᵍ',
+    h: 'ʰ',
+    i: 'ⁱ',
+    j: 'ʲ',
+    k: 'ᵏ',
+    l: 'ˡ',
+    m: 'ᵐ',
+    n: 'ⁿ',
+    o: 'ᵒ',
+    p: 'ᵖ',
+    r: 'ʳ',
+    s: 'ˢ',
+    t: 'ᵗ',
+    u: 'ᵘ',
+    v: 'ᵛ',
+    w: 'ʷ',
+    x: 'ˣ',
+    y: 'ʸ',
+    z: 'ᶻ',
   };
   const subMap: Record<string, string> = {
     '0': '₀',
@@ -7019,6 +7095,7 @@ export function cleanChecklistLabel(rawText: string): string {
   };
   const cleanLatexFragment = (frag: string, isInsideMathSpan: boolean): string => {
     let out = String(frag || '')
+      .replace(/\\(?:left|right)\s*([()[\]|.])?/g, '$1')
       .replace(/\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\{([^{}]*)\}/g, '$1')
       .replace(/\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\{([^{}]*)\}/g, '$1')
       .replace(/\\frac\{\s*([^{}]+?)\s*\}\{\s*([^{}]+?)\s*\}/g, '$1/$2')
@@ -7053,12 +7130,12 @@ export function cleanChecklistLabel(rawText: string): string {
       .replace(/\\pi\b/g, 'π')
       .replace(/\\sigma\b/g, 'σ')
       .replace(/\\(?:circ|degree)(?![a-z])/g, '°')
-      .replace(/\\%/g, '%')
+      .replace(/\\([$&%_#{}])/g, '$1')
       .replace(/\^\{\s*(?:°|o)\s*([CFK])?\s*\}|\^°/g, '°$1')
       .replace(
-        /\^\{\s*([+-]?[0-9]+|[+-])\s*\}|\^([+-]?[0-9]|[+-])(?![0-9])/g,
+        /\^\{\s*([0-9+\-=()a-pr-z]+)\s*\}|\^([0-9+\-a-pr-z])(?![a-zA-Z0-9])/g,
         (_m, b: string, s: string) =>
-          String(b || s).replace(/[0-9+-]/g, (d) => supMap[d] || d)
+          String(b || s).replace(/[0-9+\-=()a-pr-z]/g, (d) => supMap[d] || d)
       )
       .replace(/_\{\s*([+-]?[0-9]+|[+-])\s*\}/g, (_m, b: string) =>
         String(b).replace(/[0-9+-]/g, (d) => subMap[d] || d)
@@ -7412,6 +7489,7 @@ export function normalizeStage2ForA2ui(
       rawMod.regulatoryBasis ||
         rawMod.legalBasis ||
         rawMod.legalReference ||
+        rawMod.legalRef ||
         rawMod.lawReference ||
         rawMod.statute ||
         rawMod.analyticalFramework ||
@@ -7516,6 +7594,9 @@ export function normalizeStage2ForA2ui(
     const explicitCaseScenario = String(
       rawMod.caseScenario || rawMod.stressTest || rawMod.dilemma || rawMod.scenario || ''
     ).trim();
+    const hasPrimaryActionField = Boolean(
+      rawMod.boardActionItem || rawMod.actionItem || rawMod.icDirective
+    );
     const explicitCaseResolution =
       String(rawMod.caseResolution ?? '').trim() ||
       String(rawMod.recommendedAction ?? '').trim() ||
@@ -7523,7 +7604,8 @@ export function normalizeStage2ForA2ui(
       String(rawMod.resolution ?? '').trim() ||
       String(rawMod.caseSolution ?? '').trim() ||
       String(rawMod.solution ?? '').trim() ||
-      String(rawMod.caseActionItem ?? '').trim();
+      String(rawMod.caseActionItem ?? '').trim() ||
+      (hasPrimaryActionField ? String(rawMod.recommendation ?? '').trim() : '');
     const caseActionText = explicitCaseResolution || actionItem;
     if (caseActionText || explicitCaseScenario) {
       let synthesizedScenario = explicitCaseScenario;
@@ -7678,9 +7760,15 @@ export function normalizeStage2ForA2ui(
         c.regulatoryBasis ||
           c.legalBasis ||
           c.legalReference ||
+          c.legalRef ||
+          c.lawReference ||
           c.statute ||
           c.analyticalFramework ||
           c.valuationMethodology ||
+          c.framework ||
+          c.methodology ||
+          c.coreConcept ||
+          c.subtitle ||
           c.context ||
           c.category ||
           ''
@@ -7694,9 +7782,14 @@ export function normalizeStage2ForA2ui(
           c.mitigation ||
           c.caseResolution ||
           c.resolution ||
+          c.caseSolution ||
           c.solution ||
           c.boardActionItem ||
           c.actionItem ||
+          c.icDirective ||
+          c.caseActionItem ||
+          c.practicalTask ||
+          c.exercise ||
           ''
       ),
     });
@@ -8340,20 +8433,44 @@ body {
 
 const A2UI_STUDIO_JS = `
 (function () {
+  function detectTextLang(text) {
+    const sample = String(text || "");
+    const noCharCount = (sample.match(/[æøåÆØÅ]/g) || []).length;
+    const noStopMatches =
+      sample.match(
+        /\\b(ikke|eller|brann\\w*|styret|virksomhet\\w*|forskrift\\w*|sjekkliste\\w*|kurset|kursdeltaker\\w*|deltaker\\w*|opplæring\\w*|ansvar\\w*|tiltak\\w*|arbeidsgiver\\w*|krav(?:ene|et)?|kontroll(?:en|er)?|lovpålagt\\w*|vurdering\\w*|gjennomfør\\w*)\\b/gi
+      ) || [];
+    const noShortMatches =
+      sample.match(/\\b(og|det|som|med|til|fra|lov|skal|må|kan|ved|av|på|en|et)\\b/g) || [];
+    const enStopMatches =
+      sample.match(
+        /\\b(the|and|with|from|that|this|are|was|were|have|has|had|will|would|should|could|which|their|there|about|into|between|without|within|through|during|before|after|under|above|below|while|where|when|what|these|those)\\b/gi
+      ) || [];
+    const noScore = noCharCount * 2 + noStopMatches.length * 3 + noShortMatches.length;
+    const enScore = enStopMatches.length * 2;
+    if (noScore === 0) return "en";
+    if (enScore === 0) {
+      if (noCharCount >= 1 || noStopMatches.length >= 1 || noShortMatches.length >= 2) return "no";
+      return "en";
+    }
+    return noScore >= enScore ? "no" : "en";
+  }
+
   function isInlineLatexMath(inner) {
     if (!inner || typeof inner !== "string") return false;
     if (/^\\s|\\s$/.test(inner)) return false;
     if (/[\\r\\n|]/.test(inner)) return false;
     if (inner.indexOf("[^") !== -1) return false;
     if (/\\*\\*|__/.test(inner)) return false;
-    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt]\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\/|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|-|–|—|\\)|\\s*$))/i.test(inner)) {
+    if (/(?:^|[^\\\\])~$/.test(inner)) return false;
+    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt](?![\\^_])\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\/|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|-|–|—|\\)|\\s*$))/i.test(inner)) {
       return false;
     }
-    if (!/(?:\\\\[a-zA-Z !,;:%]|[A-Za-z0-9)\\]}][\\^_](?:\\{[^{}\\r\\n]+\\}|[A-Za-z0-9+\\-°]))/.test(inner)) {
+    if (!/(?:\\\\[a-zA-Z !,;:%$&_#]|[A-Za-z0-9)\\]}][\\^_](?:\\{[^{}\\r\\n]+\\}|[A-Za-z0-9+\\-°]))/.test(inner)) {
       return false;
     }
     if (/^\\d/.test(inner)) {
-      if (!/^\\d+(?:[.,]\\d+)?(?:\\s*(?:\\\\|[\\^_])|\\s+[a-zA-Z]{1,3}[\\^_])/.test(inner)) {
+      if (!/^\\d+(?:[.,]\\d+)*(?:\\s*(?:\\\\|[\\^_])|\\s+[a-zA-Z]{1,3}[\\^_])/.test(inner)) {
         return false;
       }
     }
@@ -8402,11 +8519,7 @@ const A2UI_STUDIO_JS = `
   }
 
   function detectSpeechLang(text) {
-    const s = String(text || "");
-    const hasNorwegianChars =
-      /[æøåÆØÅ]/.test(s) ||
-      /\\b(og|det|som|med|ikke|eller|til|fra|brann|styret|virksomhet|krav)\\b/i.test(s);
-    return hasNorwegianChars ? "nb-NO" : "en-US";
+    return detectTextLang(text) === "no" ? "nb-NO" : "en-US";
   }
 
   if (typeof window !== "undefined" && window.__ICM_TEST_HOOKS__) {
@@ -8637,10 +8750,11 @@ const A2UI_STUDIO_JS = `
   }
 
   function cleanClientChecklistLabel(rawText) {
-    const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻" };
+    const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", a: "ᵃ", b: "ᵇ", c: "ᶜ", d: "ᵈ", e: "ᵉ", f: "ᶠ", g: "ᵍ", h: "ʰ", i: "ⁱ", j: "ʲ", k: "ᵏ", l: "ˡ", m: "ᵐ", n: "ⁿ", o: "ᵒ", p: "ᵖ", r: "ʳ", s: "ˢ", t: "ᵗ", u: "ᵘ", v: "ᵛ", w: "ʷ", x: "ˣ", y: "ʸ", z: "ᶻ" };
     const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     function cleanLatexFrag(frag, isInsideMathSpan) {
       let out = String(frag || "")
+        .replace(/\\\\(?:left|right)\\s*([()[\\]|.])?/g, "$1")
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
@@ -8675,10 +8789,10 @@ const A2UI_STUDIO_JS = `
         .replace(/\\\\pi\\b/g, "π")
         .replace(/\\\\sigma\\b/g, "σ")
         .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
-        .replace(/\\%/g, "%")
+        .replace(/\\\\([$&%_#{}])/g, "$1")
         .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
-        .replace(/\\^\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|\\^([+-]?[0-9]|[+-])(?![0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9+-]/g, function (d) {
+        .replace(/\\^\\{\\s*([0-9+\\-=()a-pr-z]+)\\s*\\}|\\^([0-9+\\-a-pr-z])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9+\\-=()a-pr-z]/g, function (d) {
             return supMap[d] || d;
           });
         })
@@ -8725,9 +8839,7 @@ const A2UI_STUDIO_JS = `
 
   function extractChecklistGroupsClient(rawMarkdown) {
     const sample = String(rawMarkdown || "");
-    const isNo =
-      /[æøåÆØÅ]/.test(sample) ||
-      /\\b(og|det|som|med|ikke|eller|til|fra|brann|styret|virksomhet|krav|kontroll)\\b/i.test(sample);
+    const isNo = detectTextLang(sample) === "no";
     const defaultHeading = isNo ? "Sjekkliste / Action Items" : "Checklist / Action Items";
     const defaultFallback = isNo ? "Generelt" : "General";
     const lines = sample.split(/\\r?\\n/);
@@ -8980,7 +9092,7 @@ const A2UI_STUDIO_JS = `
   }
 
   function formatInlineLatexAndFootnotes(md, sources) {
-    const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻" };
+    const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", a: "ᵃ", b: "ᵇ", c: "ᶜ", d: "ᵈ", e: "ᵉ", f: "ᶠ", g: "ᵍ", h: "ʰ", i: "ⁱ", j: "ʲ", k: "ᵏ", l: "ˡ", m: "ᵐ", n: "ⁿ", o: "ᵒ", p: "ᵖ", r: "ʳ", s: "ˢ", t: "ᵗ", u: "ᵘ", v: "ᵛ", w: "ʷ", x: "ˣ", y: "ʸ", z: "ᶻ" };
     const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     let out = String(md || "");
     // Strip redundant leading H1 heading (# <Title>) since the concept title is already rendered in the card/panel header
@@ -8993,6 +9105,7 @@ const A2UI_STUDIO_JS = `
     // Format inline TeX math spans ($...$) safely without matching currency $ pairs or table pipes
     out = replaceInlineLatexSpans(out, function (_, inner) {
       const cleaned = String(inner)
+        .replace(/\\\\(?:left|right)\\s*([()[\\]|.])?/g, "$1")
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
@@ -9028,10 +9141,10 @@ const A2UI_STUDIO_JS = `
         .replace(/\\\\pi\\b/g, "π")
         .replace(/\\\\sigma\\b/g, "σ")
         .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
-        .replace(/\\%/g, "%")
+        .replace(/\\\\([$&%_#{}])/g, "$1")
         .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
-        .replace(/\\^\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|\\^([+-]?[0-9]|[+-])(?![0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9+-]/g, function (d) {
+        .replace(/\\^\\{\\s*([0-9+\\-=()a-pr-z]+)\\s*\\}|\\^([0-9+\\-a-pr-z])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+          return String(b || s).replace(/[0-9+\\-=()a-pr-z]/g, function (d) {
             return supMap[d] || d;
           });
         })
@@ -10187,11 +10300,15 @@ const A2UI_STUDIO_JS = `
             escapeHtml(displayTitle) +
             "</h3>" +
             (d.description
-              ? '<p class="a2ui-caption" style="margin-top:4px;word-break:break-all"><a href="' +
-                escapeHtml(d.description) +
-                '" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-weight:600">' +
-                escapeHtml(d.description) +
-                " ↗</a></p>"
+              ? /^https?:\/\//i.test(d.description)
+                ? '<p class="a2ui-caption" style="margin-top:4px;word-break:break-all"><a href="' +
+                  escapeHtml(d.description) +
+                  '" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-weight:600">' +
+                  escapeHtml(d.description) +
+                  " ↗</a></p>"
+                : '<p class="a2ui-caption" style="margin-top:4px;word-break:break-all">' +
+                  escapeHtml(d.description) +
+                  "</p>"
               : "");
         } else {
           const badgesHtml =
@@ -10467,24 +10584,45 @@ export function generateA2uiSurface(
   let resolvedRunDir = '';
   let resolvedRunId = options.runId || '';
 
+  const isValidRunDir = (dirPath: string): boolean =>
+    fs.existsSync(path.join(dirPath, 'meta.json')) ||
+    fs.existsSync(path.join(dirPath, 'stages', '01_research', 'output', 'research_summary.md')) ||
+    fs.existsSync(path.join(dirPath, 'stages', '02_script', 'output', 'script_draft.json'));
+
   if (resolvedRunId && fs.existsSync(resolvedRunId) && fs.statSync(resolvedRunId).isDirectory()) {
     resolvedRunDir = path.resolve(resolvedRunId);
     resolvedRunId = path.basename(resolvedRunDir);
-  } else if (resolvedRunId) {
+  } else if (
+    resolvedRunId &&
+    fs.existsSync(path.join(runsRoot, resolvedRunId)) &&
+    fs.statSync(path.join(runsRoot, resolvedRunId)).isDirectory() &&
+    isValidRunDir(path.join(runsRoot, resolvedRunId))
+  ) {
     resolvedRunDir = path.join(runsRoot, resolvedRunId);
   } else if (fs.existsSync(runsRoot)) {
-    const candidates = fs
+    const allDirs = fs
       .readdirSync(runsRoot, { withFileTypes: true })
       .filter((d) => d.isDirectory() && d.name !== '_dry_run')
-      .map((d) => ({
-        name: d.name,
-        mtime: fs.statSync(path.join(runsRoot, d.name)).mtimeMs,
-      }))
-      .sort((a, b) => b.mtime - a.mtime);
+      .map((d) => {
+        const fullPath = path.join(runsRoot, d.name);
+        return {
+          name: d.name,
+          fullPath,
+          valid: isValidRunDir(fullPath),
+          mtime: fs.statSync(fullPath).mtimeMs,
+        };
+      });
+    const validCandidates = allDirs.filter((d) => d.valid).sort((a, b) => b.mtime - a.mtime);
+    const candidates =
+      validCandidates.length > 0 ? validCandidates : allDirs.sort((a, b) => b.mtime - a.mtime);
     if (candidates.length > 0) {
       resolvedRunId = candidates[0].name;
+      resolvedRunDir = candidates[0].fullPath;
+    } else if (resolvedRunId) {
       resolvedRunDir = path.join(runsRoot, resolvedRunId);
     }
+  } else if (resolvedRunId) {
+    resolvedRunDir = path.join(runsRoot, resolvedRunId);
   }
 
   // Load Run Metadata, Stage 1 OKF v0.2 Artifact, and Stage 2 JSON Artifact
@@ -10663,7 +10801,7 @@ export function generateA2uiSurface(
   for (const c of concepts) {
     graphBodies[c.id] = c.body;
   }
-  const graphEdges: Array<{ data: { id: string; source: string; target: string } }> = [];
+  const graphEdges: Array<{ data: { id: string; source: string; target: string; label?: string } }> = [];
   const seenEdgeKeys = new Set<string>();
   for (const c of concepts) {
     for (const target of c.links_to) {
@@ -10750,7 +10888,7 @@ export function generateA2uiSurface(
       const edgeKey = `${c.id}__${srcNodeId}`;
       if (!seenEdgeKeys.has(edgeKey)) {
         seenEdgeKeys.add(edgeKey);
-        graphEdges.push({ data: { id: edgeKey, source: c.id, target: srcNodeId } });
+        graphEdges.push({ data: { id: edgeKey, source: c.id, target: srcNodeId, label: 'cites' } });
       }
     }
   }
@@ -12288,10 +12426,11 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       analyticalNorm.cases[0].title === 'Starlink Unit Economics' &&
       analyticalNorm.cases[0].recommendedAction === 'Deploy v3 satellites with 1 Tbps laser backhaul.' &&
       analyticalNorm.cases[1].title === 'Starship FAA Launch Cadence Delay' &&
+      analyticalNorm.cases[1].basisOrContext === 'FAA Part 450' &&
       analyticalNorm.quiz.length === 0 &&
       detectedAnalyticalMode === 'analysis' &&
       detectedCourseMode === 'course',
-    `normalizeStage2ForA2ui maps analytical/decision schema aliases cleanly with 0 quizzes and detectIcmDomainMode distinguishes 'analysis' vs 'course'`
+    `normalizeStage2ForA2ui maps analytical/decision schema aliases (including legalRef) cleanly with 0 quizzes and detectIcmDomainMode distinguishes 'analysis' vs 'course'`
   );
 
   // Issue 2 Self-Test: Guard inline LaTeX $...$ against currency $ pairs ($800.0B ... ~$420.00) and Markdown table pipes (|)
@@ -12308,14 +12447,14 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   );
 
   const mixedCurrencyAndMathLine =
-    'At $65.00–$75.00 per share, verify compartment area > $800\\text{ m}^2$ and ARPU $\\ge$ $68/month';
+    'At $65.00–$75.00 per share (tier_1 ~$70.00), verify area > $800 m^2$, DCF $\\left(1+r\\right)^{-t}$, and ARPU $\\ge \\$68$/month';
   const expectedMixedChecklist =
-    'At $65.00–$75.00 per share, verify compartment area > 800 m² and ARPU ≥ $68/month';
+    'At $65.00–$75.00 per share (tier_1 ~$70.00), verify area > 800 m², DCF (1+r)⁻ᵗ, and ARPU ≥ $68/month';
   const serverMixedChk = cleanChecklistLabel(mixedCurrencyAndMathLine);
   const clientMixedChk = studioHooks.cleanClientChecklistLabel(mixedCurrencyAndMathLine);
   assert(
     serverMixedChk === expectedMixedChecklist && clientMixedChk === expectedMixedChecklist,
-    `cleanChecklistLabel and cleanClientChecklistLabel preserve currency $ earlier on a line while still converting valid inline math ($800\\text{ m}^2$ -> 800 m², $\\ge$ -> ≥) later on the same line (got server="${serverMixedChk}", client="${clientMixedChk}")`
+    `cleanChecklistLabel and cleanClientChecklistLabel preserve currency $ earlier on a line while converting valid inline math ($800 m^2$ -> 800 m², $\\left(1+r\\right)^{-t}$ -> (1+r)⁻ᵗ, $\\ge \\$68$ -> ≥ $68) later on the same line (got server="${serverMixedChk}", client="${clientMixedChk}")`
   );
 
   const currencyTableMd = [
@@ -12326,7 +12465,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     '| **Dec 2025 Tender** | **$800.0B**[^ebc-valuation-800b-2025] | ~$420.00 (Pre-Split)[^ebc-valuation-800b-2025] | 31.7x |',
     '| **Starlink SOTP** | $150 billion to $180 billion | $185/sh to $212/sh | $65.00–$75.00 |',
     '',
-    'At $65.00 per share, area is $800\\text{ m}^2$ and ARPU $\\ge$ $68/month.',
+    'At $65.00 per share, area is $800\\text{ m}^2$ ($800 m^2$), discount factor $\\left(1+r\\right)^{-t}$, and ARPU $\\ge$ $68/month.',
   ].join('\n');
   const formattedTableA2ui = String(studioHooks.formatInlineLatexAndFootnotes(currencyTableMd, []));
   const renderedTableViz = String(
@@ -12341,7 +12480,8 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       formattedTableA2ui.includes('$185/sh to $212/sh') &&
       formattedTableA2ui.includes('$65.00–$75.00') &&
       formattedTableA2ui.includes('$65.00 per share') &&
-      formattedTableA2ui.includes('800 m²') &&
+      formattedTableA2ui.includes('800 m² (800 m²)') &&
+      formattedTableA2ui.includes('(1+r)⁻ᵗ') &&
       formattedTableA2ui.includes('≥ $68/month') &&
       !formattedTableA2ui.includes('<code>') &&
       renderedTableViz.includes('**$800.0B**') &&
@@ -12349,7 +12489,8 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       renderedTableViz.includes('$150 billion to $180 billion') &&
       renderedTableViz.includes('$185/sh to $212/sh') &&
       renderedTableViz.includes('$65.00–$75.00') &&
-      renderedTableViz.includes('800 m²') &&
+      renderedTableViz.includes('800 m² (800 m²)') &&
+      renderedTableViz.includes('(1+r)⁻ᵗ') &&
       renderedTableViz.includes('≥ $68/month') &&
       !renderedTableViz.includes('<code>800') &&
       !renderedTableViz.includes('<code>|') &&
@@ -12357,18 +12498,30 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     `formatInlineLatexAndFootnotes and renderMarkdownWithOkfFootnotes preserve currency $ and ~$ across Markdown table pipes (|) without injecting <code> while converting valid inline math`
   );
 
-  // Issue 3 & Issue 4 Self-Test: TTS language detection ("for" false positive fix), English/Analytical vs Norwegian/Course A2UI localization, and Verified Source graph nodes in standalone viz.html
+  // Issue 3 & Issue 4 Self-Test: TTS language detection ("for", "SOM", "LOV", "FRA", and mixed-language immunity), English/Analytical vs Norwegian/Course A2UI localization, and Verified Source graph nodes in standalone viz.html
   assert(
     typeof studioHooks.detectSpeechLang === 'function' &&
       studioHooks.detectSpeechLang(
         'The valuation for SpaceX is $800B for institutional investors with strong free cash flow for 2026.'
       ) === 'en-US' &&
       studioHooks.detectSpeechLang(
+        'TAM, SAM, and SOM analysis shows SOM reaches $10B under NASA LOV and FRA safety thresholds.'
+      ) === 'en-US' &&
+      studioHooks.detectSpeechLang(
+        'The offshore wind benchmark from Ørsted and Ångström unit economics show strong returns that will compound through 2028.'
+      ) === 'en-US' &&
+      studioHooks.detectSpeechLang(
         'Styret og brannvernleder har ansvar for systematisk sikkerhetsarbeid i virksomheten.'
       ) === 'nb-NO' &&
       detectIcmLanguage('SpaceX institutional equity valuation for 2026 IPO readiness.') === 'en' &&
+      detectIcmLanguage(
+        'TAM, SAM, and SOM analysis shows SOM reaches $10B, capturing 15% of SOM under NASA LOV and FRA rules.'
+      ) === 'en' &&
+      detectIcmLanguage(
+        'The valuation for SpaceX and Ørsted is $800B with strong free cash flow that will grow through 2026.'
+      ) === 'en' &&
       detectIcmLanguage('Systematisk brannforebyggende arbeid og kontroll i næringsbygg.') === 'no',
-    'detectSpeechLang and detectIcmLanguage accurately classify English text containing "for" as en-US/en and Norwegian text as nb-NO/no'
+    'detectSpeechLang and detectIcmLanguage accurately classify English text containing "for", "SOM"/"LOV"/"FRA" acronyms, or single foreign names as en-US/en and Norwegian text as nb-NO/no'
   );
 
   const tmpAuditDir = path.resolve(`./workspace/runs/_audit_i18n_viz_test_${Date.now()}`);
@@ -12450,10 +12603,17 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       workspaceRoot: tmpAuditDir,
       runId: enRunId,
     });
+    const fallbackA2uiResult = generateA2uiSurface({
+      workspaceRoot: tmpAuditDir,
+      runId: 'non-existent-ghost-run-id',
+    });
     const enA2uiHtml = fs.readFileSync(enA2uiResult.htmlOutputPath, 'utf-8');
     assert(
       enA2uiResult.quizCount === 0 &&
         enA2uiResult.tabCount === 6 &&
+        fallbackA2uiResult.runId === enRunId &&
+        fallbackA2uiResult.moduleCount === 1 &&
+        !fs.existsSync(path.join(tmpAuditDir, 'runs', 'non-existent-ghost-run-id')) &&
         enA2uiHtml.includes('<html lang="en">') &&
         enA2uiHtml.includes('📋 Executive Summary') &&
         enA2uiHtml.includes('📊 Deep-Dive Pillars (1)') &&
@@ -12468,7 +12628,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         !enA2uiHtml.includes('verifiserte kilder') &&
         !enA2uiHtml.includes('Målgruppe:') &&
         !enA2uiHtml.includes('Eksporter A2UI Tilstand'),
-      `generateA2uiSurface renders 100% English analytical UI chrome with 6 tabs (no Quiz tab) and 0 leaked Norwegian labels`
+      `generateA2uiSurface renders 100% English analytical UI chrome with 6 tabs (no Quiz tab), 0 leaked Norwegian labels, and falls back to the latest valid run when a non-existent runId is supplied`
     );
   } finally {
     fs.rmSync(tmpAuditDir, { recursive: true, force: true });
