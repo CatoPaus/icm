@@ -5676,14 +5676,134 @@ hr { border: none; border-top: 1px solid #e2e8f0; margin: 14px 0; }
 #detail-backlinks a { color: #2563eb; cursor: pointer; }
 `.trim();
 
+/**
+ * Auto-detects whether an ICM run/bundle is primarily Norwegian ('no') or English ('en').
+ */
+export function detectIcmLanguage(text: string): 'no' | 'en' {
+  const sample = String(text || '');
+  if (/[æøåÆØÅ]/.test(sample)) return 'no';
+  const noMatches = sample.match(
+    /\b(og|det|som|med|ikke|eller|til|fra|brann|styret|virksomhet|krav|forskrift|lov|sjekkliste|kurset|deltaker|modul|kontroll|ansvar|tiltak)\b/gi
+  );
+  if (noMatches && noMatches.length >= 3) return 'no';
+  return 'en';
+}
+
+/**
+ * Auto-detects whether Stage 2 represents a training/course pipeline ('course')
+ * or an analytical/investment/decision/memo pipeline ('analysis').
+ */
+export function detectIcmDomainMode(
+  rawStage2: Record<string, unknown> | null | undefined,
+  quizCount: number,
+  textSample?: string
+): 'course' | 'analysis' {
+  if (rawStage2 && typeof rawStage2 === 'object') {
+    if (
+      Array.isArray(rawStage2.pillars) ||
+      Array.isArray(rawStage2.analysisPillars) ||
+      Array.isArray(rawStage2.stressTests) ||
+      typeof rawStage2.investmentThesis === 'string' ||
+      typeof rawStage2.memoBody === 'string' ||
+      typeof rawStage2.reportTitle === 'string' ||
+      typeof rawStage2.memoTitle === 'string' ||
+      typeof rawStage2.verdict === 'string'
+    ) {
+      return 'analysis';
+    }
+  }
+  const combinedSample = `${JSON.stringify(rawStage2 || {})} ${textSample || ''}`;
+  const hasAnalysisSignals =
+    /\b(investment\s+committee|equity\s+research|valuation\s+pillar|sum-of-the-parts|sotp|dcf\b|ev\/ebitda|buy\/hold\/sell|due\s+diligence|pre-ipo|institutional\s+equity|capital\s+allocation)\b/i.test(
+      combinedSample
+    );
+  const hasCourseSignals =
+    /\b(kurs\b|opplæring|leksjon|kursdeltaker|training\s+course|certification\s+course)\b/i.test(
+      combinedSample
+    );
+  if (hasAnalysisSignals && !hasCourseSignals) {
+    return 'analysis';
+  }
+  if (quizCount === 0 && !hasCourseSignals) {
+    return 'analysis';
+  }
+  return 'course';
+}
+
 const OKF_VIZ_JS = `
 (function () {
+  function isInlineLatexMath(inner) {
+    if (!inner || typeof inner !== "string") return false;
+    if (/^\\s|\\s$/.test(inner)) return false;
+    if (/[\\r\\n|]/.test(inner)) return false;
+    if (inner.indexOf("[^") !== -1) return false;
+    if (/\\*\\*|__/.test(inner)) return false;
+    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt]\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\/|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|-|–|—|\\)|\\s*$))/i.test(inner)) {
+      return false;
+    }
+    if (!/(?:\\\\[a-zA-Z !,;:%]|[A-Za-z0-9)\\]}][\\^_](?:\\{[^{}\\r\\n]+\\}|[A-Za-z0-9+\\-°]))/.test(inner)) {
+      return false;
+    }
+    if (/^\\d/.test(inner)) {
+      if (!/^\\d+(?:[.,]\\d+)?(?:\\s*(?:\\\\|[\\^_])|\\s+[a-zA-Z]{1,3}[\\^_])/.test(inner)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function replaceInlineLatexSpans(str, replacer) {
+    const s = String(str || "");
+    let out = "";
+    let i = 0;
+    while (i < s.length) {
+      const ch = s[i];
+      if (ch === "\\\\" && i + 1 < s.length && s[i + 1] === "$") {
+        out += s.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (ch !== "$") {
+        out += ch;
+        i++;
+        continue;
+      }
+      let j = i + 1;
+      while (j < s.length) {
+        if (s[j] === "\\\\" && j + 1 < s.length) {
+          j += 2;
+          continue;
+        }
+        if (s[j] === "$" || s[j] === "\\n" || s[j] === "\\r" || s[j] === "|") {
+          break;
+        }
+        j++;
+      }
+      if (j < s.length && s[j] === "$") {
+        const inner = s.slice(i + 1, j);
+        if (isInlineLatexMath(inner)) {
+          out += replacer(s.slice(i, j + 1), inner);
+          i = j + 1;
+          continue;
+        }
+      }
+      out += "$";
+      i++;
+    }
+    return out;
+  }
+
   if (typeof window !== "undefined" && window.__ICM_TEST_HOOKS__) {
     window.__ICM_TEST_HOOKS__.renderMarkdownWithOkfFootnotes = renderMarkdownWithOkfFootnotes;
+    window.__ICM_TEST_HOOKS__.isInlineLatexMath = isInlineLatexMath;
+    window.__ICM_TEST_HOOKS__.replaceInlineLatexSpans = replaceInlineLatexSpans;
     return;
   }
   const bundle = window.BUNDLE;
   const bundleName = window.BUNDLE_NAME;
+  const isNo =
+    (bundle && bundle.lang === "no") ||
+    /[æøåÆØÅ]/.test(Object.values((bundle && bundle.bodies) || {}).join(" "));
   document.title = bundleName + " — OKF v0.2 Viewer";
   document.getElementById("bundle-name").textContent = bundleName;
 
@@ -5970,7 +6090,7 @@ const OKF_VIZ_JS = `
     }
     const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻" };
     const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "⁷", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
-    const bodyWithMath = joinedBody.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_, inner) {
+    const bodyWithMath = replaceInlineLatexSpans(joinedBody, function (_, inner) {
       const cleaned = String(inner)
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
@@ -6034,7 +6154,7 @@ const OKF_VIZ_JS = `
     });
     const bodyWithSup = bodyWithMath.replace(
       /\\[\\^([A-Za-z0-9_\\-]+)\\]/g,
-      '<sup class="fn-ref"><a href="#fn-$1">[$1]</a></sup>'
+      '<sup class="fn-ref"><a href="#fn-$1" data-fn="$1">[$1]</a></sup>'
     );
     let html =
       typeof marked !== "undefined" && marked && typeof marked.parse === "function"
@@ -6091,7 +6211,7 @@ const OKF_VIZ_JS = `
     chip.textContent = data.type;
     chip.style.background = data.color || getTypeColor(data.type);
 
-    document.getElementById("detail-title").textContent = data.label;
+    document.getElementById("detail-title").textContent = data.fullTitle || data.label;
     document.getElementById("detail-id").textContent = conceptId;
     document.getElementById("detail-description").textContent = data.description || "—";
 
@@ -6177,7 +6297,26 @@ const OKF_VIZ_JS = `
     const body = bundle.bodies[conceptId] || "";
     const html = renderMarkdownWithOkfFootnotes(body, sources);
     const bodyEl = document.getElementById("detail-body");
-    bodyEl.innerHTML = html;
+    const backBtnLabel = isNo ? "← Tilbake til konsept" : "← Back to concept";
+    if (data.group === "source" || String(conceptId).startsWith("source:")) {
+      bodyEl.innerHTML =
+        '<div style="margin-bottom:10px"><button type="button" id="viz-source-back-btn" style="cursor:pointer;padding:4px 10px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;font-size:12px;font-weight:600">' +
+        backBtnLabel +
+        "</button></div>" +
+        html;
+      const srcBackBtn = document.getElementById("viz-source-back-btn");
+      if (srcBackBtn) {
+        const targetConcept =
+          data.parentConceptId ||
+          (backlinks[conceptId] && backlinks[conceptId][0]) ||
+          (bundle.nodes[0] && bundle.nodes[0].data.id);
+        srcBackBtn.addEventListener("click", () => {
+          if (targetConcept) showDetail(targetConcept);
+        });
+      }
+    } else {
+      bodyEl.innerHTML = html;
+    }
     rewriteInternalLinks(bodyEl, conceptId);
 
     const bl = backlinks[conceptId] || [];
@@ -6221,6 +6360,17 @@ const OKF_VIZ_JS = `
   const selectNode = showDetail;
 
   function rewriteInternalLinks(root, currentConceptId) {
+    root.querySelectorAll("a[data-fn]").forEach((a) => {
+      const fnId = a.getAttribute("data-fn");
+      if (!fnId) return;
+      a.addEventListener("click", (e) => {
+        const srcNodeId = "source:" + fnId;
+        if (nodeIndex[srcNodeId]) {
+          e.preventDefault();
+          showDetail(srcNodeId);
+        }
+      });
+    });
     root.querySelectorAll("a[href]").forEach((a) => {
       const href = a.getAttribute("href");
       if (!href || href.startsWith("#")) return;
@@ -6240,6 +6390,18 @@ const OKF_VIZ_JS = `
         a.setAttribute("data-internal-href", href);
         a.setAttribute("href", "javascript:void(0)");
         const linkLabel = (a.textContent || target).trim();
+        const backBtnLabel = isNo ? "← Tilbake til konsept" : "← Back to concept";
+        const stubHint = isNo
+          ? "Dette OKF-konseptet er kryssreferert fra <code>" +
+            escapeHtmlAttr(currentConceptId) +
+            '</code>. Kjør <code>npm run cli:stage1 -- "' +
+            escapeHtmlAttr(linkLabel) +
+            '"</code> for å generere og verifisere dette konseptet i kunnskapsbunten.'
+          : "This OKF concept is cross-referenced from <code>" +
+            escapeHtmlAttr(currentConceptId) +
+            '</code>. Run <code>npm run cli:stage1 -- "' +
+            escapeHtmlAttr(linkLabel) +
+            '"</code> to generate and verify this concept in the knowledge bundle.';
         a.addEventListener("click", (e) => {
           e.preventDefault();
           const titleEl = document.getElementById("detail-title");
@@ -6252,19 +6414,19 @@ const OKF_VIZ_JS = `
             '<div style="padding:14px;border:1px solid #fde68a;background:#fefce8;border-radius:8px;margin-bottom:12px">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
             '<span class="badge status-draft">Linked Concept (Stub)</span>' +
-            '<button type="button" id="viz-stub-back-btn" style="cursor:pointer;padding:4px 10px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;font-size:12px;font-weight:600">← Tilbake til konsept</button>' +
+            '<button type="button" id="viz-stub-back-btn" style="cursor:pointer;padding:4px 10px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;font-size:12px;font-weight:600">' +
+            backBtnLabel +
+            "</button>" +
             "</div>" +
             "<h2 style='margin:6px 0'>" +
             escapeHtmlAttr(linkLabel) +
             "</h2>" +
-            "<p class='muted' style='margin:4px 0'>Konsept-ID: <code>/" +
+            "<p class='muted' style='margin:4px 0'>Concept ID: <code>/" +
             escapeHtmlAttr(target) +
             ".md</code></p>" +
-            "<p style='margin:8px 0 0'>Dette OKF-konseptet er kryssreferert fra <code>" +
-            escapeHtmlAttr(currentConceptId) +
-            '</code>. Kjør <code>npm run cli:stage1 -- "' +
-            escapeHtmlAttr(linkLabel) +
-            '"</code> for å generere og verifisere dette konseptet i kunnskapsbunten.</p>' +
+            "<p style='margin:8px 0 0'>" +
+            stubHint +
+            "</p>" +
             "</div>";
           const backBtn = document.getElementById("viz-stub-back-btn");
           if (backBtn) {
@@ -6297,6 +6459,7 @@ export function generateBundleVisualization(
   options?: { bundleName?: string }
 ): {
   concepts: number;
+  nodes: number;
   edges: number;
   bytes: number;
   outputPath: string;
@@ -6309,20 +6472,16 @@ export function generateBundleVisualization(
   const resolvedOutPath = path.resolve(outPath || path.join(resolvedRoot, 'viz.html'));
   const concepts = walkBundleConcepts(resolvedRoot);
   const conceptIds = new Set(concepts.map((c) => c.id));
-
-  const types = Array.from(new Set(concepts.map((c) => c.type))).sort((a, b) =>
-    a.localeCompare(b)
+  const bundleLang = detectIcmLanguage(
+    concepts.map((c) => `${c.title || ''} ${c.description || ''} ${c.body || ''}`).join('\n')
   );
-  const resolvedPalette: Record<string, string> = { ...OKF_TYPE_PALETTE };
-  for (const t of types) {
-    resolvedPalette[t] = getOkfTypeColor(t);
-  }
 
-  const nodes = concepts.map((c) => {
+  const nodes: Array<{ data: Record<string, unknown> }> = concepts.map((c) => {
     const color = getOkfTypeColor(c.type);
     return {
       data: {
         id: c.id,
+        group: 'concept',
         label: c.title || c.id,
         type: c.type,
         description: c.description,
@@ -6341,8 +6500,15 @@ export function generateBundleVisualization(
     };
   });
 
-  const edges: Array<{ data: { id: string; source: string; target: string } }> = [];
+  const bodies: Record<string, string> = {};
+  for (const c of concepts) {
+    bodies[c.id] = c.body;
+  }
+
+  const edges: Array<{ data: { id: string; source: string; target: string; label?: string } }> = [];
   const seenEdges = new Set<string>();
+  const seenNodeIds = new Set<string>(conceptIds);
+
   for (const c of concepts) {
     for (const target of c.links_to) {
       if (target === c.id || !conceptIds.has(target)) continue;
@@ -6357,13 +6523,88 @@ export function generateBundleVisualization(
         },
       });
     }
+    for (const src of c.sources || []) {
+      const srcId = src.id || src.title || 'ref';
+      const srcNodeId = `source:${srcId}`;
+      const srcUrl = (src as any).url || (src as any).resource || '';
+      const fullTitleText = String(src.title || srcUrl || srcId).trim();
+      const shortTitleText =
+        fullTitleText.length > 42 ? `${fullTitleText.slice(0, 42).trimEnd()}…` : fullTitleText;
+      const refLine =
+        bundleLang === 'no'
+          ? `- **Referert i konsept:** \`${c.id}\` (*${c.title || c.id}*)`
+          : `- **Referenced in concept:** \`${c.id}\` (*${c.title || c.id}*)`;
+      if (!seenNodeIds.has(srcNodeId)) {
+        seenNodeIds.add(srcNodeId);
+        nodes.push({
+          data: {
+            id: srcNodeId,
+            group: 'source',
+            label: `[^${srcId}] ${shortTitleText}`,
+            fullTitle: `[^${srcId}] ${fullTitleText}`,
+            parentConceptId: c.id,
+            type: 'Verified Source',
+            description: fullTitleText,
+            resource: srcUrl,
+            tags: ['verified-source'],
+            status: 'stable',
+            generated: c.generated,
+            verified: c.verified,
+            sources: [src],
+            trust_tier: c.trust_tier,
+            stale: false,
+            color: '#10b981',
+            size: 24,
+          },
+        });
+        bodies[srcNodeId] = [
+          src.retrieved_at
+            ? bundleLang === 'no'
+              ? `- **Hentet (\`retrieved_at\`):** \`${src.retrieved_at}\``
+              : `- **Retrieved (\`retrieved_at\`):** \`${src.retrieved_at}\``
+            : '',
+          src.last_modified
+            ? bundleLang === 'no'
+              ? `- **Sist endret (\`last_modified\`):** \`${src.last_modified}\``
+              : `- **Last modified (\`last_modified\`):** \`${src.last_modified}\``
+            : '',
+          refLine,
+        ]
+          .filter(Boolean)
+          .join('\n');
+      } else if (bodies[srcNodeId] && !bodies[srcNodeId].includes(refLine)) {
+        bodies[srcNodeId] = `${bodies[srcNodeId]}\n${refLine}`;
+      }
+      const edgeKey = `${c.id}__${srcNodeId}`;
+      if (!seenEdges.has(edgeKey)) {
+        seenEdges.add(edgeKey);
+        edges.push({
+          data: {
+            id: edgeKey,
+            source: c.id,
+            target: srcNodeId,
+            label: 'cites',
+          },
+        });
+      }
+    }
   }
 
-  const bodies: Record<string, string> = {};
-  for (const c of concepts) {
-    bodies[c.id] = c.body;
+  const types = Array.from(new Set(nodes.map((n) => String(n.data.type || '')))).sort((a, b) =>
+    a.localeCompare(b)
+  );
+  const resolvedPalette: Record<string, string> = {
+    ...OKF_TYPE_PALETTE,
+    'Verified Source': '#10b981',
+  };
+  for (const t of types) {
+    if (!resolvedPalette[t]) {
+      resolvedPalette[t] = getOkfTypeColor(t);
+    }
   }
+
   const graphData = {
+    lang: bundleLang,
     nodes,
     edges,
     bodies,
@@ -6374,7 +6615,7 @@ export function generateBundleVisualization(
   const bundleName = options?.bundleName || path.basename(resolvedRoot);
 
   const html = `<!DOCTYPE html>
-<html lang="en">
+<html lang="${bundleLang}">
 <head>
 <meta charset="utf-8">
 <title>OKF Bundle Viewer</title>
@@ -6451,6 +6692,7 @@ ${OKF_VIZ_JS}
 
   return {
     concepts: concepts.length,
+    nodes: nodes.length,
     edges: edges.length,
     bytes: Buffer.byteLength(html, 'utf-8'),
     outputPath: resolvedOutPath,
@@ -6647,6 +6889,85 @@ function escapeA2uiHtml(str: string): string {
 }
 
 /**
+ * Determines whether a `$...$` candidate inner substring is genuine inline LaTeX math
+ * rather than a pair of currency `$` signs or a span crossing Markdown table pipes / footnotes.
+ */
+export function isInlineLatexMathSpan(inner: string): boolean {
+  if (!inner || typeof inner !== 'string') return false;
+  if (/^\s|\s$/.test(inner)) return false;
+  if (/[\r\n|]/.test(inner)) return false;
+  if (inner.includes('[^')) return false;
+  if (/\*\*|__/.test(inner)) return false;
+  if (
+    /^\d[\d,.]*(?:\s*(?:[BMKTbmkt]\b|billion|million|trillion|thousand|bn\b|mn\b|\/|\s+(?:per|to|and|or|in|at|for|from|of|vs)\b|-|–|—|\)|\s*$))/i.test(
+      inner
+    )
+  ) {
+    return false;
+  }
+  if (
+    !/(?:\\[a-zA-Z !,;:%]|[A-Za-z0-9)\]}][\^_](?:\{[^{}\r\n]+\}|[A-Za-z0-9+\-°]))/.test(inner)
+  ) {
+    return false;
+  }
+  if (/^\d/.test(inner)) {
+    if (!/^\d+(?:[.,]\d+)?(?:\s*(?:\\|[\^_])|\s+[a-zA-Z]{1,3}[\^_])/.test(inner)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Safely scans a string for inline `$...$` LaTeX math spans without allowing a rejected currency `$`
+ * earlier on a line to consume the opening `$` of a valid inline math span later on the same line,
+ * and never matching across Markdown table pipes (`|`) or line breaks.
+ */
+export function replaceInlineLatexSpansTs(
+  str: string,
+  replacer: (fullMatch: string, inner: string) => string
+): string {
+  const s = String(str || '');
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === '\\' && i + 1 < s.length && s[i + 1] === '$') {
+      out += s.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (ch !== '$') {
+      out += ch;
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < s.length) {
+      if (s[j] === '\\' && j + 1 < s.length) {
+        j += 2;
+        continue;
+      }
+      if (s[j] === '$' || s[j] === '\n' || s[j] === '\r' || s[j] === '|') {
+        break;
+      }
+      j++;
+    }
+    if (j < s.length && s[j] === '$') {
+      const inner = s.slice(i + 1, j);
+      if (isInlineLatexMathSpan(inner)) {
+        out += replacer(s.slice(i, j + 1), inner);
+        i = j + 1;
+        continue;
+      }
+    }
+    out += '$';
+    i++;
+  }
+  return out;
+}
+
+/**
  * Strips OKF footnote markers (`[^id]`), inline LaTeX math (`$\text{EI } 60$`, `$30 \text{ min}$`, `$\rightarrow$`),
  * and excess Markdown formatting from extracted checklist items for clean UI labels while preserving currency `$`.
  */
@@ -6673,7 +6994,7 @@ export function cleanChecklistLabel(rawText: string): string {
     '4': '₄',
     '5': '₅',
     '6': '₆',
-    '7': '⁷',
+    '7': '₇',
     '8': '₈',
     '9': '₉',
     '+': '₊',
@@ -6763,8 +7084,8 @@ export function cleanChecklistLabel(rawText: string): string {
   let text = String(rawText || '').trim();
   // Remove footnote references like [^lovdata-brann], [^1]
   text = text.replace(/\[\^[^\]]+\]/g, '');
-  // Process inline TeX math spans $...$ first (before unwrapping outer \text{...} so leading/trailing spaces inside \text{...} don't break $...$ matching)
-  text = text.replace(/\$(?!\s)([^$\n]*?\S)\$/g, (_m, inner: string) =>
+  // Process inline TeX math spans $...$ safely without consuming currency $ pairs
+  text = replaceInlineLatexSpansTs(text, (_m, inner: string) =>
     cleanLatexFragment(inner, true).trim()
   );
   // Clean any remaining bare LaTeX macros/superscripts outside $...$
@@ -6793,16 +7114,20 @@ export function cleanChecklistLabel(rawText: string): string {
  * and multi-level (2-level / 3-level+) hierarchical task lists.
  */
 export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChecklistGroup[] {
+  const isNo = detectIcmLanguage(rawMarkdown) === 'no';
+  const defaultHeading = isNo ? 'Sjekkliste / Action Items' : 'Checklist / Action Items';
+  const defaultGroupFallback = isNo ? 'Generelt' : 'General';
   const lines = String(rawMarkdown || '').split(/\r?\n/);
   const groups: A2uiChecklistGroup[] = [];
-  let currentHeading = 'Sjekkliste / Action Items';
+  let currentHeading = defaultHeading;
   const categoryStack: Array<{ indent: number; title: string }> = [];
   let sectionHasSubgroups = false;
   let itemCounter = 0;
 
   const getOrCreateGroup = (title: string): A2uiChecklistGroup => {
     const cleanTitle =
-      cleanChecklistLabel(title.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:+\s*$/, '')) || 'Generelt';
+      cleanChecklistLabel(title.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:+\s*$/, '')) ||
+      defaultGroupFallback;
     const lastGroup = groups[groups.length - 1];
     if (lastGroup && lastGroup.title === cleanTitle) {
       return lastGroup;
@@ -6871,7 +7196,7 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
       const stackTitle = categoryStack.map((c) => c.title).join(' — ');
       groupTitle =
         currentHeading &&
-        currentHeading !== 'Sjekkliste / Action Items' &&
+        currentHeading !== defaultHeading &&
         !stackTitle.startsWith(currentHeading)
           ? `${currentHeading} — ${stackTitle}`
           : stackTitle;
@@ -6880,7 +7205,7 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
       if (leadBoldMatch) {
         const subCategory = cleanChecklistLabel(leadBoldMatch[1]);
         groupTitle =
-          currentHeading && currentHeading !== 'Sjekkliste / Action Items'
+          currentHeading && currentHeading !== defaultHeading
             ? `${currentHeading} — ${subCategory}`
             : subCategory;
         rawItemText = leadBoldMatch[2];
@@ -6937,6 +7262,7 @@ export interface NormalizedA2uiCaseItem {
  * - Generic Stage 2 output (`{ title, scriptBody, estimatedDuration }`)
  * - Domain compliance studios (`trainingModules`, `keyTakeaways`, `boardActionItem`)
  * - Course studios (`lessons`, `learningObjectives`, `slideCues`, `quizQuestion`/`quizOptions`)
+ * - Analytical / IC / decision memos (`pillars`/`analysisPillars`/`sections`, `thesisPoints`/`keyTakeaways`, `recommendation`/`icDirective`, `stressTests`/`scenarios`)
  * - Custom schemas with `modules`, `slides`, `cases`, `scenarios`, or `quiz`/`questions` arrays.
  */
 export function normalizeStage2ForA2ui(
@@ -6969,16 +7295,31 @@ export function normalizeStage2ForA2ui(
     };
   }
 
+  const stage2Lang = detectIcmLanguage(JSON.stringify(scriptDraft));
+  const isNo = stage2Lang === 'no';
+  const isPillarSchema =
+    Array.isArray(scriptDraft.pillars) || Array.isArray(scriptDraft.analysisPillars);
+
   const title = String(
-    scriptDraft.title || scriptDraft.courseTitle || fallbackTitle || 'ICM Run Studio'
+    scriptDraft.title ||
+      scriptDraft.courseTitle ||
+      scriptDraft.reportTitle ||
+      scriptDraft.memoTitle ||
+      fallbackTitle ||
+      'ICM Run Studio'
   );
-  const subtitle = String(scriptDraft.subtitle || scriptDraft.description || '');
-  const targetAudience = String(scriptDraft.targetAudience || scriptDraft.audience || '');
+  const subtitle = String(
+    scriptDraft.subtitle || scriptDraft.description || scriptDraft.verdict || ''
+  );
+  const targetAudience = String(
+    scriptDraft.targetAudience || scriptDraft.audience || scriptDraft.verdict || ''
+  );
 
   const rawMinField =
     scriptDraft.totalEstimatedMinutes ??
     scriptDraft.totalDurationMinutes ??
-    scriptDraft.durationMinutes;
+    scriptDraft.durationMinutes ??
+    scriptDraft.readingTimeMinutes;
   const rawEstDur = scriptDraft.estimatedDuration ?? scriptDraft.duration;
 
   let estimatedDuration: number | string = '';
@@ -7009,33 +7350,41 @@ export function normalizeStage2ForA2ui(
   const scriptBody = String(
     scriptDraft.scriptBody ||
       scriptDraft.executiveSummary ||
+      scriptDraft.investmentThesis ||
+      scriptDraft.memoBody ||
       scriptDraft.overview ||
       scriptDraft.narration ||
       ''
   );
 
-  // Extract highlights (`keyTakeaways` or `learningObjectives`)
+  // Extract highlights (`keyTakeaways`, `thesisPoints`, `learningObjectives`, or `highlights`)
   const rawHighlights = Array.isArray(scriptDraft.keyTakeaways)
     ? scriptDraft.keyTakeaways
-    : Array.isArray(scriptDraft.learningObjectives)
-      ? scriptDraft.learningObjectives
-      : Array.isArray(scriptDraft.highlights)
-        ? scriptDraft.highlights
-        : [];
+    : Array.isArray(scriptDraft.thesisPoints)
+      ? scriptDraft.thesisPoints
+      : Array.isArray(scriptDraft.learningObjectives)
+        ? scriptDraft.learningObjectives
+        : Array.isArray(scriptDraft.highlights)
+          ? scriptDraft.highlights
+          : [];
   const highlights = rawHighlights.map((h) => String(h || '').trim()).filter(Boolean);
 
-  // Extract modules from `trainingModules`, `modules`, `lessons`, `sections`, or `slides`
+  // Extract modules from `trainingModules`, `modules`, `pillars`, `analysisPillars`, `lessons`, `sections`, or `slides`
   const rawModules = Array.isArray(scriptDraft.trainingModules)
     ? scriptDraft.trainingModules
     : Array.isArray(scriptDraft.modules)
       ? scriptDraft.modules
-      : Array.isArray(scriptDraft.lessons)
-        ? scriptDraft.lessons
-        : Array.isArray(scriptDraft.sections)
-          ? scriptDraft.sections
-          : Array.isArray(scriptDraft.slides)
-            ? scriptDraft.slides
-            : [];
+      : Array.isArray(scriptDraft.pillars)
+        ? scriptDraft.pillars
+        : Array.isArray(scriptDraft.analysisPillars)
+          ? scriptDraft.analysisPillars
+          : Array.isArray(scriptDraft.lessons)
+            ? scriptDraft.lessons
+            : Array.isArray(scriptDraft.sections)
+              ? scriptDraft.sections
+              : Array.isArray(scriptDraft.slides)
+                ? scriptDraft.slides
+                : [];
 
   const modules: NormalizedA2uiModule[] = [];
   const quiz: NormalizedA2uiQuizQuestion[] = [];
@@ -7045,6 +7394,7 @@ export function normalizeStage2ForA2ui(
     if (!rawMod || typeof rawMod !== 'object') return;
     const modNum = Number(
       rawMod.moduleNumber ??
+        rawMod.pillarNumber ??
         rawMod.lessonNumber ??
         rawMod.sectionNumber ??
         rawMod.slideNumber ??
@@ -7052,10 +7402,11 @@ export function normalizeStage2ForA2ui(
     );
     const modTitle = String(
       rawMod.moduleTitle ||
+        rawMod.pillarTitle ||
         rawMod.lessonTitle ||
         rawMod.sectionTitle ||
         rawMod.title ||
-        `Module ${modNum}`
+        (isPillarSchema ? `Pillar ${modNum}` : `Module ${modNum}`)
     );
     const subtitleOrBasis = String(
       rawMod.regulatoryBasis ||
@@ -7063,14 +7414,17 @@ export function normalizeStage2ForA2ui(
         rawMod.legalReference ||
         rawMod.lawReference ||
         rawMod.statute ||
+        rawMod.analyticalFramework ||
+        rawMod.valuationMethodology ||
+        rawMod.framework ||
+        rawMod.methodology ||
         rawMod.coreConcept ||
         rawMod.subtitle ||
         ''
     );
+    const rawModDurVal = rawMod.durationMinutes ?? rawMod.readingTimeMinutes;
     const rawModDurMin =
-      rawMod.durationMinutes !== undefined && rawMod.durationMinutes !== null
-        ? String(rawMod.durationMinutes).trim()
-        : '';
+      rawModDurVal !== undefined && rawModDurVal !== null ? String(rawModDurVal).trim() : '';
     const rawModEstDur =
       rawMod.estimatedDuration !== undefined && rawMod.estimatedDuration !== null
         ? String(rawMod.estimatedDuration).trim()
@@ -7088,6 +7442,7 @@ export function normalizeStage2ForA2ui(
       rawMod.spokenNarration ||
         rawMod.narrationScript ||
         rawMod.narration ||
+        rawMod.analysis ||
         rawMod.scriptBody ||
         rawMod.content ||
         rawMod.summary ||
@@ -7096,11 +7451,15 @@ export function normalizeStage2ForA2ui(
     const actionItem = String(
       rawMod.boardActionItem ||
         rawMod.actionItem ||
+        rawMod.recommendation ||
+        rawMod.icDirective ||
         rawMod.practicalTask ||
         rawMod.exercise ||
         rawMod.caseActionItem ||
         rawMod.caseResolution ||
         rawMod.recommendedAction ||
+        rawMod.mitigation ||
+        rawMod.resolution ||
         rawMod.caseSolution ||
         rawMod.solution ||
         ''
@@ -7111,9 +7470,11 @@ export function normalizeStage2ForA2ui(
         ? rawMod.keyPoints
         : Array.isArray(rawMod.keyTakeaways)
           ? rawMod.keyTakeaways
-          : Array.isArray(rawMod.bullets)
-            ? rawMod.bullets
-            : [];
+          : Array.isArray(rawMod.thesisPoints)
+            ? rawMod.thesisPoints
+            : Array.isArray(rawMod.bullets)
+              ? rawMod.bullets
+              : [];
     const bullets = bulletsRaw.map((b: unknown) => String(b || '').trim()).filter(Boolean);
 
     modules.push({
@@ -7127,7 +7488,7 @@ export function normalizeStage2ForA2ui(
       bullets,
     });
 
-    // If module has an embedded quizQuestion (like icm-course-studio)
+    // If module has an embedded quizQuestion (for course/training pipelines)
     if (typeof rawMod.quizQuestion === 'string' && Array.isArray(rawMod.quizOptions)) {
       const options = rawMod.quizOptions.map((opt: unknown, oIdx: number) => ({
         label: String(opt),
@@ -7151,13 +7512,15 @@ export function normalizeStage2ForA2ui(
       });
     }
 
-    // If module has a boardActionItem (or explicit caseScenario / dilemma), populate a concise situational scenario case
+    // If module has an actionItem / recommendation or explicit caseScenario / stressTest / dilemma, populate a situational scenario case
     const explicitCaseScenario = String(
-      rawMod.caseScenario || rawMod.dilemma || rawMod.scenario || ''
+      rawMod.caseScenario || rawMod.stressTest || rawMod.dilemma || rawMod.scenario || ''
     ).trim();
     const explicitCaseResolution =
       String(rawMod.caseResolution ?? '').trim() ||
       String(rawMod.recommendedAction ?? '').trim() ||
+      String(rawMod.mitigation ?? '').trim() ||
+      String(rawMod.resolution ?? '').trim() ||
       String(rawMod.caseSolution ?? '').trim() ||
       String(rawMod.solution ?? '').trim() ||
       String(rawMod.caseActionItem ?? '').trim();
@@ -7182,12 +7545,18 @@ export function normalizeStage2ForA2ui(
           scenarioParts.push(conciseOpening);
         }
         if (quizQ) {
-          scenarioParts.push(`Utfordring / Spørsmål: ${quizQ}`);
+          scenarioParts.push(
+            isNo ? `Utfordring / Spørsmål: ${quizQ}` : `Challenge / Question: ${quizQ}`
+          );
         }
         if (bullets.length > 0) {
           const contextHeader = subtitleOrBasis
-            ? `Sentrale kontrollpunkter (${subtitleOrBasis}):`
-            : 'Sentrale kontrollpunkter:';
+            ? isNo
+              ? `Sentrale kontrollpunkter (${subtitleOrBasis}):`
+              : `Key Checkpoints (${subtitleOrBasis}):`
+            : isNo
+              ? 'Sentrale kontrollpunkter:'
+              : 'Key Checkpoints:';
           scenarioParts.push(
             `${contextHeader}\n${bullets.slice(0, 4).map((b: string) => `• ${b}`).join('\n')}`
           );
@@ -7197,9 +7566,10 @@ export function normalizeStage2ForA2ui(
 
       const quizExpl =
         typeof rawMod.quizExplanation === 'string' ? rawMod.quizExplanation.trim() : '';
+      const rationaleLabel = isNo ? '📌 Faglig begrunnelse:' : '📌 Rationale:';
       const enrichedRecommendation =
         !explicitCaseScenario && caseActionText && quizExpl
-          ? `${caseActionText}\n\n📌 Faglig begrunnelse: ${quizExpl}`
+          ? `${caseActionText}\n\n${rationaleLabel} ${quizExpl}`
           : caseActionText || quizExpl;
 
       cases.push({
@@ -7214,7 +7584,7 @@ export function normalizeStage2ForA2ui(
 
   if (rawModules.length > 0) {
     const totalModMinutes = rawModules.reduce((acc: number, rm: any) => {
-      const rawDm = rm?.durationMinutes;
+      const rawDm = rm?.durationMinutes ?? rm?.readingTimeMinutes;
       const dm =
         typeof rawDm === 'number'
           ? rawDm
@@ -7249,13 +7619,14 @@ export function normalizeStage2ForA2ui(
     }
   }
 
-  // Synthesize highlights from modules if top-level keyTakeaways / learningObjectives / highlights is empty
+  // Synthesize highlights from modules if top-level keyTakeaways / thesisPoints / learningObjectives / highlights is empty
   if (highlights.length === 0 && modules.length > 0) {
+    const modPrefix = isNo ? 'Modul' : isPillarSchema ? 'Pillar' : 'Module';
     for (let idx = 0; idx < modules.length; idx++) {
       const m = modules[idx];
       const basisPart = m.subtitleOrBasis ? ` (${m.subtitleOrBasis})` : '';
       const actionPart = m.actionItem ? ` — ${m.actionItem}` : '';
-      highlights.push(`Modul ${idx + 1}: ${m.title}${basisPart}${actionPart}`);
+      highlights.push(`${modPrefix} ${idx + 1}: ${m.title}${basisPart}${actionPart}`);
     }
   }
 
@@ -7290,23 +7661,43 @@ export function normalizeStage2ForA2ui(
     });
   });
 
-  // Top-level `cases` or `scenarios` array
+  // Top-level `cases`, `scenarios`, or `stressTests` array
   const rawCasesList = Array.isArray(scriptDraft.cases)
     ? scriptDraft.cases
     : Array.isArray(scriptDraft.scenarios)
       ? scriptDraft.scenarios
-      : [];
+      : Array.isArray(scriptDraft.stressTests)
+        ? scriptDraft.stressTests
+        : [];
   rawCasesList.forEach((c: any, idx: number) => {
     if (!c || typeof c !== 'object') return;
     cases.push({
       id: `case_${idx + 1}`,
-      title: String(c.title || c.caseTitle || `Scenario ${idx + 1}`),
+      title: String(c.title || c.caseTitle || c.scenarioTitle || `Scenario ${idx + 1}`),
       basisOrContext: String(
-        c.regulatoryBasis || c.legalBasis || c.legalReference || c.statute || c.context || c.category || ''
+        c.regulatoryBasis ||
+          c.legalBasis ||
+          c.legalReference ||
+          c.statute ||
+          c.analyticalFramework ||
+          c.valuationMethodology ||
+          c.context ||
+          c.category ||
+          ''
       ),
-      scenario: String(c.scenario || c.caseScenario || c.dilemma || c.description || c.prompt || ''),
+      scenario: String(
+        c.scenario || c.caseScenario || c.stressTest || c.dilemma || c.description || c.prompt || ''
+      ),
       recommendedAction: String(
-        c.recommendedAction || c.caseResolution || c.resolution || c.solution || c.boardActionItem || ''
+        c.recommendedAction ||
+          c.recommendation ||
+          c.mitigation ||
+          c.caseResolution ||
+          c.resolution ||
+          c.solution ||
+          c.boardActionItem ||
+          c.actionItem ||
+          ''
       ),
     });
   });
@@ -7315,12 +7706,18 @@ export function normalizeStage2ForA2ui(
   const checklistGroups: A2uiChecklistGroup[] = [];
   if (Array.isArray(scriptDraft.checklistGroups)) {
     let chkCounter = 0;
+    const defaultGrpPrefix = isNo ? 'Gruppe' : 'Group';
     scriptDraft.checklistGroups.forEach((rawGrp: any, gIdx: number) => {
       if (!rawGrp || typeof rawGrp !== 'object') return;
       const grpTitle =
         cleanChecklistLabel(
-          String(rawGrp.category || rawGrp.title || rawGrp.groupTitle || `Gruppe ${gIdx + 1}`)
-        ) || `Gruppe ${gIdx + 1}`;
+          String(
+            rawGrp.category ||
+              rawGrp.title ||
+              rawGrp.groupTitle ||
+              `${defaultGrpPrefix} ${gIdx + 1}`
+          )
+        ) || `${defaultGrpPrefix} ${gIdx + 1}`;
       const rawItems = Array.isArray(rawGrp.items) ? rawGrp.items : [];
       const items: A2uiChecklistItem[] = [];
       rawItems.forEach((it: any) => {
@@ -7943,10 +8340,82 @@ body {
 
 const A2UI_STUDIO_JS = `
 (function () {
+  function isInlineLatexMath(inner) {
+    if (!inner || typeof inner !== "string") return false;
+    if (/^\\s|\\s$/.test(inner)) return false;
+    if (/[\\r\\n|]/.test(inner)) return false;
+    if (inner.indexOf("[^") !== -1) return false;
+    if (/\\*\\*|__/.test(inner)) return false;
+    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt]\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\/|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|-|–|—|\\)|\\s*$))/i.test(inner)) {
+      return false;
+    }
+    if (!/(?:\\\\[a-zA-Z !,;:%]|[A-Za-z0-9)\\]}][\\^_](?:\\{[^{}\\r\\n]+\\}|[A-Za-z0-9+\\-°]))/.test(inner)) {
+      return false;
+    }
+    if (/^\\d/.test(inner)) {
+      if (!/^\\d+(?:[.,]\\d+)?(?:\\s*(?:\\\\|[\\^_])|\\s+[a-zA-Z]{1,3}[\\^_])/.test(inner)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function replaceInlineLatexSpans(str, replacer) {
+    const s = String(str || "");
+    let out = "";
+    let i = 0;
+    while (i < s.length) {
+      const ch = s[i];
+      if (ch === "\\\\" && i + 1 < s.length && s[i + 1] === "$") {
+        out += s.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (ch !== "$") {
+        out += ch;
+        i++;
+        continue;
+      }
+      let j = i + 1;
+      while (j < s.length) {
+        if (s[j] === "\\\\" && j + 1 < s.length) {
+          j += 2;
+          continue;
+        }
+        if (s[j] === "$" || s[j] === "\\n" || s[j] === "\\r" || s[j] === "|") {
+          break;
+        }
+        j++;
+      }
+      if (j < s.length && s[j] === "$") {
+        const inner = s.slice(i + 1, j);
+        if (isInlineLatexMath(inner)) {
+          out += replacer(s.slice(i, j + 1), inner);
+          i = j + 1;
+          continue;
+        }
+      }
+      out += "$";
+      i++;
+    }
+    return out;
+  }
+
+  function detectSpeechLang(text) {
+    const s = String(text || "");
+    const hasNorwegianChars =
+      /[æøåÆØÅ]/.test(s) ||
+      /\\b(og|det|som|med|ikke|eller|til|fra|brann|styret|virksomhet|krav)\\b/i.test(s);
+    return hasNorwegianChars ? "nb-NO" : "en-US";
+  }
+
   if (typeof window !== "undefined" && window.__ICM_TEST_HOOKS__) {
     window.__ICM_TEST_HOOKS__.formatInlineLatexAndFootnotes = formatInlineLatexAndFootnotes;
     window.__ICM_TEST_HOOKS__.cleanClientChecklistLabel = cleanClientChecklistLabel;
     window.__ICM_TEST_HOOKS__.extractChecklistGroupsClient = extractChecklistGroupsClient;
+    window.__ICM_TEST_HOOKS__.isInlineLatexMath = isInlineLatexMath;
+    window.__ICM_TEST_HOOKS__.replaceInlineLatexSpans = replaceInlineLatexSpans;
+    window.__ICM_TEST_HOOKS__.detectSpeechLang = detectSpeechLang;
     return;
   }
   const payload = window.A2UI_SURFACE_PAYLOAD;
@@ -8025,6 +8494,22 @@ const A2UI_STUDIO_JS = `
     } else {
       cur[lastPart] = value;
     }
+  }
+
+  function isNorwegianSurface(surface) {
+    const metaLang = surface && resolvePointer(surface.dataModel, "/meta/lang");
+    if (metaLang === "no") return true;
+    if (metaLang === "en") return false;
+    const docLang =
+      typeof document !== "undefined" && document.documentElement
+        ? document.documentElement.lang
+        : "";
+    return docLang === "no" || docLang === "nb";
+  }
+
+  function isAnalysisSurface(surface) {
+    const dm = surface && resolvePointer(surface.dataModel, "/meta/domainMode");
+    return dm === "analysis";
   }
 
   function stringifyInterpolated(val) {
@@ -8153,7 +8638,7 @@ const A2UI_STUDIO_JS = `
 
   function cleanClientChecklistLabel(rawText) {
     const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻" };
-    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "⁷", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
+    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     function cleanLatexFrag(frag, isInsideMathSpan) {
       let out = String(frag || "")
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
@@ -8221,7 +8706,7 @@ const A2UI_STUDIO_JS = `
 
     let text = String(rawText || "").trim();
     text = text.replace(/\\[\\^[^\\]]+\\]/g, "");
-    text = text.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_m, inner) {
+    text = replaceInlineLatexSpans(text, function (_m, inner) {
       return cleanLatexFrag(inner, true).trim();
     });
     text = cleanLatexFrag(text, false);
@@ -8239,16 +8724,22 @@ const A2UI_STUDIO_JS = `
   }
 
   function extractChecklistGroupsClient(rawMarkdown) {
-    const lines = String(rawMarkdown || "").split(/\\r?\\n/);
+    const sample = String(rawMarkdown || "");
+    const isNo =
+      /[æøåÆØÅ]/.test(sample) ||
+      /\\b(og|det|som|med|ikke|eller|til|fra|brann|styret|virksomhet|krav|kontroll)\\b/i.test(sample);
+    const defaultHeading = isNo ? "Sjekkliste / Action Items" : "Checklist / Action Items";
+    const defaultFallback = isNo ? "Generelt" : "General";
+    const lines = sample.split(/\\r?\\n/);
     const groups = [];
-    let currentHeading = "Sjekkliste / Action Items";
+    let currentHeading = defaultHeading;
     const categoryStack = [];
     let sectionHasSubgroups = false;
     let itemCounter = 0;
 
     function getOrCreateGroup(title) {
       const cleanTitle =
-        cleanClientChecklistLabel(title.replace(/\\*\\*([^*]+)\\*\\*/g, "$1").replace(/:+\\s*$/, "")) || "Generelt";
+        cleanClientChecklistLabel(title.replace(/\\*\\*([^*]+)\\*\\*/g, "$1").replace(/:+\\s*$/, "")) || defaultFallback;
       const lastGroup = groups[groups.length - 1];
       if (lastGroup && lastGroup.title === cleanTitle) {
         return lastGroup;
@@ -8314,7 +8805,7 @@ const A2UI_STUDIO_JS = `
         const stackTitle = categoryStack.map((c) => c.title).join(" — ");
         groupTitle =
           currentHeading &&
-          currentHeading !== "Sjekkliste / Action Items" &&
+          currentHeading !== defaultHeading &&
           !stackTitle.startsWith(currentHeading)
             ? currentHeading + " — " + stackTitle
             : stackTitle;
@@ -8323,7 +8814,7 @@ const A2UI_STUDIO_JS = `
         if (leadBoldMatch) {
           const subCategory = cleanClientChecklistLabel(leadBoldMatch[1]);
           groupTitle =
-            currentHeading && currentHeading !== "Sjekkliste / Action Items"
+            currentHeading && currentHeading !== defaultHeading
               ? currentHeading + " — " + subCategory
               : subCategory;
           rawItemText = leadBoldMatch[2];
@@ -8461,13 +8952,14 @@ const A2UI_STUDIO_JS = `
       }
     }
     const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+    const doneWord = isNorwegianSurface(surface) ? " fullført (" : " completed (";
     setPointer(surface.dataModel, "/checklist/completedCount", completed);
     setPointer(surface.dataModel, "/checklist/totalCount", total);
     setPointer(surface.dataModel, "/checklist/percent", pct);
     setPointer(
       surface.dataModel,
       "/checklist/summaryText",
-      completed + " / " + total + " fullført (" + pct + "%)"
+      completed + " / " + total + doneWord + pct + "%)"
     );
   }
 
@@ -8475,8 +8967,7 @@ const A2UI_STUDIO_JS = `
     if (!window.speechSynthesis || !text) return;
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(String(text));
-    const hasNorwegianChars = /[æøåÆØÅ]/.test(text) || /\\b(og|det|som|for|med|styret|brann)\\b/i.test(text);
-    utter.lang = hasNorwegianChars ? "nb-NO" : "en-US";
+    utter.lang = detectSpeechLang(text);
     window.speechSynthesis.speak(utter);
   }
 
@@ -8490,7 +8981,7 @@ const A2UI_STUDIO_JS = `
 
   function formatInlineLatexAndFootnotes(md, sources) {
     const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻" };
-    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "⁷", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
+    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     let out = String(md || "");
     // Strip redundant leading H1 heading (# <Title>) since the concept title is already rendered in the card/panel header
     out = out.replace(/^\\s*#\\s+[^\\r\\n]+(?:\\r?\\n+---(?=\\r?\\n|$))?\\r?\\n*/, "");
@@ -8499,8 +8990,8 @@ const A2UI_STUDIO_JS = `
     out = out.replace(/\\r?\\n+---\\s*$/g, "");
     out = out.replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,4}\\s+(?:\\*\\*|__)?(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:Sources?(?:\\s*(?:&|and|\\/)\\s*(?:Citations?|Footnotes?|References?))?|References?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|Citations?|Sources?))?|Citations?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|References?))?|Footnotes?(?:\\s*(?:&|and|\\/)\\s*(?:References?|Sources?))?|Grounded\\s+Search\\s+References|Kildehenvisninger(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter))?|Kilder(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter|kildehenvisninger))?|Kildeliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Referanser(?:\\s*(?:og|&|\\/)\\s*(?:fotnoter|kilder))?|Referanseliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Fotnoter(?:\\s*(?:og|&|\\/)\\s*(?:kilder|referanser))?):?(?:\\*\\*|__)?(?:\\r?\\n+---)?\\s*$/i, "");
     out = out.replace(/\\r?\\n+---\\s*$/g, "").trim();
-    // Format inline TeX math spans ($...$)
-    out = out.replace(/\\$(?!\\s)([^$\\n]*?\\S)\\$/g, function (_, inner) {
+    // Format inline TeX math spans ($...$) safely without matching currency $ pairs or table pipes
+    out = replaceInlineLatexSpans(out, function (_, inner) {
       const cleaned = String(inner)
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
@@ -8806,6 +9297,7 @@ const A2UI_STUDIO_JS = `
     }
 
     if (type === "AudioPlayer") {
+      const isNo = isNorwegianSurface(surface);
       const wrap = document.createElement("div");
       wrap.className = "a2ui-row";
       const desc = String(resolveDynamic(comp.description, surface, scopeData) || "Audio Narration");
@@ -8819,11 +9311,13 @@ const A2UI_STUDIO_JS = `
       } else {
         const playBtn = document.createElement("button");
         playBtn.className = "a2ui-btn primary";
-        playBtn.textContent = "🔊 Spill av opplesning (" + desc + ")";
+        playBtn.textContent = isNo
+          ? "🔊 Spill av opplesning (" + desc + ")"
+          : "🔊 Listen to narration (" + desc + ")";
         playBtn.addEventListener("click", () => speakNarration(textToSpeak));
         const stopBtn = document.createElement("button");
         stopBtn.className = "a2ui-btn";
-        stopBtn.textContent = "⏹ Stopp";
+        stopBtn.textContent = isNo ? "⏹ Stopp" : "⏹ Stop";
         stopBtn.addEventListener("click", () => stopActiveSpeech());
         wrap.appendChild(playBtn);
         wrap.appendChild(stopBtn);
@@ -8905,6 +9399,7 @@ const A2UI_STUDIO_JS = `
     }
 
     if (type === "Modal") {
+      const isNo = isNorwegianSurface(surface);
       const wrap = document.createElement("div");
       const trigId = comp.trigger || comp.entryPointChild;
       const contentId = comp.content || comp.contentChild;
@@ -8927,7 +9422,7 @@ const A2UI_STUDIO_JS = `
         header.innerHTML = "<strong>Modal</strong>";
         const closeBtn = document.createElement("button");
         closeBtn.className = "a2ui-btn";
-        closeBtn.textContent = "Lukk";
+        closeBtn.textContent = isNo ? "Lukk" : "Close";
         closeBtn.addEventListener("click", () => {
           surface.uiState["modal_" + comp.id] = false;
           renderSurface();
@@ -8973,6 +9468,7 @@ const A2UI_STUDIO_JS = `
 
     // --- TIER 2: ICM + OKF v0.2 DOMAIN CUSTOM COMPONENTS ---
     if (type === "InteractiveChecklist") {
+      const isNo = isNorwegianSurface(surface);
       const wrap = document.createElement("div");
       wrap.className = "a2ui-col";
       const groups = resolvePointer(surface.dataModel, comp.groupsPath || "/checklist/groups") || [];
@@ -8985,7 +9481,10 @@ const A2UI_STUDIO_JS = `
       topRow.className = "a2ui-row justify-between";
       const titleEl = document.createElement("h2");
       titleEl.className = "a2ui-h2";
-      titleEl.textContent = String(resolveDynamic(comp.title, surface, scopeData) || "Interaktiv Sjekkliste");
+      titleEl.textContent = String(
+        resolveDynamic(comp.title, surface, scopeData) ||
+          (isNo ? "Interaktiv Sjekkliste" : "Interactive Checklist")
+      );
       const badge = document.createElement("span");
       badge.className = "a2ui-badge " + (pct === 100 ? "success" : "primary");
       badge.textContent = summaryText;
@@ -9005,11 +9504,11 @@ const A2UI_STUDIO_JS = `
       btnRow.className = "a2ui-row";
       const checkAllBtn = document.createElement("button");
       checkAllBtn.className = "a2ui-btn";
-      checkAllBtn.textContent = "✓ Marker alle";
+      checkAllBtn.textContent = isNo ? "✓ Marker alle" : "✓ Check all";
       checkAllBtn.addEventListener("click", () => dispatchClientAction(surface, comp.id, "checkAllChecklist", {}));
       const resetBtn = document.createElement("button");
       resetBtn.className = "a2ui-btn";
-      resetBtn.textContent = "↺ Nullstill sjekkliste";
+      resetBtn.textContent = isNo ? "↺ Nullstill sjekkliste" : "↺ Reset checklist";
       resetBtn.addEventListener("click", () => dispatchClientAction(surface, comp.id, "resetChecklist", {}));
       btnRow.appendChild(checkAllBtn);
       btnRow.appendChild(resetBtn);
@@ -9053,6 +9552,8 @@ const A2UI_STUDIO_JS = `
     }
 
     if (type === "ModuleCarousel") {
+      const isNo = isNorwegianSurface(surface);
+      const isAnalysis = isAnalysisSurface(surface);
       const wrap = document.createElement("div");
       wrap.className = "a2ui-col";
       const modules = resolvePointer(surface.dataModel, comp.modulesPath || "/stage2/modules") || [];
@@ -9063,7 +9564,9 @@ const A2UI_STUDIO_JS = `
       if (modules.length === 0) {
         const empty = document.createElement("div");
         empty.className = "a2ui-card a2ui-caption";
-        empty.textContent = "Ingen moduler funnet i Stage 2-artefaktet.";
+        empty.textContent = isNo
+          ? "Ingen moduler funnet i Stage 2-artefaktet."
+          : "No modules or pillars found in Stage 2 artifact.";
         return empty;
       }
 
@@ -9092,7 +9595,14 @@ const A2UI_STUDIO_JS = `
       headRow.className = "a2ui-row justify-between";
       const h2 = document.createElement("h2");
       h2.className = "a2ui-h2";
-      h2.textContent = "Modul " + (mod.number || idx + 1) + ": " + mod.title;
+      const itemLabel = isNo
+        ? isAnalysis
+          ? "Pilar "
+          : "Modul "
+        : isAnalysis
+          ? "Pillar "
+          : "Module ";
+      h2.textContent = itemLabel + (mod.number || idx + 1) + ": " + mod.title;
       headRow.appendChild(h2);
       const badgeWrap = document.createElement("div");
       badgeWrap.className = "a2ui-row";
@@ -9139,7 +9649,13 @@ const A2UI_STUDIO_JS = `
         ulWrap.className = "a2ui-col";
         const h4 = document.createElement("h4");
         h4.className = "a2ui-h4";
-        h4.textContent = "Nøkkelpunkter / Lysbilder";
+        h4.textContent = isNo
+          ? isAnalysis
+            ? "Nøkkelpunkter & Analyse"
+            : "Nøkkelpunkter / Lysbilder"
+          : isAnalysis
+            ? "Key Analytical Takeaways"
+            : "Key Points / Slide Cues";
         ulWrap.appendChild(h4);
         const ul = document.createElement("ul");
         ul.style.margin = "0";
@@ -9158,8 +9674,17 @@ const A2UI_STUDIO_JS = `
         actBox.style.background = "var(--success-soft)";
         actBox.style.border = "1px solid var(--success-border)";
         actBox.style.borderRadius = "8px";
+        const actTitle = isNo
+          ? isAnalysis
+            ? "⚡ Anbefaling / Beslutningspunkt:"
+            : "⚡ Praktisk tiltak / Handlingspunkt:"
+          : isAnalysis
+            ? "⚡ IC Directive / Recommended Action:"
+            : "⚡ Practical Action Item:";
         actBox.innerHTML =
-          "<strong>⚡ Praktisk tiltak / Handlingspunkt:</strong><div style='margin-top:4px'>" +
+          "<strong>" +
+          actTitle +
+          "</strong><div style='margin-top:4px'>" +
           escapeHtml(mod.actionItem) +
           "</div>";
         card.appendChild(actBox);
@@ -9170,7 +9695,13 @@ const A2UI_STUDIO_JS = `
       const prevBtn = document.createElement("button");
       prevBtn.className = "a2ui-btn";
       prevBtn.disabled = idx === 0;
-      prevBtn.textContent = "← Forrige modul";
+      prevBtn.textContent = isNo
+        ? isAnalysis
+          ? "← Forrige pilar"
+          : "← Forrige modul"
+        : isAnalysis
+          ? "← Previous pillar"
+          : "← Previous module";
       prevBtn.addEventListener("click", () => {
         if (idx > 0) {
           stopActiveSpeech();
@@ -9181,7 +9712,13 @@ const A2UI_STUDIO_JS = `
       const nextBtn = document.createElement("button");
       nextBtn.className = "a2ui-btn primary";
       nextBtn.disabled = idx >= modules.length - 1;
-      nextBtn.textContent = "Neste modul →";
+      nextBtn.textContent = isNo
+        ? isAnalysis
+          ? "Neste pilar →"
+          : "Neste modul →"
+        : isAnalysis
+          ? "Next pillar →"
+          : "Next module →";
       nextBtn.addEventListener("click", () => {
         if (idx < modules.length - 1) {
           stopActiveSpeech();
@@ -9198,6 +9735,7 @@ const A2UI_STUDIO_JS = `
     }
 
     if (type === "QuizRunner") {
+      const isNo = isNorwegianSurface(surface);
       const wrap = document.createElement("div");
       wrap.className = "a2ui-col";
       const questions = resolvePointer(surface.dataModel, comp.questionsPath || "/stage2/quiz") || [];
@@ -9218,10 +9756,15 @@ const A2UI_STUDIO_JS = `
       scoreCard.className = "a2ui-card a2ui-row justify-between";
       const scoreTitle = document.createElement("h2");
       scoreTitle.className = "a2ui-h2";
-      scoreTitle.textContent = String(resolveDynamic(comp.title, surface, scopeData) || "Kunnskapssjekk");
+      scoreTitle.textContent = String(
+        resolveDynamic(comp.title, surface, scopeData) ||
+          (isNo ? "Kunnskapssjekk" : "Knowledge Check")
+      );
       const scoreBadge = document.createElement("span");
       scoreBadge.className = "a2ui-badge " + (correctCount === questions.length && questions.length > 0 ? "success" : "primary");
-      scoreBadge.textContent = "Resultat: " + correctCount + " / " + questions.length + " riktige (" + answeredCount + " besvart)";
+      scoreBadge.textContent = isNo
+        ? "Resultat: " + correctCount + " / " + questions.length + " riktige (" + answeredCount + " besvart)"
+        : "Score: " + correctCount + " / " + questions.length + " correct (" + answeredCount + " answered)";
       scoreCard.appendChild(scoreTitle);
       scoreCard.appendChild(scoreBadge);
       wrap.appendChild(scoreCard);
@@ -9263,7 +9806,13 @@ const A2UI_STUDIO_JS = `
           fb.style.border = "1px solid " + (isRight ? "var(--success-border)" : "var(--danger-border)");
           fb.innerHTML =
             "<strong>" +
-            (isRight ? "✓ Riktig svar!" : "✗ Ikke helt.") +
+            (isRight
+              ? isNo
+                ? "✓ Riktig svar!"
+                : "✓ Correct!"
+              : isNo
+                ? "✗ Ikke helt."
+                : "✗ Not quite.") +
             "</strong> " +
             escapeHtml(q.explanation || "");
           qCard.appendChild(fb);
@@ -9274,6 +9823,8 @@ const A2UI_STUDIO_JS = `
     }
 
     if (type === "CaseSimulator") {
+      const isNo = isNorwegianSurface(surface);
+      const isAnalysis = isAnalysisSurface(surface);
       const wrap = document.createElement("div");
       wrap.className = "a2ui-col";
       const cases = resolvePointer(surface.dataModel, comp.casesPath || "/stage2/cases") || [];
@@ -9288,7 +9839,12 @@ const A2UI_STUDIO_JS = `
         top.className = "a2ui-row justify-between";
         const h3 = document.createElement("h3");
         h3.className = "a2ui-h3";
-        h3.textContent = "Case " + (cIdx + 1) + ": " + c.title;
+        const casePrefix = isNo
+          ? "Case "
+          : isAnalysis
+            ? "Scenario "
+            : "Case ";
+        h3.textContent = casePrefix + (cIdx + 1) + ": " + c.title;
         top.appendChild(h3);
         if (c.basisOrContext) {
           const b = document.createElement("span");
@@ -9307,8 +9863,16 @@ const A2UI_STUDIO_JS = `
           id: comp.id + "_input_" + c.id,
           component: "TextField",
           variant: "longText",
-          label: "Ditt løsningsforslag / handlingsplan (lagres i A2UI Data Model):",
-          placeholder: "Beskriv din vurdering og foreslåtte tiltak her...",
+          label: isNo
+            ? "Ditt løsningsforslag / handlingsplan (lagres i A2UI Data Model):"
+            : isAnalysis
+              ? "Your analytical assessment / decision notes (saved in A2UI Data Model):"
+              : "Your proposed solution / action plan (saved in A2UI Data Model):",
+          placeholder: isNo
+            ? "Beskriv din vurdering og foreslåtte tiltak her..."
+            : isAnalysis
+              ? "Document your risk assessment, conviction, or IC condition here..."
+              : "Describe your assessment and proposed actions here...",
           value: { path: responsesPath + "/" + c.id },
         });
         card.appendChild(tf);
@@ -9317,7 +9881,13 @@ const A2UI_STUDIO_JS = `
           const toggleBtn = document.createElement("button");
           toggleBtn.className = "a2ui-btn";
           const isRev = Boolean(revealed[c.id]);
-          toggleBtn.textContent = isRev ? "Skjul anbefalt tiltak" : "Vis anbefalt tiltak (Fasit)";
+          toggleBtn.textContent = isNo
+            ? isRev
+              ? "Skjul anbefalt tiltak"
+              : "Vis anbefalt tiltak (Fasit)"
+            : isRev
+              ? "Hide recommended action"
+              : "💡 Show Recommended Action / Resolution";
           toggleBtn.addEventListener("click", () => {
             setPointer(surface.dataModel, revealedPath + "/" + c.id, !isRev);
             renderSurface();
@@ -9330,8 +9900,13 @@ const A2UI_STUDIO_JS = `
             rec.style.background = "var(--success-soft)";
             rec.style.border = "1px solid var(--success-border)";
             rec.style.borderRadius = "8px";
+            const recHeader = isNo
+              ? "⚡ Anbefalt tiltak & Løsning:"
+              : "⚡ Recommended Action & Resolution:";
             rec.innerHTML =
-              "<strong>⚡ Anbefalt tiltak & Løsning:</strong><div style='margin-top:6px;white-space:pre-wrap'>" +
+              "<strong>" +
+              recHeader +
+              "</strong><div style='margin-top:6px;white-space:pre-wrap'>" +
               escapeHtml(c.recommendedAction) +
               "</div>";
             card.appendChild(rec);
@@ -9343,6 +9918,7 @@ const A2UI_STUDIO_JS = `
     }
 
     if (type === "OkfMarkdown") {
+      const isNo = isNorwegianSurface(surface);
       const wrap = document.createElement("div");
       wrap.className = "okf-md-container";
       const bodyMd = String(resolveDynamic(comp.body, surface, scopeData) || "");
@@ -9361,7 +9937,10 @@ const A2UI_STUDIO_JS = `
       leftHead.className = "a2ui-row";
       const tTitle = document.createElement("h3");
       tTitle.className = "a2ui-h3";
-      tTitle.textContent = String(resolveDynamic(comp.title, surface, scopeData) || "Stage 1 OKF v0.2 Kunnskapsgrunnlag");
+      tTitle.textContent = String(
+        resolveDynamic(comp.title, surface, scopeData) ||
+          (isNo ? "Stage 1 OKF v0.2 Kunnskapsgrunnlag" : "Stage 1 OKF v0.2 Knowledge Base")
+      );
       const trustBadge = document.createElement("span");
       trustBadge.className = "a2ui-badge " + (trustTier === "human-reviewed" ? "accent" : "primary");
       trustBadge.textContent = "trust: " + trustTier;
@@ -9378,7 +9957,9 @@ const A2UI_STUDIO_JS = `
         const backPrimaryBtn = document.createElement("button");
         backPrimaryBtn.className = "a2ui-btn primary";
         backPrimaryBtn.id = "okf-md-back-primary-btn";
-        backPrimaryBtn.textContent = "← Tilbake til hovedkonsept";
+        backPrimaryBtn.textContent = isNo
+          ? "← Tilbake til hovedkonsept"
+          : "← Back to primary concept";
         backPrimaryBtn.addEventListener("click", () => {
           const origBody = resolvePointer(surface.dataModel, "/okf/primaryBody");
           const origTitle = resolvePointer(surface.dataModel, "/okf/primaryTitle");
@@ -9397,7 +9978,13 @@ const A2UI_STUDIO_JS = `
 
       const editBtn = document.createElement("button");
       editBtn.className = "a2ui-btn";
-      editBtn.textContent = isEditing ? "👁 Forhåndsvis OKF Markdown" : "✏️ Rediger Layer 4 Markdown";
+      editBtn.textContent = isNo
+        ? isEditing
+          ? "👁 Forhåndsvis OKF Markdown"
+          : "✏️ Rediger Layer 4 Markdown"
+        : isEditing
+          ? "👁 Preview OKF Markdown"
+          : "✏️ Edit Layer 4 Markdown";
       editBtn.addEventListener("click", () => {
         if (isEditing) {
           syncOkfBodyToChecklist(surface);
@@ -9415,7 +10002,9 @@ const A2UI_STUDIO_JS = `
           id: comp.id + "_editor",
           component: "TextField",
           variant: "longText",
-          label: "Redigerbar OKF v0.2 Markdown (oppdaterer A2UI Data Model og Sjekkliste direkte):",
+          label: isNo
+            ? "Redigerbar OKF v0.2 Markdown (oppdaterer A2UI Data Model og Sjekkliste direkte):"
+            : "Editable OKF v0.2 Markdown (live-updates A2UI Data Model and Checklist):",
           value: comp.body,
         });
         const ta = editor.querySelector("textarea");
@@ -9457,13 +10046,12 @@ const A2UI_STUDIO_JS = `
                 setPointer(surface.dataModel, "/okf/primaryBody", resolvePointer(surface.dataModel, "/okf/body") || "");
                 setPointer(surface.dataModel, "/okf/primaryTitle", resolvePointer(surface.dataModel, "/okf/title") || "");
               }
+              const stubNote = isNo
+                ? "\\n\\n*Dette OKF-konseptet (\\x60/" + conceptId + ".md\\x60) er kryssreferert fra hovedkonseptet.*"
+                : "\\n\\n*This OKF concept (\\x60/" + conceptId + ".md\\x60) is cross-referenced from the primary concept.*";
               const targetBody =
                 (bundleGraph.bodies && bundleGraph.bodies[conceptId]) ||
-                "# " +
-                  (a.textContent || conceptId).trim() +
-                  "\\n\\n*Dette OKF-konseptet (\\x60/" +
-                  conceptId +
-                  ".md\\x60) er kryssreferert fra hovedkonseptet.*";
+                "# " + (a.textContent || conceptId).trim() + stubNote;
               const primaryBody = resolvePointer(surface.dataModel, "/okf/primaryBody");
               if (primaryBody && targetBody === primaryBody) {
                 setPointer(surface.dataModel, "/okf/body", primaryBody);
@@ -9490,7 +10078,9 @@ const A2UI_STUDIO_JS = `
       sideCard.className = "a2ui-card a2ui-col";
       const sHead = document.createElement("h3");
       sHead.className = "a2ui-h3";
-      sHead.textContent = "Kilder & Sporbarhet (" + sources.length + ")";
+      sHead.textContent = isNo
+        ? "Kilder & Sporbarhet (" + sources.length + ")"
+        : "Sources & Provenance (" + sources.length + ")";
       sideCard.appendChild(sHead);
 
       const srcList = document.createElement("div");
@@ -9539,6 +10129,8 @@ const A2UI_STUDIO_JS = `
     }
 
     if (type === "OkfKnowledgeGraph") {
+      const isNo = isNorwegianSurface(surface);
+      const backToConceptLabel = isNo ? "← Tilbake til konsept" : "← Back to concept";
       const wrap = document.createElement("div");
       wrap.className = "a2ui-col";
       const split = document.createElement("div");
@@ -9548,7 +10140,9 @@ const A2UI_STUDIO_JS = `
       const detail = document.createElement("div");
       detail.className = "okf-graph-detail";
       detail.id = "okf-graph-detail-view";
-      detail.innerHTML = '<div class="a2ui-caption">Klikk på en OKF-node i grafen for å inspisere konseptet og relasjoner.</div>';
+      detail.innerHTML = isNo
+        ? '<div class="a2ui-caption">Klikk på en OKF-node i grafen for å inspisere konseptet og relasjoner.</div>'
+        : '<div class="a2ui-caption">Click an OKF node in the graph to inspect the concept and its citations.</div>';
       split.appendChild(canvas);
       split.appendChild(detail);
       wrap.appendChild(split);
@@ -9585,7 +10179,9 @@ const A2UI_STUDIO_JS = `
                 "</span>"
               : "") +
             "</div>" +
-            '<button type="button" class="a2ui-btn" id="okf-graph-back-btn" style="padding:4px 10px;font-size:12px">← Tilbake til konsept</button>' +
+            '<button type="button" class="a2ui-btn" id="okf-graph-back-btn" style="padding:4px 10px;font-size:12px">' +
+            backToConceptLabel +
+            "</button>" +
             "</div>" +
             '<h3 class="a2ui-h3" style="margin-top:6px">' +
             escapeHtml(displayTitle) +
@@ -9623,7 +10219,9 @@ const A2UI_STUDIO_JS = `
             (isSubNode
               ? '<div class="a2ui-row justify-between" style="margin-bottom:6px">' +
                 badgesHtml +
-                '<button type="button" class="a2ui-btn" id="okf-graph-back-btn" style="padding:4px 10px;font-size:12px">← Tilbake til konsept</button>' +
+                '<button type="button" class="a2ui-btn" id="okf-graph-back-btn" style="padding:4px 10px;font-size:12px">' +
+                backToConceptLabel +
+                "</button>" +
                 "</div>"
               : '<div style="margin-bottom:6px">' + badgesHtml + "</div>") +
             '<h3 class="a2ui-h3" style="margin-top:8px">' +
@@ -9723,7 +10321,13 @@ const A2UI_STUDIO_JS = `
 
       setTimeout(() => {
         if (!window.cytoscape) {
-          canvas.innerHTML = '<div style="padding:20px" class="a2ui-caption">Cytoscape.js ikke lastet (offline). Antall noder i bundle: ' + (bundleGraph.nodes || []).length + "</div>";
+          canvas.innerHTML =
+            '<div style="padding:20px" class="a2ui-caption">' +
+            (isNo
+              ? "Cytoscape.js ikke lastet (offline). Antall noder i bundle: "
+              : "Cytoscape.js not loaded (offline). Nodes in bundle: ") +
+            (bundleGraph.nodes || []).length +
+            "</div>";
           return;
         }
         cy = window.cytoscape({
@@ -9991,7 +10595,17 @@ export function generateA2uiSurface(
   const fallbackTitle = String(
     okfDoc.frontmatter.title || meta.topic || resolvedRunId || 'ICM Studio Surface'
   );
+  const surfaceLang = detectIcmLanguage(
+    `${okfDoc.frontmatter.title || ''} ${okfDoc.frontmatter.description || ''} ${okfDoc.body || ''} ${JSON.stringify(rawStage2 || {})}`
+  );
+  const isNo = surfaceLang === 'no';
   const stage2Norm = normalizeStage2ForA2ui(rawStage2, fallbackTitle);
+  const domainMode = detectIcmDomainMode(
+    rawStage2,
+    stage2Norm.quiz.length,
+    `${okfDoc.frontmatter.title || ''} ${okfDoc.frontmatter.description || ''} ${stage2Norm.title} ${stage2Norm.scriptBody}`
+  );
+  const isAnalysis = domainMode === 'analysis';
   const mdChecklistGroups = extractChecklistGroupsFromMarkdown(okfDoc.body);
   const checklistFromStage2 = stage2Norm.checklistGroups.length > 0;
   const checklistGroups = checklistFromStage2
@@ -10067,7 +10681,9 @@ export function generateA2uiSurface(
             label: shortLabel,
             parentConceptId: c.id,
             type: 'Linked Concept',
-            description: `Referert OKF-konsept fra ${c.id}`,
+            description: isNo
+              ? `Referert OKF-konsept fra ${c.id}`
+              : `Referenced OKF concept from ${c.id}`,
             status: 'draft',
             trust_tier: 'unverified',
             stale: false,
@@ -10075,8 +10691,9 @@ export function generateA2uiSurface(
             size: 28,
           },
         });
-        graphBodies[target] =
-          `# ${shortLabel}\n\n*Dette OKF-konseptet (\`/${target}.md\`) er referert fra **${c.title || c.id}**.*\n\nKjør \`npm run cli:stage1 -- "${shortLabel}"\` for å generere og verifisere dette konseptet i kunnskapsbunten.`;
+        graphBodies[target] = isNo
+          ? `# ${shortLabel}\n\n*Dette OKF-konseptet (\`/${target}.md\`) er referert fra **${c.title || c.id}**.*\n\nKjør \`npm run cli:stage1 -- "${shortLabel}"\` for å generere og verifisere dette konseptet i kunnskapsbunten.`
+          : `# ${shortLabel}\n\n*This OKF concept (\`/${target}.md\`) is referenced from **${c.title || c.id}**.*\n\nRun \`npm run cli:stage1 -- "${shortLabel}"\` to generate and verify this concept in the knowledge bundle.`;
       }
       const key = `${c.id}__${target}`;
       if (seenEdgeKeys.has(key)) continue;
@@ -10085,7 +10702,9 @@ export function generateA2uiSurface(
     }
     for (const src of c.sources || []) {
       const srcNodeId = `source:${src.id || src.title || 'ref'}`;
-      const refLine = `- **Referert i konsept:** \`${c.id}\` (*${c.title || c.id}*)`;
+      const refLine = isNo
+        ? `- **Referert i konsept:** \`${c.id}\` (*${c.title || c.id}*)`
+        : `- **Referenced in concept:** \`${c.id}\` (*${c.title || c.id}*)`;
       if (!conceptIds.has(srcNodeId)) {
         conceptIds.add(srcNodeId);
         const srcUrl = (src as any).url || (src as any).resource || '';
@@ -10111,8 +10730,16 @@ export function generateA2uiSurface(
           },
         });
         graphBodies[srcNodeId] = [
-          src.retrieved_at ? `- **Hentet (\`retrieved_at\`):** \`${src.retrieved_at}\`` : '',
-          src.last_modified ? `- **Sist endret (\`last_modified\`):** \`${src.last_modified}\`` : '',
+          src.retrieved_at
+            ? isNo
+              ? `- **Hentet (\`retrieved_at\`):** \`${src.retrieved_at}\``
+              : `- **Retrieved (\`retrieved_at\`):** \`${src.retrieved_at}\``
+            : '',
+          src.last_modified
+            ? isNo
+              ? `- **Sist endret (\`last_modified\`):** \`${src.last_modified}\``
+              : `- **Last modified (\`last_modified\`):** \`${src.last_modified}\``
+            : '',
           refLine,
         ]
           .filter(Boolean)
@@ -10202,8 +10829,15 @@ export function generateA2uiSurface(
     }
   );
 
-  // Tab 1: Oversikt & Sammendrag (Overview, TTS Narration, Highlights)
-  tabs.push({ title: '📋 Oversikt & Sammendrag', child: 'tab_overview' });
+  // Tab 1: Overview, TTS Narration, Highlights
+  tabs.push({
+    title: isNo
+      ? '📋 Oversikt & Sammendrag'
+      : isAnalysis
+        ? '📋 Executive Summary'
+        : '📋 Overview & Summary',
+    child: 'tab_overview',
+  });
   const overviewChildren = ['overview_narration_card'];
   if (stage2Norm.highlights.length > 0) {
     overviewChildren.push('overview_highlights_card');
@@ -10228,7 +10862,11 @@ export function generateA2uiSurface(
       id: 'overview_narration_heading',
       component: 'Text',
       variant: 'h2',
-      text: 'Stage 2 Syntese & Hovedbudskap',
+      text: isNo
+        ? 'Stage 2 Syntese & Hovedbudskap'
+        : isAnalysis
+          ? 'Stage 2 Executive Synthesis & Thesis'
+          : 'Stage 2 Synthesis & Core Narrative',
     },
     {
       id: 'overview_tts_player',
@@ -10262,7 +10900,11 @@ export function generateA2uiSurface(
         id: 'overview_highlights_title',
         component: 'Text',
         variant: 'h3',
-        text: 'Hovedpunkter & Læringsmål',
+        text: isNo
+          ? 'Hovedpunkter & Læringsmål'
+          : isAnalysis
+            ? 'Key Takeaways & Thesis Highlights'
+            : 'Key Takeaways & Learning Objectives',
       },
       {
         id: 'overview_highlights_list',
@@ -10284,42 +10926,64 @@ export function generateA2uiSurface(
   // Tab 2 (Conditional): Interactive Checklist if `- [ ]` items exist in OKF Markdown
   if (totalChecklistItems > 0) {
     tabs.push({
-      title: `✅ Interaktiv Sjekkliste (${totalChecklistItems})`,
+      title: isNo
+        ? `✅ Interaktiv Sjekkliste (${totalChecklistItems})`
+        : `✅ Interactive Checklist (${totalChecklistItems})`,
       child: 'tab_checklist',
     });
     components.push({
       id: 'tab_checklist',
       component: 'InteractiveChecklist',
-      title: 'Interaktiv Sjekkliste (OKF v0.2 Kontrollpunkter)',
+      title: isNo
+        ? 'Interaktiv Sjekkliste (OKF v0.2 Kontrollpunkter)'
+        : 'Interactive Checklist (OKF v0.2 Verification Items)',
       groupsPath: '/checklist/groups',
     });
   }
 
-  // Tab 3 (Conditional): ModuleCarousel if Stage 2 has trainingModules / lessons / modules / slides
+  // Tab 3 (Conditional): ModuleCarousel if Stage 2 has trainingModules / lessons / modules / pillars / slides
   if (stage2Norm.modules.length > 0) {
     tabs.push({
-      title: `🎓 Moduler (${stage2Norm.modules.length})`,
+      title: isNo
+        ? isAnalysis
+          ? `📊 Analyse-pilarer (${stage2Norm.modules.length})`
+          : `🎓 Moduler (${stage2Norm.modules.length})`
+        : isAnalysis
+          ? `📊 Deep-Dive Pillars (${stage2Norm.modules.length})`
+          : `🎓 Modules (${stage2Norm.modules.length})`,
       child: 'tab_modules',
     });
     components.push({
       id: 'tab_modules',
       component: 'ModuleCarousel',
-      title: 'Opplæringsmoduler & Leksjoner',
+      title: isNo
+        ? 'Opplæringsmoduler & Leksjoner'
+        : isAnalysis
+          ? 'Analytical Pillars & Valuation Deep-Dives'
+          : 'Training Modules & Lessons',
       modulesPath: '/stage2/modules',
       activeIndexPath: '/stage2/activeModuleIndex',
     });
   }
 
-  // Tab 4 (Conditional): CaseSimulator if Stage 2 has cases or boardActionItems
+  // Tab 4 (Conditional): CaseSimulator if Stage 2 has cases / scenarios / stressTests / boardActionItems
   if (stage2Norm.cases.length > 0) {
     tabs.push({
-      title: `⚖️ Case & Tiltak (${stage2Norm.cases.length})`,
+      title: isNo
+        ? `⚖️ Case & Tiltak (${stage2Norm.cases.length})`
+        : isAnalysis
+          ? `⚖️ Scenario Simulator (${stage2Norm.cases.length})`
+          : `⚖️ Cases & Actions (${stage2Norm.cases.length})`,
       child: 'tab_cases',
     });
     components.push({
       id: 'tab_cases',
       component: 'CaseSimulator',
-      title: 'Scenario- og vedtakssimulator',
+      title: isNo
+        ? 'Scenario- og vedtakssimulator'
+        : isAnalysis
+          ? 'Scenario & Decision Simulator'
+          : 'Case & Action Simulator',
       casesPath: '/stage2/cases',
       responsesPath: '/stage2/caseResponses',
     });
@@ -10328,21 +10992,23 @@ export function generateA2uiSurface(
   // Tab 5 (Conditional): QuizRunner if Stage 2 has quiz questions
   if (stage2Norm.quiz.length > 0) {
     tabs.push({
-      title: `🧪 Quiz (${stage2Norm.quiz.length})`,
+      title: isNo
+        ? `🧪 Quiz (${stage2Norm.quiz.length})`
+        : `🧪 Knowledge Check (${stage2Norm.quiz.length})`,
       child: 'tab_quiz',
     });
     components.push({
       id: 'tab_quiz',
       component: 'QuizRunner',
-      title: 'Interaktiv Kunnskapssjekk',
+      title: isNo ? 'Interaktiv Kunnskapssjekk' : 'Interactive Knowledge Check',
       questionsPath: '/stage2/quiz',
       answersPath: '/stage2/quizAnswers',
     });
   }
 
-  // Tab 6: OKF v0.2 Kunnskapsgrunnlag (`OkfMarkdown`)
+  // Tab 6: OKF v0.2 Knowledge Base (`OkfMarkdown`)
   tabs.push({
-    title: '📚 OKF v0.2 Kunnskapsgrunnlag',
+    title: isNo ? '📚 OKF v0.2 Kunnskapsgrunnlag' : '📚 OKF v0.2 Knowledge Base',
     child: 'tab_okf_markdown',
   });
   components.push({
@@ -10357,13 +11023,15 @@ export function generateA2uiSurface(
 
   // Tab 7: OKF Knowledge Graph (`OkfKnowledgeGraph`)
   tabs.push({
-    title: `🕸️ OKF Kunnskapsgraf (${graphNodes.length})`,
+    title: isNo
+      ? `🕸️ OKF Kunnskapsgraf (${graphNodes.length})`
+      : `🕸️ OKF Knowledge Graph (${graphNodes.length})`,
     child: 'tab_okf_graph',
   });
   components.push({
     id: 'tab_okf_graph',
     component: 'OkfKnowledgeGraph',
-    title: 'OKF v0.2 Kunnskapsgraf',
+    title: isNo ? 'OKF v0.2 Kunnskapsgraf' : 'OKF v0.2 Knowledge Graph',
   });
 
   // Root & Main Tabs Component
@@ -10396,15 +11064,19 @@ export function generateA2uiSurface(
   const dataModel = {
     meta: {
       runId: resolvedRunId || 'workspace',
+      lang: surfaceLang,
+      domainMode,
       title: stage2Norm.title,
       subtitle: stage2Norm.subtitle,
       targetAudience: stage2Norm.targetAudience,
       estimatedDuration: stage2Norm.estimatedDuration,
       model: meta.model || GEMINI_4_ARGON_MODEL,
       subtitleLine: [
-        stage2Norm.targetAudience ? `Målgruppe: ${stage2Norm.targetAudience}` : '',
-        formattedDuration ? `Varighet: ${formattedDuration}` : '',
-        `Modell: ${meta.model || GEMINI_4_ARGON_MODEL}`,
+        stage2Norm.targetAudience
+          ? `${isNo ? 'Målgruppe' : 'Target Audience'}: ${stage2Norm.targetAudience}`
+          : '',
+        formattedDuration ? `${isNo ? 'Varighet' : 'Duration'}: ${formattedDuration}` : '',
+        `${isNo ? 'Modell' : 'Model'}: ${meta.model || GEMINI_4_ARGON_MODEL}`,
         `Run: ${resolvedRunId || 'workspace'}`,
       ]
         .filter(Boolean)
@@ -10419,9 +11091,13 @@ export function generateA2uiSurface(
       statusBadge: `status: ${okfDoc.frontmatter.status || 'draft'}`,
       trustBadge: `trust: ${okfTrustTier}`,
       freshnessBadge: okfStale ? 'stale' : 'fresh',
-      sourcesBadge: `${okfSources.length} verifiserte kilder`,
+      sourcesBadge: isNo
+        ? `${okfSources.length} verifiserte kilder`
+        : `${okfSources.length} verified sources`,
       sources: okfSources,
-      body: okfDoc.body || '*Ingen Stage 1 OKF-kropp funnet.*',
+      body:
+        okfDoc.body ||
+        (isNo ? '*Ingen Stage 1 OKF-kropp funnet.*' : '*No Stage 1 OKF body found.*'),
       editMode: false,
     },
     checklist: {
@@ -10430,13 +11106,15 @@ export function generateA2uiSurface(
       completedCount: completedChecklistCount,
       totalCount: totalChecklistItems,
       percent: checklistPct,
-      summaryText: `${completedChecklistCount} / ${totalChecklistItems} fullført (${checklistPct}%)`,
+      summaryText: `${completedChecklistCount} / ${totalChecklistItems} ${isNo ? 'fullført' : 'completed'} (${checklistPct}%)`,
     },
     stage2: {
       scriptBody:
         stage2Norm.scriptBody ||
         okfDoc.frontmatter.description ||
-        'Ingen Stage 2-manustekst generert ennå.',
+        (isNo
+          ? 'Ingen Stage 2-manustekst generert ennå.'
+          : 'No Stage 2 synthesis text generated yet.'),
       highlights: stage2Norm.highlights,
       highlightsObjects: stage2Norm.highlights.map((h, idx) => ({
         id: `hl_${idx + 1}`,
@@ -10534,7 +11212,7 @@ export function generateA2uiSurface(
   };
 
   const html = `<!DOCTYPE html>
-<html lang="no">
+<html lang="${surfaceLang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -10553,7 +11231,7 @@ ${A2UI_STUDIO_CSS}
   </div>
   <div class="a2ui-topbar-actions">
     <button class="a2ui-top-btn" id="a2ui-open-inspector">🔍 A2UI Surface &amp; Data Model Inspector</button>
-    <button class="a2ui-top-btn" id="a2ui-export-json">⬇ Eksporter A2UI Tilstand (.json)</button>
+    <button class="a2ui-top-btn" id="a2ui-export-json">${isNo ? '⬇ Eksporter A2UI Tilstand (.json)' : '⬇ Export A2UI State (.json)'}</button>
   </div>
 </header>
 
@@ -10562,8 +11240,8 @@ ${A2UI_STUDIO_CSS}
 <div class="a2ui-modal-backdrop" id="a2ui-inspector-modal" hidden>
   <div class="a2ui-modal-dialog">
     <div class="a2ui-modal-header">
-      <strong>A2UI v0.9.1 Deklarativ Surface, Data Model &amp; Action Log</strong>
-      <button class="a2ui-btn" id="a2ui-close-inspector">Lukk</button>
+      <strong>${isNo ? 'A2UI v0.9.1 Deklarativ Surface, Data Model &amp; Action Log' : 'A2UI v0.9.1 Declarative Surface, Data Model &amp; Action Log'}</strong>
+      <button class="a2ui-btn" id="a2ui-close-inspector">${isNo ? 'Lukk' : 'Close'}</button>
     </div>
     <div class="a2ui-modal-body">
       <pre id="a2ui-inspector-content" style="background:#0f172a;color:#e2e8f0;padding:14px;border-radius:8px;font-size:12px;overflow-x:auto;margin:0"></pre>
@@ -11550,6 +12228,250 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     );
   } finally {
     fs.rmSync(tmpDotEnvDir, { recursive: true, force: true });
+  }
+
+  // Issue 1 Self-Test: Analytical / decision pipeline Stage 2 schema normalization (no quiz fields) + domainMode detection
+  const analyticalStage2Payload = {
+    reportTitle: 'SpaceX Institutional Equity Valuation',
+    verdict: 'Buy / Accumulate',
+    readingTimeMinutes: 35,
+    investmentThesis: 'Core SOTP valuation thesis driven by Starlink cash flows and Starship cadence.',
+    thesisPoints: [
+      'Starlink EBITDA inflection exceeds $10B annualized run-rate.',
+      'Starship v3 lowers marginal payload cost per kg by >70%.',
+    ],
+    pillars: [
+      {
+        pillarNumber: 1,
+        pillarTitle: 'Starlink Unit Economics',
+        analyticalFramework: 'DCF & Subscriber Cohort Model',
+        durationMinutes: 15,
+        analysis: 'Detailed analysis of ROIC and terminal bandwidth capacity.',
+        keyPoints: ['Residential ARPU stability', 'Aviation & Maritime enterprise attach rate'],
+        recommendation: 'Monitor ARPU expansion and Direct-to-Cell spectrum ramp.',
+        caseScenario: 'Bear-case LEO congestion cap in high-density cells.',
+        mitigation: 'Deploy v3 satellites with 1 Tbps laser backhaul.',
+      },
+    ],
+    stressTests: [
+      {
+        title: 'Starship FAA Launch Cadence Delay',
+        scenario: '12-month environmental review delay at Starbase.',
+        recommendedAction: 'Shift commercial manifest to Falcon 9 pads LC-39A and SLC-40.',
+        legalRef: 'FAA Part 450',
+      },
+    ],
+  };
+  const analyticalNorm = normalizeStage2ForA2ui(analyticalStage2Payload, 'Fallback');
+  const detectedAnalyticalMode = detectIcmDomainMode(
+    analyticalStage2Payload,
+    analyticalNorm.quiz.length,
+    `${analyticalNorm.title} ${analyticalNorm.scriptBody}`
+  );
+  const detectedCourseMode = detectIcmDomainMode(
+    { trainingModules: [{ title: 'M1' }] },
+    2,
+    'Kurs i brannvern og opplæring'
+  );
+  assert(
+    analyticalNorm.title === 'SpaceX Institutional Equity Valuation' &&
+      analyticalNorm.targetAudience === 'Buy / Accumulate' &&
+      analyticalNorm.estimatedDuration === '35 min' &&
+      analyticalNorm.scriptBody.includes('Core SOTP valuation thesis') &&
+      analyticalNorm.highlights.length === 2 &&
+      analyticalNorm.modules.length === 1 &&
+      analyticalNorm.modules[0].title === 'Starlink Unit Economics' &&
+      analyticalNorm.modules[0].subtitleOrBasis === 'DCF & Subscriber Cohort Model' &&
+      analyticalNorm.modules[0].narration.includes('Detailed analysis of ROIC') &&
+      analyticalNorm.modules[0].actionItem.includes('Monitor ARPU expansion') &&
+      analyticalNorm.cases.length === 2 &&
+      analyticalNorm.cases[0].title === 'Starlink Unit Economics' &&
+      analyticalNorm.cases[0].recommendedAction === 'Deploy v3 satellites with 1 Tbps laser backhaul.' &&
+      analyticalNorm.cases[1].title === 'Starship FAA Launch Cadence Delay' &&
+      analyticalNorm.quiz.length === 0 &&
+      detectedAnalyticalMode === 'analysis' &&
+      detectedCourseMode === 'course',
+    `normalizeStage2ForA2ui maps analytical/decision schema aliases cleanly with 0 quizzes and detectIcmDomainMode distinguishes 'analysis' vs 'course'`
+  );
+
+  // Issue 2 Self-Test: Guard inline LaTeX $...$ against currency $ pairs ($800.0B ... ~$420.00) and Markdown table pipes (|)
+  const currencyChecklistLine =
+    'Verify December 2025 tender at $800.0B valuation (~$420.00/sh pre-split) and $150 billion to $180 billion Starlink SOTP [^ebc-valuation-800b-2025]';
+  const expectedCurrencyChecklist =
+    'Verify December 2025 tender at $800.0B valuation (~$420.00/sh pre-split) and $150 billion to $180 billion Starlink SOTP';
+  const serverCurrencyChk = cleanChecklistLabel(currencyChecklistLine);
+  const clientCurrencyChk = studioHooks.cleanClientChecklistLabel(currencyChecklistLine);
+  assert(
+    serverCurrencyChk === expectedCurrencyChecklist &&
+      clientCurrencyChk === expectedCurrencyChecklist,
+    `cleanChecklistLabel and cleanClientChecklistLabel preserve currency $ figures ($800.0B, ~$420.00/sh, $150 billion to $180 billion) without stripping $ or ~ (got server="${serverCurrencyChk}", client="${clientCurrencyChk}")`
+  );
+
+  const mixedCurrencyAndMathLine =
+    'At $65.00–$75.00 per share, verify compartment area > $800\\text{ m}^2$ and ARPU $\\ge$ $68/month';
+  const expectedMixedChecklist =
+    'At $65.00–$75.00 per share, verify compartment area > 800 m² and ARPU ≥ $68/month';
+  const serverMixedChk = cleanChecklistLabel(mixedCurrencyAndMathLine);
+  const clientMixedChk = studioHooks.cleanClientChecklistLabel(mixedCurrencyAndMathLine);
+  assert(
+    serverMixedChk === expectedMixedChecklist && clientMixedChk === expectedMixedChecklist,
+    `cleanChecklistLabel and cleanClientChecklistLabel preserve currency $ earlier on a line while still converting valid inline math ($800\\text{ m}^2$ -> 800 m², $\\ge$ -> ≥) later on the same line (got server="${serverMixedChk}", client="${clientMixedChk}")`
+  );
+
+  const currencyTableMd = [
+    '# SpaceX Institutional Valuation',
+    '',
+    '| Transaction Date | Implied Valuation | Share Price | Multiple |',
+    '| :--- | :--- | :--- | :--- |',
+    '| **Dec 2025 Tender** | **$800.0B**[^ebc-valuation-800b-2025] | ~$420.00 (Pre-Split)[^ebc-valuation-800b-2025] | 31.7x |',
+    '| **Starlink SOTP** | $150 billion to $180 billion | $185/sh to $212/sh | $65.00–$75.00 |',
+    '',
+    'At $65.00 per share, area is $800\\text{ m}^2$ and ARPU $\\ge$ $68/month.',
+  ].join('\n');
+  const formattedTableA2ui = String(studioHooks.formatInlineLatexAndFootnotes(currencyTableMd, []));
+  const renderedTableViz = String(
+    vizHooks.renderMarkdownWithOkfFootnotes(currencyTableMd, [
+      { id: 'ebc-valuation-800b-2025', title: 'SpaceX Tender Offer 2025', resource: 'https://example.com/spacex' },
+    ])
+  );
+  assert(
+    formattedTableA2ui.includes('**$800.0B**') &&
+      formattedTableA2ui.includes('~$420.00 (Pre-Split)') &&
+      formattedTableA2ui.includes('$150 billion to $180 billion') &&
+      formattedTableA2ui.includes('$185/sh to $212/sh') &&
+      formattedTableA2ui.includes('$65.00–$75.00') &&
+      formattedTableA2ui.includes('$65.00 per share') &&
+      formattedTableA2ui.includes('800 m²') &&
+      formattedTableA2ui.includes('≥ $68/month') &&
+      !formattedTableA2ui.includes('<code>') &&
+      renderedTableViz.includes('**$800.0B**') &&
+      renderedTableViz.includes('~$420.00 (Pre-Split)') &&
+      renderedTableViz.includes('$150 billion to $180 billion') &&
+      renderedTableViz.includes('$185/sh to $212/sh') &&
+      renderedTableViz.includes('$65.00–$75.00') &&
+      renderedTableViz.includes('800 m²') &&
+      renderedTableViz.includes('≥ $68/month') &&
+      !renderedTableViz.includes('<code>800') &&
+      !renderedTableViz.includes('<code>|') &&
+      !renderedTableViz.includes('<code>[^'),
+    `formatInlineLatexAndFootnotes and renderMarkdownWithOkfFootnotes preserve currency $ and ~$ across Markdown table pipes (|) without injecting <code> while converting valid inline math`
+  );
+
+  // Issue 3 & Issue 4 Self-Test: TTS language detection ("for" false positive fix), English/Analytical vs Norwegian/Course A2UI localization, and Verified Source graph nodes in standalone viz.html
+  assert(
+    typeof studioHooks.detectSpeechLang === 'function' &&
+      studioHooks.detectSpeechLang(
+        'The valuation for SpaceX is $800B for institutional investors with strong free cash flow for 2026.'
+      ) === 'en-US' &&
+      studioHooks.detectSpeechLang(
+        'Styret og brannvernleder har ansvar for systematisk sikkerhetsarbeid i virksomheten.'
+      ) === 'nb-NO' &&
+      detectIcmLanguage('SpaceX institutional equity valuation for 2026 IPO readiness.') === 'en' &&
+      detectIcmLanguage('Systematisk brannforebyggende arbeid og kontroll i næringsbygg.') === 'no',
+    'detectSpeechLang and detectIcmLanguage accurately classify English text containing "for" as en-US/en and Norwegian text as nb-NO/no'
+  );
+
+  const tmpAuditDir = path.resolve(`./workspace/runs/_audit_i18n_viz_test_${Date.now()}`);
+  fs.mkdirSync(tmpAuditDir, { recursive: true });
+  try {
+    const enBundleRoot = path.join(tmpAuditDir, 'bundle');
+    const enResearchDir = path.join(enBundleRoot, 'research');
+    const enRunId = 'spacex-test-run';
+    const enStage1OutDir = path.join(tmpAuditDir, 'runs', enRunId, 'stages', '01_research', 'output');
+    const enStage2OutDir = path.join(tmpAuditDir, 'runs', enRunId, 'stages', '02_script', 'output');
+    fs.mkdirSync(enResearchDir, { recursive: true });
+    fs.mkdirSync(enStage1OutDir, { recursive: true });
+    fs.mkdirSync(enStage2OutDir, { recursive: true });
+
+    const enOkfMarkdown = [
+      '---',
+      'type: Equity Research Report',
+      'title: SpaceX Institutional Equity Valuation',
+      'description: Institutional sum-of-the-parts valuation for SpaceX.',
+      'status: stable',
+      'generated:',
+      '  model: gemini-4-argon',
+      '  timestamp: 2026-11-01T10:00:00Z',
+      'verified:',
+      '  - by: human:analyst',
+      '    timestamp: 2026-11-01T11:00:00Z',
+      'stale_after: 2027-11-01T00:00:00Z',
+      'links_to:',
+      '  - research/starlink-sotp',
+      '  - research/starship-economics',
+      'sources:',
+      '  - id: ebc-valuation-800b-2025',
+      '    title: SpaceX Secondary Tender Offer Valuation ($800B)',
+      '    url: https://example.com/spacex-800b',
+      '    retrieved_at: 2026-11-01T10:00:00Z',
+      '  - id: fcc-gen2-starlink',
+      '    title: FCC Gen2 Starlink Orbital Modification Order',
+      '    url: https://example.com/fcc-gen2',
+      '    retrieved_at: 2026-11-01T10:00:00Z',
+      '---',
+      '# SpaceX Institutional Equity Valuation',
+      '',
+      'Valuation cleared at **$800.0B** (~$420.00/sh)[^ebc-valuation-800b-2025] with FCC Gen2 authorization[^fcc-gen2-starlink].',
+      '',
+      'See related concepts [Starlink SOTP](/research/starlink-sotp.md) and [Starship Economics](/research/starship-economics.md).',
+      '',
+      '## Due Diligence Verification Checklist',
+      '- [ ] Verify secondary tender offer valuation at $800.0B (~$420.00/sh)[^ebc-valuation-800b-2025]',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(enResearchDir, `${enRunId}.md`), enOkfMarkdown, 'utf-8');
+    fs.writeFileSync(path.join(enStage1OutDir, 'research_summary.md'), enOkfMarkdown, 'utf-8');
+    fs.writeFileSync(
+      path.join(enStage2OutDir, 'script_draft.json'),
+      JSON.stringify(analyticalStage2Payload, null, 2),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(tmpAuditDir, 'runs', enRunId, 'meta.json'),
+      JSON.stringify({ runId: enRunId, model: GEMINI_4_ARGON_MODEL }, null, 2),
+      'utf-8'
+    );
+
+    const enVizResult = generateBundleVisualization(enBundleRoot);
+    const enVizHtml = fs.readFileSync(enVizResult.outputPath, 'utf-8');
+    assert(
+      enVizResult.concepts === 1 &&
+        enVizResult.nodes === 3 &&
+        enVizResult.edges === 2 &&
+        enVizHtml.includes('"group":"source"') &&
+        enVizHtml.includes('"type":"Verified Source"') &&
+        enVizHtml.includes('"color":"#10b981"') &&
+        enVizHtml.includes('"label":"cites"') &&
+        enVizHtml.includes('viz-source-back-btn'),
+      `generateBundleVisualization expands c.sources into Verified Source nodes (#10b981) and cites edges (expected 3 nodes / 2 edges, got ${enVizResult.nodes} nodes / ${enVizResult.edges} edges)`
+    );
+
+    const enA2uiResult = generateA2uiSurface({
+      workspaceRoot: tmpAuditDir,
+      runId: enRunId,
+    });
+    const enA2uiHtml = fs.readFileSync(enA2uiResult.htmlOutputPath, 'utf-8');
+    assert(
+      enA2uiResult.quizCount === 0 &&
+        enA2uiResult.tabCount === 6 &&
+        enA2uiHtml.includes('<html lang="en">') &&
+        enA2uiHtml.includes('📋 Executive Summary') &&
+        enA2uiHtml.includes('📊 Deep-Dive Pillars (1)') &&
+        enA2uiHtml.includes('⚖️ Scenario Simulator (2)') &&
+        enA2uiHtml.includes('📚 OKF v0.2 Knowledge Base') &&
+        enA2uiHtml.includes('🕸️ OKF Knowledge Graph (5)') &&
+        enA2uiHtml.includes('2 verified sources') &&
+        enA2uiHtml.includes('Target Audience: Buy / Accumulate') &&
+        enA2uiHtml.includes('⬇ Export A2UI State (.json)') &&
+        !enA2uiHtml.includes('🧪') &&
+        !enA2uiHtml.includes('Oversikt & Sammendrag') &&
+        !enA2uiHtml.includes('verifiserte kilder') &&
+        !enA2uiHtml.includes('Målgruppe:') &&
+        !enA2uiHtml.includes('Eksporter A2UI Tilstand'),
+      `generateA2uiSurface renders 100% English analytical UI chrome with 6 tabs (no Quiz tab) and 0 leaked Norwegian labels`
+    );
+  } finally {
+    fs.rmSync(tmpAuditDir, { recursive: true, force: true });
   }
 
   console.log(`[ICM Self-Test] ✅ All ${assertions} assertions passed (0 tokens, including tsc --noEmit).`);
