@@ -892,16 +892,96 @@ function normalizeIsoTimestamp(val: any): string {
 
 // Helper function to extract the destination URL (and opportunistic Last-Modified header) from Vertex AI Search grounding 302 redirects.
 // Uses `redirect: 'manual'` first so we read Google's `Location` header directly in ~100ms without
+function extractHtmlTitleFromSnippet(htmlSnippet: string): string | undefined {
+  if (!htmlSnippet || typeof htmlSnippet !== 'string') return undefined;
+  const decodeEntities = (raw: string): string =>
+    raw
+      .replace(/&amp;/gi, '&')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&ndash;|&#8211;/gi, '–')
+      .replace(/&mdash;|&#8212;/gi, '—')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
+      .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
+      .replace(/\s+/g, ' ')
+      .replace(/\s*(?:\||—|–|-)\s*(?:YouTube|Reddit|Quora|Instagram|Facebook|X|Twitter|LinkedIn|Medium)\s*$/i, '')
+      .trim();
+
+  const isInvalidOrBotTitle = (t: string): boolean =>
+    t.length < 4 ||
+    /^(?:just a moment|access denied|attention required|403 forbidden|404 not found|redirecting|error|page not found|verify you are human|security check)/i.test(
+      t
+    ) ||
+    isBareDomainTitle(t);
+
+  const clampLen = (t: string): string =>
+    t.length > 180 ? `${t.slice(0, 177).trimEnd()}…` : t;
+
+  const ogMatch =
+    htmlSnippet.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
+    htmlSnippet.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i);
+  if (ogMatch && ogMatch[1]) {
+    const cleaned = decodeEntities(ogMatch[1]);
+    if (!isInvalidOrBotTitle(cleaned)) {
+      return clampLen(cleaned);
+    }
+  }
+  const titleMatch = htmlSnippet.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (titleMatch && titleMatch[1]) {
+    const cleaned = decodeEntities(titleMatch[1]);
+    if (!isInvalidOrBotTitle(cleaned)) {
+      return clampLen(cleaned);
+    }
+  }
+  return undefined;
+}
+
 // failing or timing out when a third-party destination server is unreachable.
 async function resolveRedirect(
   url: string
-): Promise<{ url: string; lastModified?: string }> {
+): Promise<{ url: string; lastModified?: string; pageTitle?: string }> {
   const headers = {
     'User-Agent':
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   };
   const isNonErrorStatus = (res: any): boolean =>
     res?.status === undefined || (typeof res.status === 'number' && res.status >= 200 && res.status < 400);
+
+  const readTitleFromRes = async (res: any): Promise<string | undefined> => {
+    const contentType = String(res?.headers?.get?.('content-type') || '').toLowerCase();
+    if (!isNonErrorStatus(res) || (contentType && !contentType.includes('text/html'))) {
+      return undefined;
+    }
+    try {
+      if (typeof res?.body?.getReader === 'function') {
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let totalBytes = 0;
+        while (totalBytes < 16384) {
+          const { done, value } = await reader.read();
+          if (done || !value) break;
+          chunks.push(value);
+          totalBytes += value.byteLength;
+          const partialStr = Buffer.concat(chunks).toString('utf8');
+          if (/<\/title>/i.test(partialStr) || /<\/head>/i.test(partialStr)) {
+            break;
+          }
+        }
+        await reader.cancel().catch(() => {});
+        if (chunks.length > 0) {
+          return extractHtmlTitleFromSnippet(Buffer.concat(chunks).toString('utf8'));
+        }
+      } else if (typeof res?.text === 'function' && !res?.body) {
+        const txt = await res.text();
+        return extractHtmlTitleFromSnippet(String(txt || '').slice(0, 16384));
+      }
+    } catch {
+      // Ignore stream read errors when opportunistically extracting <title>
+    }
+    return undefined;
+  };
 
   try {
     const manualRes = await globalThis.fetch(url, {
@@ -910,32 +990,47 @@ async function resolveRedirect(
       signal: AbortSignal.timeout(5000),
       headers,
     });
-    await manualRes.body?.cancel().catch(() => {});
     let lastModified = isNonErrorStatus(manualRes)
       ? parseHttpLastModified(manualRes.headers?.get?.('last-modified'))
       : undefined;
     const location = manualRes.headers?.get?.('location');
     if (location && /^https?:\/\//i.test(location)) {
-      if (!lastModified) {
+      await manualRes.body?.cancel().catch(() => {});
+      let pageTitle: string | undefined;
+      let finalLocation = location;
+      if (!isLowSignalGroundingUrl(location)) {
         try {
-          const headRes = await globalThis.fetch(location, {
-            method: 'HEAD',
+          const destRes = await globalThis.fetch(location, {
+            method: 'GET',
             redirect: 'follow',
-            signal: AbortSignal.timeout(1500),
-            headers,
+            signal: AbortSignal.timeout(2000),
+            headers: {
+              ...headers,
+              Range: 'bytes=0-16383',
+            },
           });
-          await headRes?.body?.cancel().catch(() => {});
-          if (isNonErrorStatus(headRes)) {
-            lastModified = parseHttpLastModified(headRes?.headers?.get?.('last-modified'));
+          if (destRes?.url && /^https?:\/\//i.test(destRes.url)) {
+            finalLocation = destRes.url;
           }
+          if (!lastModified && isNonErrorStatus(destRes)) {
+            lastModified = parseHttpLastModified(destRes?.headers?.get?.('last-modified'));
+          }
+          pageTitle = await readTitleFromRes(destRes);
+          await destRes?.body?.cancel().catch(() => {});
         } catch {
-          // Ignore unreachable third-party servers or unsupported HEAD checks
+          // Ignore unreachable third-party servers or timeout during opportunistic title/header check
         }
       }
-      return { url: location, lastModified };
+      return { url: finalLocation, lastModified, ...(pageTitle ? { pageTitle } : {}) };
     }
-    if (lastModified) {
-      return { url: manualRes.url || url, lastModified };
+    const directPageTitle = await readTitleFromRes(manualRes);
+    await manualRes.body?.cancel().catch(() => {});
+    if (lastModified || directPageTitle) {
+      return {
+        url: manualRes.url || url,
+        lastModified,
+        ...(directPageTitle ? { pageTitle: directPageTitle } : {}),
+      };
     }
   } catch {
     // Fall through to follow mode if manual hop check fails
@@ -948,11 +1043,12 @@ async function resolveRedirect(
       signal: AbortSignal.timeout(6000),
       headers,
     });
+    const pageTitle = await readTitleFromRes(followRes);
     await followRes.body?.cancel().catch(() => {});
     const lastModified = isNonErrorStatus(followRes)
       ? parseHttpLastModified(followRes.headers?.get?.('last-modified'))
       : undefined;
-    return { url: followRes.url || url, lastModified };
+    return { url: followRes.url || url, lastModified, ...(pageTitle ? { pageTitle } : {}) };
   } catch {
     return { url };
   }
@@ -968,6 +1064,7 @@ export interface OKFActorEvent {
 export interface OKFSource {
   id?: string;
   resource: string;
+  url?: string;
   title?: string;
   retrieved_at?: string;
   last_modified?: string;
@@ -1948,23 +2045,143 @@ export interface CleanGroundingOptions {
   bundleRoot?: string;
 }
 
+const LOW_SIGNAL_GROUNDING_DOMAINS = new Set([
+  'quora.com',
+  'reddit.com',
+  'old.reddit.com',
+  'instagram.com',
+  'facebook.com',
+  'tiktok.com',
+  'pinterest.com',
+  'x.com',
+  'twitter.com',
+  'threads.net',
+  'edubirdie.com',
+  'gradesfixer.com',
+  'bartleby.com',
+  'studymode.com',
+  'ukessays.com',
+  'studocu.com',
+  'coursehero.com',
+  'chegg.com',
+  'scribd.com',
+  'issuu.com',
+  'bandladder.com',
+  'vocal.media',
+]);
+
+export function isLowSignalGroundingUrl(url?: string): boolean {
+  const clean = String(url || '').trim();
+  if (!/^https?:\/\//i.test(clean)) return false;
+  try {
+    const host = new URL(clean).hostname.toLowerCase().replace(/^www\./, '');
+    if (LOW_SIGNAL_GROUNDING_DOMAINS.has(host)) return true;
+    for (const domain of LOW_SIGNAL_GROUNDING_DOMAINS) {
+      if (host.endsWith(`.${domain}`)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isAutoLowSignalSourceEntry(s: OKFSource): boolean {
+  const srcUrl = s ? String(s.resource || s.url || '').trim() : '';
+  if (!s || !isLowSignalGroundingUrl(srcUrl)) return false;
+  const id = String(s.id || '').trim();
+  const title = String(s.title || '').trim();
+  if (
+    /^(?:src|quora|reddit|old-reddit|instagram|facebook|tiktok|pinterest|x|twitter|threads|edubirdie|gradesfixer|bartleby|studymode|ukessays|studocu|coursehero|chegg|scribd|issuu|bandladder|vocal)(?:-(?:com|org|net|media))?(?:-\d+)?$/i.test(
+      id
+    )
+  ) {
+    return true;
+  }
+  if (!title || isBareDomainTitle(title) || isAutoDomainSlugTitle(title)) {
+    return true;
+  }
+  return false;
+}
+
+export function stripFootnotesPreservingWordBoundaries(text: string): string {
+  return String(text || '').replace(
+    /(?:\[\^[^\r\n\]]+\][ \t]*)+/g,
+    (match: string, offset: number, str: string) => {
+      const beforeChar = offset > 0 ? str[offset - 1] : '';
+      const afterIdx = offset + match.length;
+      const afterChar = afterIdx < str.length ? str[afterIdx] : '';
+      if (
+        beforeChar &&
+        afterChar &&
+        /[\p{L}\p{N}]/u.test(beforeChar) &&
+        /[\p{L}\p{N}]/u.test(afterChar)
+      ) {
+        return ' ';
+      }
+      if (/[ \t]$/.test(match) && beforeChar && !/\s/.test(beforeChar) && afterChar && !/\s/.test(afterChar)) {
+        return ' ';
+      }
+      return '';
+    }
+  );
+}
+
+function removeSpecificFootnotePreservingBoundary(text: string, fnId: string): string {
+  const escaped = fnId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\[\\^${escaped}\\]`, 'g');
+  return text.replace(re, (match: string, offset: number, str: string) => {
+    const beforeChar = offset > 0 ? str[offset - 1] : '';
+    const afterIdx = offset + match.length;
+    const afterChar = afterIdx < str.length ? str[afterIdx] : '';
+    if (
+      beforeChar &&
+      afterChar &&
+      /[\p{L}\p{N}]/u.test(beforeChar) &&
+      /[\p{L}\p{N}]/u.test(afterChar)
+    ) {
+      return ' ';
+    }
+    return '';
+  });
+}
+
 function isBareDomainTitle(title?: string): boolean {
   const t = String(title || '').trim();
   if (!t) return true;
   if (/^(?:https?:\/\/)?(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}\/?$/i.test(t)) {
     return true;
   }
-  if (/\s+[—–-]\s+(?:id\d+|\w*servlet)$/i.test(t)) {
+  if (
+    /^(?:id\d+|\w*servlet|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|paperinformation|index|default)$/i.test(
+      t
+    )
+  ) {
     return true;
   }
-  const autoSlugMatch = t.match(/^[a-z0-9.-]+\.[a-z]{2,}\s+—\s+(.+)$/i);
+  if (
+    /\s+[—–-]\s+(?:id\d+|\w*servlet|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|paperinformation)$/i.test(
+      t
+    )
+  ) {
+    return true;
+  }
+  const autoSlugMatch = t.match(/^[a-z0-9.-]+\.[a-z]{2,}\s+[—–-]\s+(.+)$/i);
   if (autoSlugMatch) {
     const slugPart = autoSlugMatch[1].trim();
     if (
       slugPart.length <= 1 ||
       /^(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)\s+\d/i.test(slugPart) ||
       /^[^\p{L}]+[\p{Ll}]/u.test(slugPart) ||
-      /^(?:id\d+|\w*servlet)$/i.test(slugPart)
+      /^\d{4}\.\d{4,5}(?:v\d+)?$/i.test(slugPart) ||
+      /^(?:id\d+|\w*servlet|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|paperinformation)$/i.test(
+        slugPart
+      ) ||
+      (!/[\s_-]/.test(slugPart) &&
+        slugPart.length >= 6 &&
+        slugPart.length <= 16 &&
+        /[A-Z]/.test(slugPart) &&
+        /[a-z]/.test(slugPart) &&
+        (/\d/.test(slugPart) || /[a-z][A-Z]/.test(slugPart)))
     ) {
       return true;
     }
@@ -1990,6 +2207,14 @@ export function enrichBareDomainSourceTitle(
     const domain = domainPrefixMatch
       ? domainPrefixMatch[1].replace(/^www\./i, '')
       : parsed.hostname.replace(/^www\./i, '');
+
+    if (/^(?:export\.)?arxiv\.org$/i.test(domain)) {
+      const arxivMatch = parsed.pathname.match(/(\d{4}\.\d{4,5}(?:v\d+)?)/i);
+      if (arxivMatch) {
+        return `arxiv.org — arXiv:${arxivMatch[1].replace(/V(\d+)$/, 'v$1')}`;
+      }
+    }
+
     const rawSegments = parsed.pathname
       .split('/')
       .map((s) => {
@@ -2009,7 +2234,7 @@ export function enrichBareDomainSourceTitle(
     const isOpaqueOrBucket = (seg: string): boolean => {
       const noExt = seg.replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
       if (
-        /^(?:_f|p\d+|no|nb|nn|en|wiki|globalassets|contentassets|wp-content|uploads|dyn)$/i.test(
+        /^(?:_f|p\d+|no|nb|nn|en|wiki|globalassets|contentassets|wp-content|uploads|dyn|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|reel|p|tv)$/i.test(
           noExt
         )
       ) {
@@ -2021,33 +2246,61 @@ export function enrichBareDomainSourceTitle(
       if (/^[a-z]$/i.test(noExt) || /^(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)$/i.test(noExt)) {
         return true;
       }
-      if (/^i?[0-9a-f]{8,}(?:-[0-9a-f]{4,})*$/i.test(noExt) && /\d/.test(noExt)) {
+      if (
+        (/^i\d{6,}$/i.test(noExt) ||
+          (/^[0-9a-f]{8,}(?:-[0-9a-f]{4,})*$/i.test(noExt) && /[a-f]/i.test(noExt))) &&
+        /\d/.test(noExt)
+      ) {
+        return true;
+      }
+      if (
+        !/[\s_-]/.test(noExt) &&
+        noExt.length >= 6 &&
+        noExt.length <= 16 &&
+        /[A-Z]/.test(noExt) &&
+        /[a-z]/.test(noExt) &&
+        (/\d/.test(noExt) || /[a-z][A-Z]/.test(noExt))
+      ) {
         return true;
       }
       return false;
     };
 
-    const meaningful = rawSegments.filter((s) => !isOpaqueOrBucket(s));
+    const stripExt = (seg: string): string =>
+      seg.replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
+
+    const filteredSegments = rawSegments.filter((s) => !isOpaqueOrBucket(s));
+    const meaningful: string[] = [];
+    for (const seg of filteredSegments) {
+      if (
+        meaningful.length > 0 &&
+        stripExt(meaningful[meaningful.length - 1]).toLowerCase() === stripExt(seg).toLowerCase()
+      ) {
+        continue;
+      }
+      meaningful.push(seg);
+    }
+
     if (meaningful.length === 0) {
       return domain || cleanTitle;
     }
 
     if (
       meaningful.length >= 2 &&
-      meaningful[meaningful.length - 1].replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '') === '1' &&
+      stripExt(meaningful[meaningful.length - 1]) === '1' &&
       /\d/.test(meaningful[meaningful.length - 2])
     ) {
       meaningful.pop();
     }
 
-    const stripExt = (seg: string): string =>
-      seg.replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
-
     const lastSeg = stripExt(meaningful[meaningful.length - 1]);
     const prevSeg = meaningful.length >= 2 ? stripExt(meaningful[meaningful.length - 2]) : '';
 
     let chosenSlug = lastSeg;
-    if (prevSeg && /^[0-9-]+$/.test(lastSeg)) {
+    if (/^paperinformation$/i.test(lastSeg)) {
+      const paperId = parsed.searchParams.get('paperid') || parsed.searchParams.get('id');
+      chosenSlug = paperId ? `Paper ${paperId}` : 'Journal Paper';
+    } else if (prevSeg && /^[0-9-]+$/.test(lastSeg)) {
       let alphaIdx = -1;
       for (let k = meaningful.length - 2; k >= 0; k--) {
         if (/[\p{L}]/u.test(stripExt(meaningful[k]))) {
@@ -2269,10 +2522,11 @@ export function stripTrailingEmptyCitationSection(prose: string): string {
 
 /**
  * Self-heals an OKF v0.2 document in-place by:
- * 1. Enriching any bare-domain or CMS-polluted (`Id87138`, `ResourceServlet`) source titles in `doc.frontmatter.sources`.
+ * 1. Enriching any bare-domain or CMS-polluted (`Id87138`, `ResourceServlet`, `Downloads`) source titles in `doc.frontmatter.sources`.
  * 2. Deduplicating `doc.frontmatter.sources` that share an identical `resource` URL and rewriting alias `[^id]` citations.
- * 3. Resolving any orphan `[^id]` citations in `doc.body` against `doc.frontmatter.sources` (or stripping ungrounded orphans).
- * 4. Synchronizing the bottom `[^id]: Title` footnote definitions so `citedFootnoteIds.size === doc.frontmatter.sources.length`.
+ * 3. Filtering auto-injected low-signal social/forum/essay-mill grounding sources (`quora.com`, `reddit.com`, `instagram.com`, `edubirdie.com`, `vocal.media`) when authoritative sources exist.
+ * 4. Resolving any orphan `[^id]` citations in `doc.body` against `doc.frontmatter.sources` (or stripping ungrounded orphans without concatenating adjacent words).
+ * 5. Synchronizing the bottom `[^id]: Title` footnote definitions so `citedFootnoteIds.size === doc.frontmatter.sources.length`.
  */
 export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
   if (!doc || !doc.frontmatter) return false;
@@ -2288,6 +2542,11 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
 
   for (const s of rawSources) {
     if (!s || typeof s !== 'object') continue;
+    if (!s.resource && typeof s.url === 'string') {
+      s.resource = s.url.trim();
+      delete s.url;
+      modified = true;
+    }
     const rawCandidateTitle = s.title;
     const enrichedTitle = s.resource
       ? enrichBareDomainSourceTitle(s.title, String(s.resource))
@@ -2312,6 +2571,20 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
       if (resKey) canonicalByUrl.set(resKey, s);
       dedupedSources.push(s);
     }
+  }
+
+  // Filter auto-generated low-signal grounding sources when authoritative sources are present
+  const authoritativeSources = dedupedSources.filter((s) => !isAutoLowSignalSourceEntry(s));
+  const filteredLowSignalIds = new Set<string>();
+  if (authoritativeSources.length >= 1 && authoritativeSources.length < dedupedSources.length) {
+    for (const s of dedupedSources) {
+      if (isAutoLowSignalSourceEntry(s) && s.id) {
+        filteredLowSignalIds.add(s.id);
+      }
+    }
+    dedupedSources.length = 0;
+    dedupedSources.push(...authoritativeSources);
+    modified = true;
   }
 
   // 2. Separate body prose from bottom `[^id]: label` definitions
@@ -2357,11 +2630,13 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
   );
   for (const fnId of inlineFnIds) {
     if (!validSourceById.has(fnId)) {
-      const matched = matchOrphanFootnoteToSource(fnId, existingDefs.get(fnId), dedupedSources);
+      const matched = filteredLowSignalIds.has(fnId)
+        ? null
+        : matchOrphanFootnoteToSource(fnId, existingDefs.get(fnId), dedupedSources);
       if (matched && matched.id) {
         proseText = proseText.replaceAll(`[^${fnId}]`, `[^${matched.id}]`);
       } else {
-        proseText = proseText.replaceAll(`[^${fnId}]`, '');
+        proseText = removeSpecificFootnotePreservingBoundary(proseText, fnId);
         proseText = proseText.replace(
           /[ \t]+(\[\^[A-Za-z0-9_\-]+\])/g,
           (_m, fn: string, offset: number, str: string) =>
@@ -2386,6 +2661,9 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
     }
     return uniqueRefs.join(' ') + trailingSpace;
   });
+
+  // Ensure a space follows any inline footnote citation that is immediately followed by a word character (`word[^id]Next` -> `word[^id] Next`)
+  proseText = proseText.replace(/(\[\^[A-Za-z0-9_\-]+\])(?=[\p{L}\p{N}])/gu, '$1 ');
 
   // 4. Filter uncited frontmatter sources & rebuild synchronized bottom footnote definitions
   const finalCitedIds = Array.from(
@@ -2537,6 +2815,7 @@ export async function cleanGroundingLinks(
 
   const urlMap = new Map<string, string>();
   const lastModifiedMap = new Map<string, string>();
+  const pageTitleMap = new Map<string, string>();
   const freshlyGroundedUrls = new Set<string>();
   for (const gs of groundedSources) {
     if (gs.url) freshlyGroundedUrls.add(gs.url.trim());
@@ -2567,6 +2846,10 @@ export async function cleanGroundingLinks(
       if (resolved?.lastModified) {
         lastModifiedMap.set(original, resolved.lastModified);
         lastModifiedMap.set(finalUrl, resolved.lastModified);
+      }
+      if (resolved?.pageTitle) {
+        pageTitleMap.set(original, resolved.pageTitle);
+        pageTitleMap.set(finalUrl, resolved.pageTitle);
       }
     }
   }
@@ -2780,6 +3063,7 @@ export async function cleanGroundingLinks(
   const sourcesById = new Map<string, OKFSource>();
   const sourceIdAliases = new Map<string, string>();
   const orderedSources: OKFSource[] = [];
+  const authorExplicitUrls = new Set<string>();
 
   const registerSource = (
     rawUrl: string,
@@ -2804,7 +3088,12 @@ export async function cleanGroundingLinks(
       );
     }
 
-    const cleanTitle = (rawTitle || '')
+    const effectiveRawTitle =
+      rawTitle && !isBareDomainTitle(rawTitle)
+        ? rawTitle
+        : pageTitleMap.get(resolvedUrl) || pageTitleMap.get(rawUrl) || rawTitle;
+
+    const cleanTitle = (effectiveRawTitle || '')
       .replace(/\s*\(Alternativ indeks\)\s*$/i, '')
       .replace(/^\*\*|\*\*$/g, '')
       .trim();
@@ -2949,7 +3238,10 @@ export async function cleanGroundingLinks(
         for (const s of initialSources) {
           if (s && typeof s === 'object' && s.resource) {
             const { id, resource, title, ...rest } = s;
-            registerSource(String(resource), title ? String(title) : undefined, id ? String(id) : undefined, rest);
+            const rawRes = String(resource).trim();
+            authorExplicitUrls.add(rawRes);
+            const entry = registerSource(rawRes, title ? String(title) : undefined, id ? String(id) : undefined, rest);
+            if (entry?.resource) authorExplicitUrls.add(entry.resource);
           }
         }
       }
@@ -3026,6 +3318,14 @@ export async function cleanGroundingLinks(
     const byEndIndex = new Map<number, OKFSource[]>();
     for (const ann of inlineAnnotations) {
       if (ann.end_index > buf.length || ann.end_index <= frontmatterEndByteOffset) continue;
+      const resolvedAnnUrl = (urlMap.get(ann.url) || ann.url).trim();
+      if (
+        isLowSignalGroundingUrl(resolvedAnnUrl) &&
+        !authorExplicitUrls.has(resolvedAnnUrl) &&
+        !authorExplicitUrls.has(ann.url.trim())
+      ) {
+        continue;
+      }
       const safeIdx = snapSafeEndIndex(ann.end_index);
       if (safeIdx === null) continue;
       const srcEntry = registerSource(ann.url, ann.title, undefined, undefined, true);
@@ -3196,6 +3496,13 @@ export async function cleanGroundingLinks(
   // 6. Register any remaining groundedSources from the Interactions API steps
   for (const src of groundedSources) {
     const candidateResolved = (urlMap.get(src.url) || src.url).trim();
+    if (
+      isLowSignalGroundingUrl(candidateResolved) &&
+      !authorExplicitUrls.has(candidateResolved) &&
+      !authorExplicitUrls.has(src.url.trim())
+    ) {
+      continue;
+    }
     if (!isVertexRedirectUrl(candidateResolved) || orderedSources.length === 0) {
       registerSource(src.url, src.title, undefined, undefined, true);
     }
@@ -3296,7 +3603,7 @@ export async function cleanGroundingLinks(
       if (matched && matched.id) {
         bodyText = bodyText.replaceAll(`[^${fnId}]`, `[^${matched.id}]`);
       } else {
-        bodyText = bodyText.replaceAll(`[^${fnId}]`, '');
+        bodyText = removeSpecificFootnotePreservingBoundary(bodyText, fnId);
       }
       existingFootnoteDefs.delete(fnId);
     }
@@ -3338,6 +3645,7 @@ export async function cleanGroundingLinks(
       /\][ \t]*$/.test(str.slice(0, offset)) ? ` ${fn}` : fn
   );
   bodyText = bodyText.replace(/[ \t]+([.,;!?])/g, '$1');
+  bodyText = bodyText.replace(/(\[\^[A-Za-z0-9_\-]+\])(?=[\p{L}\p{N}])/gu, '$1 ');
 
   // 7. Append OKF v0.2 footnote definitions (`[^id]: Title`) at the bottom of the body (SPEC.md §5.1)
   // Only emit definitions for footnote IDs actually cited (`[^id]`) in the body (`citedFootnoteIds`).
@@ -4806,17 +5114,38 @@ export function verifyOkfConcept(
   } else if (fs.existsSync(path.resolve(runIdOrPath))) {
     targetFilePath = path.resolve(runIdOrPath);
   } else {
-    const bundleCandidate = path.join(
-      workspacePath,
-      'bundle',
-      runIdOrPath.endsWith('.md') ? runIdOrPath : `${runIdOrPath}.md`
-    );
-    if (fs.existsSync(bundleCandidate)) {
-      targetFilePath = bundleCandidate;
-    } else {
-      throw new Error(
-        `Could not find Stage 1 research artifact or OKF concept for "${runIdOrPath}".`
+    const runsRoot = path.join(workspacePath, 'runs');
+    if (fs.existsSync(runsRoot)) {
+      const matchingRun = fs
+        .readdirSync(runsRoot, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && d.name !== '_dry_run')
+        .map((d) => d.name)
+        .find((name) => name.endsWith(`-${runIdOrPath}`) || name.includes(runIdOrPath));
+      if (matchingRun) {
+        const matchedResearch = path.join(
+          runsRoot,
+          matchingRun,
+          'stages/01_research/output/research_summary.md'
+        );
+        if (fs.existsSync(matchedResearch)) {
+          targetFilePath = matchedResearch;
+          detectedRunId = matchingRun;
+        }
+      }
+    }
+    if (!targetFilePath) {
+      const bundleCandidate = path.join(
+        workspacePath,
+        'bundle',
+        runIdOrPath.endsWith('.md') ? runIdOrPath : `${runIdOrPath}.md`
       );
+      if (fs.existsSync(bundleCandidate)) {
+        targetFilePath = bundleCandidate;
+      } else {
+        throw new Error(
+          `Could not find Stage 1 research artifact or OKF concept for "${runIdOrPath}".`
+        );
+      }
     }
   }
 
@@ -5775,14 +6104,23 @@ const OKF_VIZ_JS = `
     if (inner.indexOf("[^") !== -1) return false;
     if (/\\*\\*|__/.test(inner)) return false;
     if (/(?:^|[^\\\\])~$/.test(inner)) return false;
-    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt](?![\\^_])\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\/|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|-|–|—|\\)|\\s*$))/i.test(inner)) {
+    if (/^[A-Z]{1,5}\\/[A-Z]{1,5}$/.test(inner)) return true;
+    if (/^[a-zA-Z]$/.test(inner)) return true;
+    if (/^\\d+\\.\\d{3,}$/.test(inner)) return true;
+    if (/^[a-zA-Z](?:_[a-zA-Z0-9]+)?\\s*(?:=|<|>|<=|>=|≈|~|±)\\s*[+-]?\\d+(?:[.,]\\d+)?%?$/.test(inner)) return true;
+    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt](?![\\^_])\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\/(?![a-zA-Z0-9_()]*[\\^_\\\\])|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|-|–|—|\\)|\\s*$))/i.test(inner)) {
       return false;
     }
     if (!/(?:\\\\[a-zA-Z !,;:%$&_#]|[A-Za-z0-9)\\]}][\\^_](?:\\{[^{}\\r\\n]+\\}|[A-Za-z0-9+\\-°]))/.test(inner)) {
       return false;
     }
     if (/^\\d/.test(inner)) {
-      if (!/^\\d+(?:[.,]\\d+)*(?:\\s*(?:\\\\|[\\^_])|\\s+[a-zA-Z]{1,3}[\\^_])/.test(inner)) {
+      if (
+        !/^\\d+(?:[.,]\\d+)*(?:\\s*[+\\-*/]?\\s*(?:\\\\|[\\^_])|\\s+[a-zA-Z]{1,4}[\\^_]|\\s*[*/]\\s*[a-zA-Z0-9()]+\\s*[\\^_])/.test(
+          inner
+        ) &&
+        !/^0\\.\\d{3,}$/.test(inner)
+      ) {
         return false;
       }
     }
@@ -5804,6 +6142,30 @@ const OKF_VIZ_JS = `
         out += ch;
         i++;
         continue;
+      }
+      if (i + 1 < s.length && s[i + 1] === "$") {
+        let j = i + 2;
+        while (j + 1 < s.length) {
+          if (s[j] === "\\\\" && j + 1 < s.length) {
+            j += 2;
+            continue;
+          }
+          if (s[j] === "$" && s[j + 1] === "$") {
+            break;
+          }
+          if (s[j] === "|" || (s[j] === "\\n" && /^\\r?\\n\\s*\\r?\\n/.test(s.slice(j)))) {
+            break;
+          }
+          j++;
+        }
+        if (j + 1 < s.length && s[j] === "$" && s[j + 1] === "$") {
+          const innerDisp = s.slice(i + 2, j).replace(/\\s+/g, " ").trim();
+          if (isInlineLatexMath(innerDisp)) {
+            out += replacer(s.slice(i, j + 2), innerDisp);
+            i = j + 2;
+            continue;
+          }
+        }
       }
       let j = i + 1;
       while (j < s.length) {
@@ -6128,63 +6490,99 @@ const OKF_VIZ_JS = `
       }
     }
     const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", a: "ᵃ", b: "ᵇ", c: "ᶜ", d: "ᵈ", e: "ᵉ", f: "ᶠ", g: "ᵍ", h: "ʰ", i: "ⁱ", j: "ʲ", k: "ᵏ", l: "ˡ", m: "ᵐ", n: "ⁿ", o: "ᵒ", p: "ᵖ", r: "ʳ", s: "ˢ", t: "ᵗ", u: "ᵘ", v: "ᵛ", w: "ʷ", x: "ˣ", y: "ʸ", z: "ᶻ" };
-    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
+    const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     const bodyWithMath = replaceInlineLatexSpans(joinedBody, function (_, inner) {
-      const cleaned = String(inner)
+      let cleaned = String(inner)
         .replace(/\\\\(?:left|right)\\s*([()[\\]|.])?/g, "$1")
-        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
-        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
-        .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
+        .replace(/\\\\mathcal\\{R\\}/g, "ℛ")
+        .replace(/\\\\mathcal\\{([A-Za-z0-9]+)\\}/g, "$1")
         .replace(/\\\\(?:[,;:]|\\s+|quad\\b|qquad\\b)/g, " ")
         .replace(/~/g, " ")
         .replace(/\\\\!/g, "")
-        .replace(/\\\\sim\\b/g, "~")
+        .replace(/\\\\sim(?![a-zA-Z])/g, "~")
         .replace(/\\\\leftrightarrow/g, "↔")
-        .replace(/\\\\Leftrightarrow/g, "⇔")
-        .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
-        .replace(/\\\\Rightarrow/g, "⇒")
+        .replace(/\\\\Leftrightarrow|\\\\iff(?![a-zA-Z])/g, "⇔")
+        .replace(/\\\\rightarrow|\\\\to(?![a-zA-Z])/g, "→")
+        .replace(/\\\\Rightarrow|\\\\implies(?![a-zA-Z])/g, "⇒")
         .replace(/\\\\leftarrow/g, "←")
         .replace(/\\\\Leftarrow/g, "⇐")
-        .replace(/\\\\(?:ge|geq)\\b/g, "≥")
-        .replace(/\\\\(?:le|leq)\\b/g, "≤")
-        .replace(/\\\\(?:neq|ne)\\b/g, "≠")
-        .replace(/\\\\approx\\b/g, "≈")
-        .replace(/\\\\times\\b/g, "×")
-        .replace(/\\\\div\\b/g, "÷")
-        .replace(/\\\\pm\\b/g, "±")
-        .replace(/\\\\cdot\\b/g, "·")
-        .replace(/\\\\(?:dots|ldots|cdots)\\b/g, "…")
-        .replace(/\\\\infty\\b/g, "∞")
-        .replace(/\\\\Delta\\b/g, "Δ")
-        .replace(/\\\\delta\\b/g, "δ")
-        .replace(/\\\\mu\\b/g, "μ")
-        .replace(/\\\\Omega\\b/g, "Ω")
-        .replace(/\\\\omega\\b/g, "ω")
-        .replace(/\\\\alpha\\b/g, "α")
-        .replace(/\\\\beta\\b/g, "β")
-        .replace(/\\\\gamma\\b/g, "γ")
-        .replace(/\\\\lambda\\b/g, "λ")
-        .replace(/\\\\pi\\b/g, "π")
-        .replace(/\\\\sigma\\b/g, "σ")
+        .replace(/\\\\(?:ge|geq)(?![a-zA-Z])/g, "≥")
+        .replace(/\\\\(?:le|leq)(?![a-zA-Z])/g, "≤")
+        .replace(/\\\\(?:neq|ne)(?![a-zA-Z])/g, "≠")
+        .replace(/\\\\approx(?![a-zA-Z])/g, "≈")
+        .replace(/\\\\times(?![a-zA-Z])/g, "×")
+        .replace(/\\\\div(?![a-zA-Z])/g, "÷")
+        .replace(/\\\\pm(?![a-zA-Z])/g, "±")
+        .replace(/\\\\cdot(?![a-zA-Z])/g, "·")
+        .replace(/\\\\(?:dots|ldots|cdots)(?![a-zA-Z])/g, "…")
+        .replace(/\\\\infty(?![a-zA-Z])/g, "∞")
+        .replace(/\\\\sum(?![a-zA-Z])/g, "∑")
+        .replace(/\\\\prod(?![a-zA-Z])/g, "∏")
+        .replace(/\\\\int(?![a-zA-Z])/g, "∫")
+        .replace(/\\\\partial(?![a-zA-Z])/g, "∂")
+        .replace(/\\\\nabla(?![a-zA-Z])/g, "∇")
+        .replace(/\\\\propto(?![a-zA-Z])/g, "∝")
+        .replace(/\\\\perp(?![a-zA-Z])/g, "⊥")
+        .replace(/\\\\parallel(?![a-zA-Z])/g, "∥")
+        .replace(/\\\\Delta\\s+([a-zA-Z])(?![a-zA-Z])/g, "Δ$1")
+        .replace(/\\\\Delta(?![a-zA-Z])/g, "Δ")
+        .replace(/\\\\delta(?![a-zA-Z])/g, "δ")
+        .replace(/\\\\mu(?![a-zA-Z])/g, "μ")
+        .replace(/\\\\Omega(?![a-zA-Z])/g, "Ω")
+        .replace(/\\\\omega(?![a-zA-Z])/g, "ω")
+        .replace(/\\\\alpha(?![a-zA-Z])/g, "α")
+        .replace(/\\\\beta(?![a-zA-Z])/g, "β")
+        .replace(/\\\\gamma(?![a-zA-Z])/g, "γ")
+        .replace(/\\\\lambda(?![a-zA-Z])/g, "λ")
+        .replace(/\\\\pi(?![a-zA-Z])/g, "π")
+        .replace(/\\\\sigma(?![a-zA-Z])/g, "σ")
+        .replace(/\\\\rho(?![a-zA-Z])/g, "ρ")
+        .replace(/\\\\theta(?![a-zA-Z])/g, "θ")
+        .replace(/\\\\tau(?![a-zA-Z])/g, "τ")
+        .replace(/\\\\phi(?![a-zA-Z])|\\\\varphi(?![a-zA-Z])/g, "φ")
+        .replace(/\\\\eta(?![a-zA-Z])/g, "η")
+        .replace(/\\\\kappa(?![a-zA-Z])/g, "κ")
+        .replace(/\\\\epsilon(?![a-zA-Z])|\\\\varepsilon(?![a-zA-Z])/g, "ε")
+        .replace(/\\\\(?:ln|exp|log|sin|cos|tan|min|max|lim|sup|inf)(?![a-zA-Z])/g, function (m) {
+          return m.slice(1);
+        })
         .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
-        .replace(/\\\\([$&%_#{}])/g, "$1")
-        .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
-        .replace(/\\^\\{\\s*([0-9+\\-=()a-pr-z]+)\\s*\\}|\\^([0-9+\\-a-pr-z])(?![a-zA-Z0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9+\\-=()a-pr-z]/g, function (d) {
-            return supMap[d] || d;
-          });
-        })
-        .replace(/_\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|_([+-]?[0-9])(?![0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9+-]/g, function (d) {
-            return subMap[d] || d;
-          });
-        })
-        .replace(/_\\{\\s*([aehijklmnoprstuvx]+)\\s*\\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[aehijklmnoprstuvx]/g, function (d) {
-            return subMap[d] || d;
-          });
-        })
-        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+        .replace(/\\\\(?:xrightleftharpoons|rightleftharpoons)(?:\\[[^\\]]*\\])?(?:\\{[^{}]*\\})?/g, "⇌")
+        .replace(/\\\\(?:xrightarrow|xleftarrow)(?:\\[[^\\]]*\\])?(?:\\{[^{}]*\\})?/g, "→")
+        .replace(/\\\\([$&%_#])/g, "$1");
+      for (let pass = 0; pass < 3; pass++) {
+        cleaned = cleaned
+          .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+          .replace(/\\\\sqrt\\{\\s*([^{}]+?)\\s*\\}/g, "√($1)")
+          .replace(/\\\\(?:overline|hat|bar|tilde|vec)\\{\\s*([^{}]+?)\\s*\\}/g, "$1")
+          .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
+          .replace(/\\^\\{\\s*([0-9+\\-=()a-pr-z]+)\\s*\\}|\\^([0-9+\\-a-pr-z])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+            return String(b || s).replace(/[0-9+\\-=()a-pr-z]/g, function (d) {
+              return supMap[d] || d;
+            });
+          })
+          .replace(/_\\{\\s*([+-]?[0-9]+|[+-=()]+)\\s*\\}|_([+-]?[0-9])(?![0-9])/g, function (_m, b, s) {
+            return String(b || s).replace(/[0-9+\\-=()]/g, function (d) {
+              return subMap[d] || d;
+            });
+          })
+          .replace(/_\\{\\s*([aehijklmnoprstuvx]+)\\s*\\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+            return String(b || s).replace(/[aehijklmnoprstuvx]/g, function (d) {
+              return subMap[d] || d;
+            });
+          })
+          .replace(/_\\{\\s*([^{}]+?)\\s*\\}/g, function (_m, sub) {
+            return "<sub>" + escapeHtmlAttr(sub) + "</sub>";
+          })
+          .replace(/\\^\\{\\s*([^{}]+?)\\s*\\}/g, function (_m, sup) {
+            return "<sup>" + escapeHtmlAttr(sup) + "</sup>";
+          })
+          .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2");
+      }
+      cleaned = cleaned
+        .replace(/\\\\([{}])/g, "$1")
+        .replace(/_([a-zA-Z0-9()])(?![a-zA-Z0-9])/g, "<sub>$1</sub>")
+        .replace(/\\^([a-zA-Z0-9()])(?![a-zA-Z0-9])/g, "<sup>$1</sup>")
         .replace(/\\s+/g, " ")
         .trim();
       if (!/[\\\\{}^_]/.test(cleaned)) {
@@ -6946,8 +7344,12 @@ export function isInlineLatexMathSpan(inner: string): boolean {
   if (inner.includes('[^')) return false;
   if (/\*\*|__/.test(inner)) return false;
   if (/(?:^|[^\\])~$/.test(inner)) return false;
+  if (/^[A-Z]{1,5}\/[A-Z]{1,5}$/.test(inner)) return true;
+  if (/^[a-zA-Z]$/.test(inner)) return true;
+  if (/^\d+\.\d{3,}$/.test(inner)) return true;
+  if (/^[a-zA-Z](?:_[a-zA-Z0-9]+)?\s*(?:=|<|>|<=|>=|≈|~|±)\s*[+-]?\d+(?:[.,]\d+)?%?$/.test(inner)) return true;
   if (
-    /^\d[\d,.]*(?:\s*(?:[BMKTbmkt](?![\^_])\b|billion|million|trillion|thousand|bn\b|mn\b|\/|\s+(?:per|to|and|or|in|at|for|from|of|vs)\b|-|–|—|\)|\s*$))/i.test(
+    /^\d[\d,.]*(?:\s*(?:[BMKTbmkt](?![\^_])\b|billion|million|trillion|thousand|bn\b|mn\b|\/(?![a-zA-Z0-9_()]*[\^_\\])|\s+(?:per|to|and|or|in|at|for|from|of|vs)\b|-|–|—|\)|\s*$))/i.test(
       inner
     )
   ) {
@@ -6959,7 +7361,12 @@ export function isInlineLatexMathSpan(inner: string): boolean {
     return false;
   }
   if (/^\d/.test(inner)) {
-    if (!/^\d+(?:[.,]\d+)*(?:\s*(?:\\|[\^_])|\s+[a-zA-Z]{1,3}[\^_])/.test(inner)) {
+    if (
+      !/^\d+(?:[.,]\d+)*(?:\s*[+\-*/]?\s*(?:\\|[\^_])|\s+[a-zA-Z]{1,4}[\^_]|\s*[*/]\s*[a-zA-Z0-9()]+\s*[\^_])/.test(
+        inner
+      ) &&
+      !/^0\.\d{3,}$/.test(inner)
+    ) {
       return false;
     }
   }
@@ -6967,7 +7374,7 @@ export function isInlineLatexMathSpan(inner: string): boolean {
 }
 
 /**
- * Safely scans a string for inline `$...$` LaTeX math spans without allowing a rejected currency `$`
+ * Safely scans a string for inline `$...$` and display `$$...$$` LaTeX math spans without allowing a rejected currency `$`
  * earlier on a line to consume the opening `$` of a valid inline math span later on the same line,
  * and never matching across Markdown table pipes (`|`) or line breaks.
  */
@@ -6989,6 +7396,30 @@ export function replaceInlineLatexSpansTs(
       out += ch;
       i++;
       continue;
+    }
+    if (i + 1 < s.length && s[i + 1] === '$') {
+      let j = i + 2;
+      while (j + 1 < s.length) {
+        if (s[j] === '\\' && j + 1 < s.length) {
+          j += 2;
+          continue;
+        }
+        if (s[j] === '$' && s[j + 1] === '$') {
+          break;
+        }
+        if (s[j] === '|' || (s[j] === '\n' && /^\r?\n\s*\r?\n/.test(s.slice(j)))) {
+          break;
+        }
+        j++;
+      }
+      if (j + 1 < s.length && s[j] === '$' && s[j + 1] === '$') {
+        const innerDisp = s.slice(i + 2, j).replace(/\s+/g, ' ').trim();
+        if (isInlineLatexMathSpan(innerDisp)) {
+          out += replacer(s.slice(i, j + 2), innerDisp);
+          i = j + 2;
+          continue;
+        }
+      }
     }
     let j = i + 1;
     while (j < s.length) {
@@ -7075,6 +7506,9 @@ export function cleanChecklistLabel(rawText: string): string {
     '9': '₉',
     '+': '₊',
     '-': '₋',
+    '=': '₌',
+    '(': '₍',
+    ')': '₎',
     a: 'ₐ',
     e: 'ₑ',
     h: 'ₕ',
@@ -7096,72 +7530,96 @@ export function cleanChecklistLabel(rawText: string): string {
   const cleanLatexFragment = (frag: string, isInsideMathSpan: boolean): string => {
     let out = String(frag || '')
       .replace(/\\(?:left|right)\s*([()[\]|.])?/g, '$1')
-      .replace(/\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\{([^{}]*)\}/g, '$1')
-      .replace(/\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\{([^{}]*)\}/g, '$1')
-      .replace(/\\frac\{\s*([^{}]+?)\s*\}\{\s*([^{}]+?)\s*\}/g, '$1/$2')
+      .replace(/\\mathcal\{R\}/g, 'ℛ')
+      .replace(/\\mathcal\{([A-Za-z0-9]+)\}/g, '$1')
       .replace(/\\(?:[,;:]|\s+|quad\b|qquad\b)/g, ' ')
       .replace(/\\!/g, '')
-      .replace(/\\sim\b/g, '~')
+      .replace(/\\sim(?![a-zA-Z])/g, '~')
       .replace(/\\leftrightarrow/g, '↔')
-      .replace(/\\Leftrightarrow/g, '⇔')
-      .replace(/\\rightarrow|\\to\b/g, '→')
-      .replace(/\\Rightarrow/g, '⇒')
+      .replace(/\\Leftrightarrow|\\iff(?![a-zA-Z])/g, '⇔')
+      .replace(/\\rightarrow|\\to(?![a-zA-Z])/g, '→')
+      .replace(/\\Rightarrow|\\implies(?![a-zA-Z])/g, '⇒')
       .replace(/\\leftarrow/g, '←')
       .replace(/\\Leftarrow/g, '⇐')
-      .replace(/\\(?:ge|geq)\b/g, '≥')
-      .replace(/\\(?:le|leq)\b/g, '≤')
-      .replace(/\\(?:neq|ne)\b/g, '≠')
-      .replace(/\\approx\b/g, '≈')
-      .replace(/\\times\b/g, '×')
-      .replace(/\\div\b/g, '÷')
-      .replace(/\\pm\b/g, '±')
-      .replace(/\\cdot\b/g, '·')
-      .replace(/\\(?:dots|ldots|cdots)\b/g, '…')
-      .replace(/\\infty\b/g, '∞')
-      .replace(/\\Delta\b/g, 'Δ')
-      .replace(/\\delta\b/g, 'δ')
-      .replace(/\\mu\b/g, 'μ')
-      .replace(/\\Omega\b/g, 'Ω')
-      .replace(/\\omega\b/g, 'ω')
-      .replace(/\\alpha\b/g, 'α')
-      .replace(/\\beta\b/g, 'β')
-      .replace(/\\gamma\b/g, 'γ')
-      .replace(/\\lambda\b/g, 'λ')
-      .replace(/\\pi\b/g, 'π')
-      .replace(/\\sigma\b/g, 'σ')
+      .replace(/\\(?:ge|geq)(?![a-zA-Z])/g, '≥')
+      .replace(/\\(?:le|leq)(?![a-zA-Z])/g, '≤')
+      .replace(/\\(?:neq|ne)(?![a-zA-Z])/g, '≠')
+      .replace(/\\approx(?![a-zA-Z])/g, '≈')
+      .replace(/\\times(?![a-zA-Z])/g, '×')
+      .replace(/\\div(?![a-zA-Z])/g, '÷')
+      .replace(/\\pm(?![a-zA-Z])/g, '±')
+      .replace(/\\cdot(?![a-zA-Z])/g, '·')
+      .replace(/\\(?:dots|ldots|cdots)(?![a-zA-Z])/g, '…')
+      .replace(/\\infty(?![a-zA-Z])/g, '∞')
+      .replace(/\\sum(?![a-zA-Z])/g, '∑')
+      .replace(/\\prod(?![a-zA-Z])/g, '∏')
+      .replace(/\\int(?![a-zA-Z])/g, '∫')
+      .replace(/\\partial(?![a-zA-Z])/g, '∂')
+      .replace(/\\nabla(?![a-zA-Z])/g, '∇')
+      .replace(/\\propto(?![a-zA-Z])/g, '∝')
+      .replace(/\\perp(?![a-zA-Z])/g, '⊥')
+      .replace(/\\parallel(?![a-zA-Z])/g, '∥')
+      .replace(/\\Delta\s+([a-zA-Z])(?![a-zA-Z])/g, 'Δ$1')
+      .replace(/\\Delta(?![a-zA-Z])/g, 'Δ')
+      .replace(/\\delta(?![a-zA-Z])/g, 'δ')
+      .replace(/\\mu(?![a-zA-Z])/g, 'μ')
+      .replace(/\\Omega(?![a-zA-Z])/g, 'Ω')
+      .replace(/\\omega(?![a-zA-Z])/g, 'ω')
+      .replace(/\\alpha(?![a-zA-Z])/g, 'α')
+      .replace(/\\beta(?![a-zA-Z])/g, 'β')
+      .replace(/\\gamma(?![a-zA-Z])/g, 'γ')
+      .replace(/\\lambda(?![a-zA-Z])/g, 'λ')
+      .replace(/\\pi(?![a-zA-Z])/g, 'π')
+      .replace(/\\sigma(?![a-zA-Z])/g, 'σ')
+      .replace(/\\rho(?![a-zA-Z])/g, 'ρ')
+      .replace(/\\theta(?![a-zA-Z])/g, 'θ')
+      .replace(/\\tau(?![a-zA-Z])/g, 'τ')
+      .replace(/\\phi(?![a-zA-Z])|\\varphi(?![a-zA-Z])/g, 'φ')
+      .replace(/\\eta(?![a-zA-Z])/g, 'η')
+      .replace(/\\kappa(?![a-zA-Z])/g, 'κ')
+      .replace(/\\epsilon(?![a-zA-Z])|\\varepsilon(?![a-zA-Z])/g, 'ε')
+      .replace(/\\(?:ln|exp|log|sin|cos|tan|min|max|lim|sup|inf)(?![a-zA-Z])/g, (m) => m.slice(1))
       .replace(/\\(?:circ|degree)(?![a-z])/g, '°')
-      .replace(/\\([$&%_#{}])/g, '$1')
-      .replace(/\^\{\s*(?:°|o)\s*([CFK])?\s*\}|\^°/g, '°$1')
-      .replace(
-        /\^\{\s*([0-9+\-=()a-pr-z]+)\s*\}|\^([0-9+\-a-pr-z])(?![a-zA-Z0-9])/g,
-        (_m, b: string, s: string) =>
-          String(b || s).replace(/[0-9+\-=()a-pr-z]/g, (d) => supMap[d] || d)
-      )
-      .replace(/_\{\s*([+-]?[0-9]+|[+-])\s*\}/g, (_m, b: string) =>
-        String(b).replace(/[0-9+-]/g, (d) => subMap[d] || d)
-      );
-    if (isInsideMathSpan) {
+      .replace(/\\([$&%_#])/g, '$1');
+    for (let pass = 0; pass < 3; pass++) {
       out = out
-        .replace(/~/g, ' ')
-        .replace(/_([+-]?[0-9])(?![0-9])/g, (_sub, s: string) =>
-          String(s).replace(/[0-9+-]/g, (d) => subMap[d] || d)
-        )
+        .replace(/\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\{([^{}]*)\}/g, '$1')
+        .replace(/\\(?:xrightleftharpoons|rightleftharpoons)(?:\[[^\]]*\])?(?:\{[^{}]*\})?/g, '⇌')
+        .replace(/\\(?:xrightarrow|xleftarrow)(?:\[[^\]]*\])?(?:\{[^{}]*\})?/g, '→')
+        .replace(/\\sqrt\{\s*([^{}]+?)\s*\}/g, '√($1)')
+        .replace(/\\(?:overline|hat|bar|tilde|vec)\{\s*([^{}]+?)\s*\}/g, '$1')
+        .replace(/\^\{\s*(?:°|o)\s*([CFK])?\s*\}|\^°/g, '°$1')
         .replace(
-          /_\{\s*([aehijklmnoprstuvx]+)\s*\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g,
+          /\^\{\s*([0-9+\-=()a-pr-z]+)\s*\}|\^([0-9+\-a-pr-z])(?![a-zA-Z0-9])/g,
           (_m, b: string, s: string) =>
-            String(b || s).replace(/[aehijklmnoprstuvx]/g, (d) => subMap[d] || d)
+            String(b || s).replace(/[0-9+\-=()a-pr-z]/g, (d) => supMap[d] || d)
+        )
+        .replace(/_\{\s*([+-]?[0-9]+|[+-=()]+)\s*\}/g, (_m, b: string) =>
+          String(b).replace(/[0-9+\-=()]/g, (d) => subMap[d] || d)
         );
+      if (isInsideMathSpan) {
+        out = out
+          .replace(/~/g, ' ')
+          .replace(/_([+-]?[0-9])(?![0-9])/g, (_sub, s: string) =>
+            String(s).replace(/[0-9+-]/g, (d) => subMap[d] || d)
+          )
+          .replace(
+            /_\{\s*([aehijklmnoprstuvx]+)\s*\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g,
+            (_m, b: string, s: string) =>
+              String(b || s).replace(/[aehijklmnoprstuvx]/g, (d) => subMap[d] || d)
+          )
+          .replace(/_\{\s*([^{}]+?)\s*\}/g, '_$1')
+          .replace(/\^\{\s*([^{}]+?)\s*\}/g, '^$1');
+      }
+      out = out.replace(/\\frac\{\s*([^{}]+?)\s*\}\{\s*([^{}]+?)\s*\}/g, '$1/$2');
     }
-    return out.replace(
-      /\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\{([^{}]*)\}/g,
-      '$1'
-    );
+    return out.replace(/\\([{}])/g, '$1');
   };
 
   let text = String(rawText || '').trim();
-  // Remove footnote references like [^lovdata-brann], [^1]
-  text = text.replace(/\[\^[^\]]+\]/g, '');
-  // Process inline TeX math spans $...$ safely without consuming currency $ pairs
+  // Remove footnote references like [^lovdata-brann], [^1] while preserving word boundaries
+  text = stripFootnotesPreservingWordBoundaries(text);
+  // Process inline TeX math spans $...$ / $$...$$ safely without consuming currency $ pairs
   text = replaceInlineLatexSpansTs(text, (_m, inner: string) =>
     cleanLatexFragment(inner, true).trim()
   );
@@ -7252,7 +7710,7 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
       break;
     }
 
-    const contentWithoutFootnotes = rawContent.replace(/\[\^[^\]]+\]/g, '').trim();
+    const contentWithoutFootnotes = stripFootnotesPreservingWordBoundaries(rawContent).trim();
     const isBoldColonHeader = /^\*\*[^*]+\*\*:?\s*$/.test(contentWithoutFootnotes);
 
     if (isBoldColonHeader || hasIndentedSubItems) {
@@ -7312,6 +7770,7 @@ export interface NormalizedA2uiModule {
   subtitleOrBasis: string;
   durationOrMeta: string;
   narration: string;
+  spokenNarration?: string;
   actionItem: string;
   bullets: string[];
 }
@@ -7334,6 +7793,55 @@ export interface NormalizedA2uiCaseItem {
 }
 
 /**
+ * Splits a single monolithic wall of prose (`> 420` characters with no `\n\n` paragraph breaks)
+ * into readable 2–3 sentence paragraphs while preserving existing multi-paragraph text intact.
+ */
+export function formatSingleWallParagraphs(text: string): string {
+  const raw = String(text || '').trim();
+  if (
+    !raw ||
+    /\r?\n\s*\r?\n/.test(raw) ||
+    raw.length <= 420 ||
+    /(?:^|\r?\n)\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\|)/.test(raw)
+  ) {
+    return raw;
+  }
+  const abbrevToken = '\u0000';
+  const protectedText = raw.replace(
+    /\b(e\.g|i\.e|vs|approx|ca|cf|al|Fig|Eq|No|Dr|Mr|Mrs|Ms|Prof|Inc|Corp|Ltd|Co|St|Jr|Sr|U\.S|Ph\.D)\.\s+/gi,
+    `$1.${abbrevToken}`
+  );
+  const sentences = protectedText
+    .split(/(?<=[.!?])\s+(?=[\p{Lu}"“'(\[$~+\-0-9])/u)
+    .map((s) => s.replaceAll(abbrevToken, ' ').trim())
+    .filter(Boolean);
+  if (sentences.length < 4) {
+    return raw;
+  }
+  const paragraphs: string[] = [];
+  let current: string[] = [];
+  let currentLen = 0;
+  for (let i = 0; i < sentences.length; i++) {
+    const s = sentences[i];
+    current.push(s);
+    currentLen += s.length;
+    const remaining = sentences.length - 1 - i;
+    if (
+      (current.length >= 3 || (current.length >= 2 && currentLen >= 280)) &&
+      remaining >= 2
+    ) {
+      paragraphs.push(current.join(' '));
+      current = [];
+      currentLen = 0;
+    }
+  }
+  if (current.length > 0) {
+    paragraphs.push(current.join(' '));
+  }
+  return paragraphs.join('\n\n');
+}
+
+/**
  * Normalizes any Stage 2 `script_draft.json` payload into A2UI data model structures.
  * Works seamlessly across:
  * - Generic Stage 2 output (`{ title, scriptBody, estimatedDuration }`)
@@ -7351,6 +7859,7 @@ export function normalizeStage2ForA2ui(
   targetAudience: string;
   estimatedDuration: number | string;
   scriptBody: string;
+  spokenScript: string;
   highlights: string[];
   modules: NormalizedA2uiModule[];
   quiz: NormalizedA2uiQuizQuestion[];
@@ -7364,6 +7873,7 @@ export function normalizeStage2ForA2ui(
       targetAudience: '',
       estimatedDuration: 0,
       scriptBody: '',
+      spokenScript: '',
       highlights: [],
       modules: [],
       quiz: [],
@@ -7424,15 +7934,32 @@ export function normalizeStage2ForA2ui(
     }
   }
 
-  const scriptBody = String(
-    scriptDraft.scriptBody ||
+  const rawScriptBody = String(
+    scriptDraft.visualSummary ||
+      scriptDraft.visualBody ||
       scriptDraft.executiveSummary ||
       scriptDraft.investmentThesis ||
       scriptDraft.memoBody ||
       scriptDraft.overview ||
+      scriptDraft.scriptBody ||
       scriptDraft.narration ||
       ''
   );
+  const scriptBody = formatSingleWallParagraphs(rawScriptBody);
+  const spokenScript = String(
+    scriptDraft.spokenScript ||
+      scriptDraft.spokenNarration ||
+      scriptDraft.narrationScript ||
+      (scriptDraft.visualSummary ||
+      scriptDraft.visualBody ||
+      scriptDraft.executiveSummary ||
+      scriptDraft.investmentThesis ||
+      scriptDraft.memoBody ||
+      scriptDraft.overview
+        ? scriptDraft.scriptBody || ''
+        : '') ||
+      scriptBody
+  ).trim();
 
   // Extract highlights (`keyTakeaways`, `thesisPoints`, `learningObjectives`, or `highlights`)
   const rawHighlights = Array.isArray(scriptDraft.keyTakeaways)
@@ -7516,16 +8043,25 @@ export function normalizeStage2ForA2ui(
           ? rawModEstDur
           : `${rawModEstDur}s`
         : '';
-    const narration = String(
-      rawMod.spokenNarration ||
-        rawMod.narrationScript ||
-        rawMod.narration ||
+    const rawNarration = String(
+      rawMod.visualAnalysis ||
+        rawMod.visualSummary ||
         rawMod.analysis ||
-        rawMod.scriptBody ||
         rawMod.content ||
         rawMod.summary ||
+        rawMod.spokenNarration ||
+        rawMod.narrationScript ||
+        rawMod.narration ||
+        rawMod.scriptBody ||
         ''
     );
+    const narration = formatSingleWallParagraphs(rawNarration);
+    const spokenNarration = String(
+      rawMod.spokenNarration ||
+        rawMod.narrationScript ||
+        rawMod.spokenScript ||
+        narration
+    ).trim();
     const actionItem = String(
       rawMod.boardActionItem ||
         rawMod.actionItem ||
@@ -7562,6 +8098,7 @@ export function normalizeStage2ForA2ui(
       subtitleOrBasis,
       durationOrMeta,
       narration,
+      spokenNarration,
       actionItem,
       bullets,
     });
@@ -7611,7 +8148,7 @@ export function normalizeStage2ForA2ui(
       let synthesizedScenario = explicitCaseScenario;
       if (!synthesizedScenario) {
         const scenarioParts: string[] = [];
-        const paragraphs = narration
+        const paragraphs = rawNarration
           .split(/\r?\n\r?\n/)
           .map((p) => p.trim())
           .filter(Boolean);
@@ -7643,7 +8180,7 @@ export function normalizeStage2ForA2ui(
             `${contextHeader}\n${bullets.slice(0, 4).map((b: string) => `• ${b}`).join('\n')}`
           );
         }
-        synthesizedScenario = scenarioParts.join('\n\n') || firstPara || narration;
+        synthesizedScenario = scenarioParts.join('\n\n') || firstPara || rawNarration;
       }
 
       const quizExpl =
@@ -7844,6 +8381,7 @@ export function normalizeStage2ForA2ui(
     targetAudience,
     estimatedDuration,
     scriptBody,
+    spokenScript,
     highlights,
     modules,
     quiz,
@@ -7880,8 +8418,24 @@ export function resolveJsonPointer(rootModel: unknown, pointer: string, scopeMod
   return current;
 }
 
+function cloneJsonValue<T>(val: T): T {
+  if (val === null || val === undefined || typeof val !== 'object') {
+    return val;
+  }
+  if (typeof globalThis.structuredClone === 'function') {
+    try {
+      return globalThis.structuredClone(val);
+    } catch {
+      // Fallback to JSON deep clone
+    }
+  }
+  return JSON.parse(JSON.stringify(val));
+}
+
 /**
  * Updates an RFC 6901 JSON Pointer path (`/a/b/0`) on a root data model object in-place.
+ * Deep-clones assigned object/array values so mutating the live surface data model never
+ * mutates historical `updateDataModel` message envelopes by reference aliasing.
  * Follows A2UI v0.9.1 upsert & delete semantics:
  * - If pointer is omitted or `'/'`, replaces the entire root data model in-place.
  * - If `value === undefined`, deletes the key on objects (or sets index to `undefined` on arrays, preserving length).
@@ -7892,7 +8446,7 @@ export function setJsonPointer(rootModel: Record<string, any>, pointer: string, 
       delete rootModel[k];
     }
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-      Object.assign(rootModel, value);
+      Object.assign(rootModel, cloneJsonValue(value));
     }
     return;
   }
@@ -7915,7 +8469,7 @@ export function setJsonPointer(rootModel: Record<string, any>, pointer: string, 
       delete current[lastSeg];
     }
   } else {
-    current[lastSeg] = value;
+    current[lastSeg] = cloneJsonValue(value);
   }
 }
 
@@ -8463,16 +9017,38 @@ const A2UI_STUDIO_JS = `
     if (inner.indexOf("[^") !== -1) return false;
     if (/\\*\\*|__/.test(inner)) return false;
     if (/(?:^|[^\\\\])~$/.test(inner)) return false;
-    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt](?![\\^_])\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\/|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|-|–|—|\\)|\\s*$))/i.test(inner)) {
+    if (/^\\d+\\.\\d{3,}$/.test(inner)) return true;
+    if (/^\\d[\\d,.]*(?:\\s*(?:[BMKTbmkt](?![\\^_])\\b|billion|million|trillion|thousand|bn\\b|mn\\b|\\s+(?:per|to|and|or|in|at|for|from|of|vs)\\b|\\)|\\s*$))/i.test(inner)) {
       return false;
     }
-    if (!/(?:\\\\[a-zA-Z !,;:%$&_#]|[A-Za-z0-9)\\]}][\\^_](?:\\{[^{}\\r\\n]+\\}|[A-Za-z0-9+\\-°]))/.test(inner)) {
+    if (/^\\d[\\d,.]*\\s*\\/\\s*(?:sh|share|yr|year|mo|month|wk|week|day|hr|hour|oz|lb|lbs|kg|g|ton|tonne|t|bbl|gal|mwh|kwh|kw|mw|gw|user|sub|seat|unit|launch|flight|km|m|sqft|ft)\\b/i.test(inner)) {
       return false;
     }
+    if (/^\\d[\\d,.]*\\s*[-–—]\\s*(?:\\$|~|$)/.test(inner)) {
+      return false;
+    }
+    if (/^[A-Z]{1,5}\\/[A-Z]{1,5}$/.test(inner)) {
+      return true;
+    }
+    if (/^[a-zA-Z]$/.test(inner)) {
+      return true;
+    }
+    if (/^[a-zA-Z](?:_[a-zA-Z0-9]+)?\\s*[=<>≤≥≈~±+\\-]\\s*[+-]?\\d[\\d.,%a-zA-Z\\s/\\-]*$/.test(inner)) {
+      return true;
+    }
+    const hasTeXOrSubSup = /(?:\\\\[a-zA-Z !,;:%$&_#]|[A-Za-z0-9)\\]}][\\^_](?:\\{[^{}\\r\\n]+\\}|[A-Za-z0-9+\\-°]))/.test(inner);
     if (/^\\d/.test(inner)) {
-      if (!/^\\d+(?:[.,]\\d+)*(?:\\s*(?:\\\\|[\\^_])|\\s+[a-zA-Z]{1,3}[\\^_])/.test(inner)) {
-        return false;
+      if (hasTeXOrSubSup) return true;
+      if (/^\\d+(?:[.,]\\d+)*(?:\\s*(?:\\\\|[\\^_+*=<>≤≥±×÷]|\\/[a-zA-Z0-9]+)|\\s+[a-zA-Z]{1,3}[\\^_])/.test(inner)) {
+        return true;
       }
+      if (/^\\d+\\.\\d+$/.test(inner) && !/^\\d+\\.\\d{2}$/.test(inner)) {
+        return true;
+      }
+      return false;
+    }
+    if (!hasTeXOrSubSup) {
+      return false;
     }
     return true;
   }
@@ -8492,6 +9068,26 @@ const A2UI_STUDIO_JS = `
         out += ch;
         i++;
         continue;
+      }
+      if (i + 1 < s.length && s[i + 1] === "$") {
+        let k = i + 2;
+        const closeIdx = s.indexOf("$$", k);
+        if (closeIdx !== -1) {
+          while (k < closeIdx) {
+            if (s[k] === "|" || (s[k] === "\\n" && /^\\r?\\n\\s*\\r?\\n/.test(s.slice(k)))) {
+              break;
+            }
+            k++;
+          }
+          if (k === closeIdx) {
+            const innerDisplay = s.slice(i + 2, closeIdx).replace(/\\s+/g, " ").trim();
+            if (innerDisplay && isInlineLatexMath(innerDisplay)) {
+              out += replacer(s.slice(i, closeIdx + 2), innerDisplay);
+              i = closeIdx + 2;
+              continue;
+            }
+          }
+        }
       }
       let j = i + 1;
       while (j < s.length) {
@@ -8522,6 +9118,146 @@ const A2UI_STUDIO_JS = `
     return detectTextLang(text) === "no" ? "nb-NO" : "en-US";
   }
 
+  function stripClientFootnotesPreservingBoundaries(text) {
+    return String(text || "")
+      .replace(/([A-Za-z0-9\\u00C0-\\u024F)%°²³¹⁰⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉])(?:\\[\\^[^\\r\\n\\]]+\\][ \\t]*)+(?=[A-Za-z0-9\\u00C0-\\u024F($~€£])/g, "$1 ")
+      .replace(/\\[\\^[^\\r\\n\\]]+\\]/g, "");
+  }
+
+  function normalizeTextForTts(text, langOrIsNo) {
+    const raw = String(text || "");
+    const isNo =
+      langOrIsNo === true ||
+      langOrIsNo === "no" ||
+      langOrIsNo === "nb-NO" ||
+      (langOrIsNo == null && detectTextLang(raw) === "no");
+    let s = cleanClientChecklistLabel(raw);
+    // Expand currency ranges ($1.77T–$1.98T, $62M–$70M) before individual currency tokens
+    s = s.replace(/(\\$[0-9][0-9,.]*(?:\\s*(?:B|M|T|K|bn|mn|billion|million|trillion|thousand))?)\\s*[–—-]\\s*(\\$[0-9])/gi, function (_m, left, right) {
+      return left + (isNo ? " til " : " to ") + right;
+    });
+    // Replace negative currency (-$1,795.7M), positive currency (+$43.0M), and approximate currency (~$420.00)
+    s = s.replace(/(^|[\\s(])-\\s*\\$(?=\\d)/g, "$1" + (isNo ? "minus $" : "negative $"));
+    s = s.replace(/(^|[\\s(])\\+\\s*\\$(?=\\d)/g, "$1" + (isNo ? "pluss $" : "plus $"));
+    s = s.replace(/~\\s*\\$(?=\\d)/g, isNo ? "omtrent $" : "approximately $");
+    s = s.replace(/~(?=\\d)/g, isNo ? "omtrent " : "approximately ");
+    // Expand currency with magnitude suffixes + optional unit slash ($10,000/kg, $1,795.7M, $800.0B)
+    const unitSlashMapEn = {
+      kg: "kilogram",
+      g: "gram",
+      t: "metric ton",
+      ton: "ton",
+      tonne: "metric ton",
+      oz: "ounce",
+      sh: "share",
+      share: "share",
+      yr: "year",
+      year: "year",
+      mo: "month",
+      month: "month",
+      kwh: "kilowatt-hour",
+      mwh: "megawatt-hour",
+      kw: "kilowatt",
+      mw: "megawatt",
+    };
+    const unitSlashMapNo = {
+      kg: "kilogram",
+      g: "gram",
+      t: "tonn",
+      ton: "tonn",
+      tonne: "tonn",
+      oz: "unse",
+      sh: "aksje",
+      share: "aksje",
+      yr: "år",
+      year: "år",
+      mo: "måned",
+      month: "måned",
+      kwh: "kilowattime",
+      mwh: "megawattime",
+      kw: "kilowatt",
+      mw: "megawatt",
+    };
+    const magMapEn = { B: "billion", M: "million", T: "trillion", K: "thousand", bn: "billion", mn: "million" };
+    const magMapNo = { B: "milliarder", M: "millioner", T: "billioner", K: "tusen", bn: "milliarder", mn: "millioner" };
+    s = s.replace(/\\$([0-9][0-9,.]*)\\s*(B|M|T|K|bn|mn)\\b(?:\\s*\\/\\s*([a-zA-Z]+)\\b)?/g, function (_m, num, mag, unit) {
+      const magWord = (isNo ? magMapNo[mag] : magMapEn[mag]) || mag;
+      const base = num + " " + magWord + (isNo ? " dollar" : " dollars");
+      if (!unit) return base;
+      const uLower = unit.toLowerCase();
+      const uWord = (isNo ? unitSlashMapNo[uLower] : unitSlashMapEn[uLower]) || unit;
+      return base + " per " + uWord;
+    });
+    s = s.replace(/\\$([0-9][0-9,.]*)\\s*(billion|million|trillion|thousand)\\b/gi, function (_m, num, word) {
+      return num + " " + word.toLowerCase() + (isNo ? " dollar" : " dollars");
+    });
+    s = s.replace(/\\$([0-9][0-9,.]*)\\s*\\/\\s*([a-zA-Z]+)\\b/g, function (_m, num, unit) {
+      const uLower = unit.toLowerCase();
+      const uWord = (isNo ? unitSlashMapNo[uLower] : unitSlashMapEn[uLower]) || unit;
+      return num + (isNo ? " dollar per " : " dollars per ") + uWord;
+    });
+    s = s.replace(/\\$([0-9][0-9,.]*)\\b/g, function (_m, num) {
+      return num + (isNo ? " dollar" : " dollars");
+    });
+    // Expand scientific units and symbols before generic subscript stripping
+    s = s
+      .replace(/(^|[^A-Za-z0-9])(?:Iₛₚ|I_sp|Isp)(?![A-Za-z0-9])/g, function (_m, pre) {
+        return pre + (isNo ? "spesifikk impuls" : "specific impulse");
+      })
+      .replace(/Δv\\b/g, "delta-v")
+      .replace(/Δ/g, "delta ")
+      .replace(/±/g, isNo ? " pluss eller minus " : " plus or minus ")
+      .replace(/≥/g, isNo ? " større enn eller lik " : " greater than or equal to ")
+      .replace(/≤/g, isNo ? " mindre enn eller lik " : " less than or equal to ")
+      .replace(/≈/g, isNo ? " omtrent " : " approximately ")
+      .replace(/≠/g, isNo ? " ikke lik " : " not equal to ")
+      .replace(/×/g, isNo ? " ganger " : " times ")
+      .replace(/÷/g, isNo ? " delt på " : " divided by ")
+      .replace(/⇌|↔|⇔/g, isNo ? " i likevekt med " : " in equilibrium with ")
+      .replace(/→|⇒/g, isNo ? " til " : " to ")
+      .replace(/\\bg\\s*\\/\\s*cm(?:³|\\^3|3)(?![a-zA-Z0-9])/g, isNo ? "gram per kubikkcentimeter" : "grams per cubic centimeter")
+      .replace(/\\bkg\\s*\\/\\s*m(?:³|\\^3|3)(?![a-zA-Z0-9])/g, isNo ? "kilogram per kubikkmeter" : "kilograms per cubic meter")
+      .replace(/\\bkm\\s*\\/\\s*s(?![a-zA-Z0-9])/g, isNo ? "kilometer per sekund" : "kilometers per second")
+      .replace(/\\bm\\s*\\/\\s*s(?:²|\\^2|2)(?![a-zA-Z0-9])/g, isNo ? "meter per sekund i annen" : "meters per second squared")
+      .replace(/\\bm\\s*\\/\\s*s(?![a-zA-Z0-9])/g, isNo ? "meter per sekund" : "meters per second")
+      .replace(/\\bW\\s*\\/\\s*m(?:²|\\^2|2)(?![a-zA-Z0-9])/g, isNo ? "watt per kvadratmeter" : "watts per square meter")
+      .replace(/\\bkW\\s*\\/\\s*kg(?![a-zA-Z0-9])/g, isNo ? "kilowatt per kilogram" : "kilowatts per kilogram")
+      .replace(/\\bkm(?:²|\\^2)(?![a-zA-Z0-9])/g, isNo ? "kvadratkilometer" : "square kilometers")
+      .replace(/\\bm(?:²|\\^2)(?![a-zA-Z0-9])/g, isNo ? "kvadratmeter" : "square meters")
+      .replace(/\\bm(?:³|\\^3)(?![a-zA-Z0-9])/g, isNo ? "kubikkmeter" : "cubic meters")
+      .replace(/\\bh⁻¹(?![a-zA-Z0-9])/g, isNo ? "per time" : "per hour")
+      .replace(/\\bs⁻¹(?![a-zA-Z0-9])/g, isNo ? "per sekund" : "per second")
+      .replace(/(?:μ|µ)g\\b/g, isNo ? "mikro-g" : "micro-g")
+      .replace(/(?:μ|µ)m\\b/g, isNo ? "mikrometer" : "micrometers")
+      .replace(/°C\\b/g, isNo ? " grader celsius" : " degrees Celsius")
+      .replace(/°F\\b/g, isNo ? " grader fahrenheit" : " degrees Fahrenheit")
+      .replace(/°/g, isNo ? " grader " : " degrees ");
+    // Normalize subscript/superscript digits in identifiers (e.g. NPV₈ -> NPV 8, CO₂ -> CO2)
+    const subDigits = { "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4", "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9", "ₓ": "x" };
+    const supDigits = { "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9", "⁺": "+", "⁻": "-" };
+    s = s.replace(/\\b(NPV|IRR|TRL|Tier)_?([₀₁₂₃₄₅₆₇₈₉0-9]+)/gi, function (_m, prefix, digits) {
+      const cleanD = String(digits).replace(/[₀₁₂₃₄₅₆₇₈₉]/g, function (d) { return subDigits[d] || d; });
+      return prefix + " " + cleanD;
+    });
+    s = s.replace(/[₀₁₂₃₄₅₆₇₈₉ₓ]/g, function (d) { return subDigits[d] || d; });
+    s = s.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]/g, function (d) { return supDigits[d] || d; });
+    return s.replace(/\\s+/g, " ").trim();
+  }
+
+  function cloneDataValue(val) {
+    if (val === null || val === undefined || typeof val !== "object") return val;
+    if (typeof structuredClone === "function") {
+      try {
+        return structuredClone(val);
+      } catch (_e) {}
+    }
+    try {
+      return JSON.parse(JSON.stringify(val));
+    } catch (_e) {
+      return val;
+    }
+  }
+
   if (typeof window !== "undefined" && window.__ICM_TEST_HOOKS__) {
     window.__ICM_TEST_HOOKS__.formatInlineLatexAndFootnotes = formatInlineLatexAndFootnotes;
     window.__ICM_TEST_HOOKS__.cleanClientChecklistLabel = cleanClientChecklistLabel;
@@ -8529,6 +9265,9 @@ const A2UI_STUDIO_JS = `
     window.__ICM_TEST_HOOKS__.isInlineLatexMath = isInlineLatexMath;
     window.__ICM_TEST_HOOKS__.replaceInlineLatexSpans = replaceInlineLatexSpans;
     window.__ICM_TEST_HOOKS__.detectSpeechLang = detectSpeechLang;
+    window.__ICM_TEST_HOOKS__.normalizeTextForTts = normalizeTextForTts;
+    window.__ICM_TEST_HOOKS__.setPointer = setPointer;
+    window.__ICM_TEST_HOOKS__.cloneDataValue = cloneDataValue;
     return;
   }
   const payload = window.A2UI_SURFACE_PAYLOAD;
@@ -8577,12 +9316,13 @@ const A2UI_STUDIO_JS = `
     if (!pointer.startsWith("/") && scopePath) {
       fullPointer = scopePath.replace(/\\/$/, "") + "/" + pointer;
     }
+    const clonedValue = cloneDataValue(value);
     if (!fullPointer || fullPointer === "/") {
       for (const k of Object.keys(root)) {
         delete root[k];
       }
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        Object.assign(root, value);
+      if (clonedValue && typeof clonedValue === "object" && !Array.isArray(clonedValue)) {
+        Object.assign(root, clonedValue);
       }
       return;
     }
@@ -8598,14 +9338,14 @@ const A2UI_STUDIO_JS = `
       cur = cur[k];
     }
     const lastPart = parts[parts.length - 1];
-    if (value === undefined) {
+    if (clonedValue === undefined) {
       if (Array.isArray(cur) && /^\\d+$/.test(lastPart)) {
         cur[Number(lastPart)] = undefined;
       } else if (cur && typeof cur === "object") {
         delete cur[lastPart];
       }
     } else {
-      cur[lastPart] = value;
+      cur[lastPart] = clonedValue;
     }
   }
 
@@ -8716,7 +9456,7 @@ const A2UI_STUDIO_JS = `
       surfaces[s.surfaceId] = {
         surfaceId: s.surfaceId,
         catalogId: s.catalogId,
-        theme: s.theme || {},
+        theme: cloneDataValue(s.theme || {}),
         sendDataModel: !!s.sendDataModel,
         components: {},
         dataModel: {},
@@ -8727,13 +9467,13 @@ const A2UI_STUDIO_JS = `
       const s = surfaces[msg.updateComponents.surfaceId];
       if (!s) return;
       for (const c of msg.updateComponents.components || []) {
-        s.components[c.id] = c;
+        s.components[c.id] = cloneDataValue(c);
       }
     } else if (msg.updateDataModel) {
       const s = surfaces[msg.updateDataModel.surfaceId];
       if (!s) return;
       const p = msg.updateDataModel.path || "/";
-      setPointer(s.dataModel, p, msg.updateDataModel.value);
+      setPointer(s.dataModel, p, cloneDataValue(msg.updateDataModel.value));
     } else if (msg.deleteSurface) {
       delete surfaces[msg.deleteSurface.surfaceId];
     }
@@ -8755,77 +9495,126 @@ const A2UI_STUDIO_JS = `
     function cleanLatexFrag(frag, isInsideMathSpan) {
       let out = String(frag || "")
         .replace(/\\\\(?:left|right)\\s*([()[\\]|.])?/g, "$1")
-        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
-        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
-        .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
+        .replace(/\\\\mathcal\\{R\\}/g, "ℛ")
+        .replace(/\\\\mathcal\\{([A-Za-z])\\}/g, "$1")
+        .replace(/\\\\sqrt\\{\\s*([^{}]+?)\\s*\\}/g, "√($1)")
+        .replace(/\\\\overline\\{\\s*([^{}]+?)\\s*\\}/g, "$1")
+        .replace(/\\\\(?:hat|bar|tilde|vec)\\{\\s*([^{}]+?)\\s*\\}/g, "$1")
         .replace(/\\\\(?:[,;:]|\\s+|quad\\b|qquad\\b)/g, " ")
         .replace(/\\\\!/g, "")
-        .replace(/\\\\sim\\b/g, "~")
+        .replace(/\\\\sim(?![a-zA-Z])/g, "~")
+        .replace(/\\\\simeq(?![a-zA-Z])/g, "≃")
+        .replace(/\\\\cong(?![a-zA-Z])/g, "≅")
+        .replace(/\\\\propto(?![a-zA-Z])/g, "∝")
+        .replace(/\\\\perp(?![a-zA-Z])/g, "⊥")
+        .replace(/\\\\parallel(?![a-zA-Z])/g, "∥")
         .replace(/\\\\leftrightarrow/g, "↔")
-        .replace(/\\\\Leftrightarrow/g, "⇔")
-        .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
-        .replace(/\\\\Rightarrow/g, "⇒")
+        .replace(/\\\\Leftrightarrow|\\\\iff(?![a-zA-Z])/g, "⇔")
+        .replace(/\\\\rightarrow|\\\\to(?![a-zA-Z])/g, "→")
+        .replace(/\\\\Rightarrow|\\\\implies(?![a-zA-Z])/g, "⇒")
         .replace(/\\\\leftarrow/g, "←")
         .replace(/\\\\Leftarrow/g, "⇐")
-        .replace(/\\\\(?:ge|geq)\\b/g, "≥")
-        .replace(/\\\\(?:le|leq)\\b/g, "≤")
-        .replace(/\\\\(?:neq|ne)\\b/g, "≠")
-        .replace(/\\\\approx\\b/g, "≈")
-        .replace(/\\\\times\\b/g, "×")
-        .replace(/\\\\div\\b/g, "÷")
-        .replace(/\\\\pm\\b/g, "±")
-        .replace(/\\\\cdot\\b/g, "·")
-        .replace(/\\\\(?:dots|ldots|cdots)\\b/g, "…")
-        .replace(/\\\\infty\\b/g, "∞")
-        .replace(/\\\\Delta\\b/g, "Δ")
-        .replace(/\\\\delta\\b/g, "δ")
-        .replace(/\\\\mu\\b/g, "μ")
-        .replace(/\\\\Omega\\b/g, "Ω")
-        .replace(/\\\\omega\\b/g, "ω")
-        .replace(/\\\\alpha\\b/g, "α")
-        .replace(/\\\\beta\\b/g, "β")
-        .replace(/\\\\gamma\\b/g, "γ")
-        .replace(/\\\\lambda\\b/g, "λ")
-        .replace(/\\\\pi\\b/g, "π")
-        .replace(/\\\\sigma\\b/g, "σ")
-        .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
-        .replace(/\\\\([$&%_#{}])/g, "$1")
-        .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
-        .replace(/\\^\\{\\s*([0-9+\\-=()a-pr-z]+)\\s*\\}|\\^([0-9+\\-a-pr-z])(?![a-zA-Z0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9+\\-=()a-pr-z]/g, function (d) {
-            return supMap[d] || d;
-          });
+        .replace(/\\\\(?:ge|geq)(?![a-zA-Z])/g, "≥")
+        .replace(/\\\\(?:le|leq)(?![a-zA-Z])/g, "≤")
+        .replace(/\\\\(?:neq|ne)(?![a-zA-Z])/g, "≠")
+        .replace(/\\\\approx(?![a-zA-Z])/g, "≈")
+        .replace(/\\\\equiv(?![a-zA-Z])/g, "≡")
+        .replace(/\\\\ll(?![a-zA-Z])/g, "≪")
+        .replace(/\\\\gg(?![a-zA-Z])/g, "≫")
+        .replace(/\\\\times(?![a-zA-Z])/g, "×")
+        .replace(/\\\\div(?![a-zA-Z])/g, "÷")
+        .replace(/\\\\pm(?![a-zA-Z])/g, "±")
+        .replace(/\\\\mp(?![a-zA-Z])/g, "∓")
+        .replace(/\\\\cdot(?![a-zA-Z])/g, "·")
+        .replace(/\\\\(?:dots|ldots|cdots)(?![a-zA-Z])/g, "…")
+        .replace(/\\\\infty(?![a-zA-Z])/g, "∞")
+        .replace(/\\\\partial(?![a-zA-Z])/g, "∂")
+        .replace(/\\\\nabla(?![a-zA-Z])/g, "∇")
+        .replace(/\\\\sum(?![a-zA-Z])/g, "∑")
+        .replace(/\\\\prod(?![a-zA-Z])/g, "∏")
+        .replace(/\\\\int(?![a-zA-Z])/g, "∫")
+        .replace(/\\\\Delta\\s+([a-zA-Z])(?![a-zA-Z])/g, "Δ$1")
+        .replace(/\\\\Delta(?![a-zA-Z])/g, "Δ")
+        .replace(/\\\\delta(?![a-zA-Z])/g, "δ")
+        .replace(/\\\\mu(?![a-zA-Z])/g, "μ")
+        .replace(/\\\\Omega(?![a-zA-Z])/g, "Ω")
+        .replace(/\\\\omega(?![a-zA-Z])/g, "ω")
+        .replace(/\\\\alpha(?![a-zA-Z])/g, "α")
+        .replace(/\\\\beta(?![a-zA-Z])/g, "β")
+        .replace(/\\\\gamma(?![a-zA-Z])/g, "γ")
+        .replace(/\\\\Gamma(?![a-zA-Z])/g, "Γ")
+        .replace(/\\\\lambda(?![a-zA-Z])/g, "λ")
+        .replace(/\\\\Lambda(?![a-zA-Z])/g, "Λ")
+        .replace(/\\\\pi(?![a-zA-Z])/g, "π")
+        .replace(/\\\\Pi(?![a-zA-Z])/g, "Π")
+        .replace(/\\\\sigma(?![a-zA-Z])/g, "σ")
+        .replace(/\\\\Sigma(?![a-zA-Z])/g, "Σ")
+        .replace(/\\\\rho(?![a-zA-Z])/g, "ρ")
+        .replace(/\\\\theta(?![a-zA-Z])/g, "θ")
+        .replace(/\\\\Theta(?![a-zA-Z])/g, "Θ")
+        .replace(/\\\\tau(?![a-zA-Z])/g, "τ")
+        .replace(/\\\\phi(?![a-zA-Z])|\\\\varphi(?![a-zA-Z])/g, "φ")
+        .replace(/\\\\Phi(?![a-zA-Z])/g, "Φ")
+        .replace(/\\\\eta(?![a-zA-Z])/g, "η")
+        .replace(/\\\\kappa(?![a-zA-Z])/g, "κ")
+        .replace(/\\\\epsilon(?![a-zA-Z])|\\\\varepsilon(?![a-zA-Z])/g, "ε")
+        .replace(/\\\\zeta(?![a-zA-Z])/g, "ζ")
+        .replace(/\\\\nu(?![a-zA-Z])/g, "ν")
+        .replace(/\\\\xi(?![a-zA-Z])/g, "ξ")
+        .replace(/\\\\chi(?![a-zA-Z])/g, "χ")
+        .replace(/\\\\psi(?![a-zA-Z])/g, "ψ")
+        .replace(/\\\\Psi(?![a-zA-Z])/g, "Ψ")
+        .replace(/\\\\(?:ln|exp|log|sin|cos|tan|min|max|lim|sup|inf)(?![a-zA-Z])/g, function (m) {
+          return m.slice(1);
         })
-        .replace(/_\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}/g, function (_m, b) {
-          return String(b).replace(/[0-9+-]/g, function (d) {
-            return subMap[d] || d;
-          });
-        });
-      if (isInsideMathSpan) {
+        .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°");
+      for (let pass = 0; pass < 3; pass++) {
         out = out
-          .replace(/~/g, " ")
-          .replace(/_([+-]?[0-9])(?![0-9])/g, function (_sub, s) {
-            return String(s).replace(/[0-9+-]/g, function (d) {
-              return subMap[d] || d;
+          .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+          .replace(/\\\\(?:xrightleftharpoons|rightleftharpoons)(?:\\[[^\\]]*\\])?(?:\\{[^{}]*\\})?/g, "⇌")
+          .replace(/\\\\(?:xrightarrow|xleftarrow)(?:\\[[^\\]]*\\])?(?:\\{[^{}]*\\})?/g, "→")
+          .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
+          .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
+          .replace(/\\^\\{\\s*([0-9+\\-=()a-pr-z]+)\\s*\\}|\\^([0-9+\\-a-pr-z])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+            return String(b || s).replace(/[0-9+\\-=()a-pr-z]/g, function (d) {
+              return supMap[d] || d;
             });
           })
-          .replace(/_\\{\\s*([aehijklmnoprstuvx]+)\\s*\\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g, function (_m, b, s) {
-            return String(b || s).replace(/[aehijklmnoprstuvx]/g, function (d) {
+          .replace(/_\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}/g, function (_m, b) {
+            return String(b).replace(/[0-9+-]/g, function (d) {
               return subMap[d] || d;
             });
           });
+        if (isInsideMathSpan) {
+          out = out
+            .replace(/~/g, " ")
+            .replace(/_([+-]?[0-9])(?![0-9])/g, function (_sub, s) {
+              return String(s).replace(/[0-9+-]/g, function (d) {
+                return subMap[d] || d;
+              });
+            })
+            .replace(/_\\{\\s*([aehijklmnoprstuvx]+)\\s*\\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+              return String(b || s).replace(/[aehijklmnoprstuvx]/g, function (d) {
+                return subMap[d] || d;
+              });
+            })
+            .replace(/_\\{\\s*([^{}]+?)\\s*\\}/g, "_$1")
+            .replace(/\\^\\{\\s*([^{}]+?)\\s*\\}/g, "^$1");
+        }
       }
-      return out.replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1");
+      return out
+        .replace(/\\\\([$&%_#{}])/g, "$1")
+        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1");
     }
 
     let text = String(rawText || "").trim();
-    text = text.replace(/\\[\\^[^\\]]+\\]/g, "");
+    text = stripClientFootnotesPreservingBoundaries(text);
     text = replaceInlineLatexSpans(text, function (_m, inner) {
       return cleanLatexFrag(inner, true).trim();
     });
     text = cleanLatexFrag(text, false);
-    text = text.replace(/\\b(CO|H|O|N|SO|NO|CH|A|B|R|EI|REI)_([0-9]|x)(?![a-zA-Z0-9])/g, function (_m, prefix, s) {
-      return prefix + (subMap[s] || s);
+    text = text.replace(/\\b(CO|H|O|N|SO|NO|CH|Fe|Ni|Si|Mg|Al|Ca|Ti|A|B|R|EI|REI|NPV|IRR)_([0-9]+|x)(?![a-zA-Z0-9])/g, function (_m, prefix, s) {
+      return prefix + String(s).replace(/[0-9x]/g, function (d) { return subMap[d] || d; });
     });
     text = text.replace(/\\[([^\\]]+)\\]\\([^)]+\\)/g, "$1");
     text = text
@@ -8896,7 +9685,7 @@ const A2UI_STUDIO_JS = `
         break;
       }
 
-      const contentWithoutFootnotes = rawContent.replace(/\\[\\^[^\\]]+\\]/g, "").trim();
+      const contentWithoutFootnotes = stripClientFootnotesPreservingBoundaries(rawContent).trim();
       const isBoldColonHeader = /^\\*\\*[^*]+\\*\\*:?\\s*$/.test(contentWithoutFootnotes);
 
       if (isBoldColonHeader || hasIndentedSubItems) {
@@ -8987,7 +9776,7 @@ const A2UI_STUDIO_JS = `
         }
         break;
       }
-      const contentWithoutFootnotes = rawContent.replace(/\\[\\^[^\\]]+\\]/g, "").trim();
+      const contentWithoutFootnotes = stripClientFootnotesPreservingBoundaries(rawContent).trim();
       const isBoldColonHeader = /^\\*\\*[^*]+\\*\\*:?\\s*$/.test(contentWithoutFootnotes);
       if (isBoldColonHeader || hasIndentedSubItems) {
         continue;
@@ -9078,8 +9867,10 @@ const A2UI_STUDIO_JS = `
   function speakNarration(text) {
     if (!window.speechSynthesis || !text) return;
     window.speechSynthesis.cancel();
-    const utter = new SpeechSynthesisUtterance(String(text));
-    utter.lang = detectSpeechLang(text);
+    const lang = detectSpeechLang(text);
+    const spokenText = normalizeTextForTts(text, lang);
+    const utter = new SpeechSynthesisUtterance(spokenText);
+    utter.lang = lang;
     window.speechSynthesis.speak(utter);
   }
 
@@ -9102,63 +9893,115 @@ const A2UI_STUDIO_JS = `
     out = out.replace(/\\r?\\n+---\\s*$/g, "");
     out = out.replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,4}\\s+(?:\\*\\*|__)?(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:Sources?(?:\\s*(?:&|and|\\/)\\s*(?:Citations?|Footnotes?|References?))?|References?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|Citations?|Sources?))?|Citations?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|References?))?|Footnotes?(?:\\s*(?:&|and|\\/)\\s*(?:References?|Sources?))?|Grounded\\s+Search\\s+References|Kildehenvisninger(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter))?|Kilder(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter|kildehenvisninger))?|Kildeliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Referanser(?:\\s*(?:og|&|\\/)\\s*(?:fotnoter|kilder))?|Referanseliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Fotnoter(?:\\s*(?:og|&|\\/)\\s*(?:kilder|referanser))?):?(?:\\*\\*|__)?(?:\\r?\\n+---)?\\s*$/i, "");
     out = out.replace(/\\r?\\n+---\\s*$/g, "").trim();
-    // Format inline TeX math spans ($...$) safely without matching currency $ pairs or table pipes
+    // Format inline TeX math spans ($...$ and $$...$$) safely without matching currency $ pairs or table pipes
     out = replaceInlineLatexSpans(out, function (_, inner) {
-      const cleaned = String(inner)
+      let cleaned = String(inner)
         .replace(/\\\\(?:left|right)\\s*([()[\\]|.])?/g, "$1")
-        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
-        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
-        .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2")
+        .replace(/\\\\mathcal\\{R\\}/g, "ℛ")
+        .replace(/\\\\mathcal\\{([A-Za-z])\\}/g, "$1")
+        .replace(/\\\\sqrt\\{\\s*([^{}]+?)\\s*\\}/g, "√($1)")
+        .replace(/\\\\overline\\{\\s*([^{}]+?)\\s*\\}/g, "$1")
+        .replace(/\\\\(?:hat|bar|tilde|vec)\\{\\s*([^{}]+?)\\s*\\}/g, "$1")
         .replace(/\\\\(?:[,;:]|\\s+|quad\\b|qquad\\b)/g, " ")
         .replace(/~/g, " ")
         .replace(/\\\\!/g, "")
-        .replace(/\\\\sim\\b/g, "~")
+        .replace(/\\\\sim(?![a-zA-Z])/g, "~")
+        .replace(/\\\\simeq(?![a-zA-Z])/g, "≃")
+        .replace(/\\\\cong(?![a-zA-Z])/g, "≅")
+        .replace(/\\\\propto(?![a-zA-Z])/g, "∝")
+        .replace(/\\\\perp(?![a-zA-Z])/g, "⊥")
+        .replace(/\\\\parallel(?![a-zA-Z])/g, "∥")
         .replace(/\\\\leftrightarrow/g, "↔")
-        .replace(/\\\\Leftrightarrow/g, "⇔")
-        .replace(/\\\\rightarrow|\\\\to\\b/g, "→")
-        .replace(/\\\\Rightarrow/g, "⇒")
+        .replace(/\\\\Leftrightarrow|\\\\iff(?![a-zA-Z])/g, "⇔")
+        .replace(/\\\\rightarrow|\\\\to(?![a-zA-Z])/g, "→")
+        .replace(/\\\\Rightarrow|\\\\implies(?![a-zA-Z])/g, "⇒")
         .replace(/\\\\leftarrow/g, "←")
         .replace(/\\\\Leftarrow/g, "⇐")
-        .replace(/\\\\(?:ge|geq)\\b/g, "≥")
-        .replace(/\\\\(?:le|leq)\\b/g, "≤")
-        .replace(/\\\\(?:neq|ne)\\b/g, "≠")
-        .replace(/\\\\approx\\b/g, "≈")
-        .replace(/\\\\times\\b/g, "×")
-        .replace(/\\\\div\\b/g, "÷")
-        .replace(/\\\\pm\\b/g, "±")
-        .replace(/\\\\cdot\\b/g, "·")
-        .replace(/\\\\(?:dots|ldots|cdots)\\b/g, "…")
-        .replace(/\\\\infty\\b/g, "∞")
-        .replace(/\\\\Delta\\b/g, "Δ")
-        .replace(/\\\\delta\\b/g, "δ")
-        .replace(/\\\\mu\\b/g, "μ")
-        .replace(/\\\\Omega\\b/g, "Ω")
-        .replace(/\\\\omega\\b/g, "ω")
-        .replace(/\\\\alpha\\b/g, "α")
-        .replace(/\\\\beta\\b/g, "β")
-        .replace(/\\\\gamma\\b/g, "γ")
-        .replace(/\\\\lambda\\b/g, "λ")
-        .replace(/\\\\pi\\b/g, "π")
-        .replace(/\\\\sigma\\b/g, "σ")
-        .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°")
+        .replace(/\\\\(?:ge|geq)(?![a-zA-Z])/g, "≥")
+        .replace(/\\\\(?:le|leq)(?![a-zA-Z])/g, "≤")
+        .replace(/\\\\(?:neq|ne)(?![a-zA-Z])/g, "≠")
+        .replace(/\\\\approx(?![a-zA-Z])/g, "≈")
+        .replace(/\\\\equiv(?![a-zA-Z])/g, "≡")
+        .replace(/\\\\ll(?![a-zA-Z])/g, "≪")
+        .replace(/\\\\gg(?![a-zA-Z])/g, "≫")
+        .replace(/\\\\times(?![a-zA-Z])/g, "×")
+        .replace(/\\\\div(?![a-zA-Z])/g, "÷")
+        .replace(/\\\\pm(?![a-zA-Z])/g, "±")
+        .replace(/\\\\mp(?![a-zA-Z])/g, "∓")
+        .replace(/\\\\cdot(?![a-zA-Z])/g, "·")
+        .replace(/\\\\(?:dots|ldots|cdots)(?![a-zA-Z])/g, "…")
+        .replace(/\\\\infty(?![a-zA-Z])/g, "∞")
+        .replace(/\\\\partial(?![a-zA-Z])/g, "∂")
+        .replace(/\\\\nabla(?![a-zA-Z])/g, "∇")
+        .replace(/\\\\sum(?![a-zA-Z])/g, "∑")
+        .replace(/\\\\prod(?![a-zA-Z])/g, "∏")
+        .replace(/\\\\int(?![a-zA-Z])/g, "∫")
+        .replace(/\\\\Delta\\s+([a-zA-Z])(?![a-zA-Z])/g, "Δ$1")
+        .replace(/\\\\Delta(?![a-zA-Z])/g, "Δ")
+        .replace(/\\\\delta(?![a-zA-Z])/g, "δ")
+        .replace(/\\\\mu(?![a-zA-Z])/g, "μ")
+        .replace(/\\\\Omega(?![a-zA-Z])/g, "Ω")
+        .replace(/\\\\omega(?![a-zA-Z])/g, "ω")
+        .replace(/\\\\alpha(?![a-zA-Z])/g, "α")
+        .replace(/\\\\beta(?![a-zA-Z])/g, "β")
+        .replace(/\\\\gamma(?![a-zA-Z])/g, "γ")
+        .replace(/\\\\Gamma(?![a-zA-Z])/g, "Γ")
+        .replace(/\\\\lambda(?![a-zA-Z])/g, "λ")
+        .replace(/\\\\Lambda(?![a-zA-Z])/g, "Λ")
+        .replace(/\\\\pi(?![a-zA-Z])/g, "π")
+        .replace(/\\\\Pi(?![a-zA-Z])/g, "Π")
+        .replace(/\\\\sigma(?![a-zA-Z])/g, "σ")
+        .replace(/\\\\Sigma(?![a-zA-Z])/g, "Σ")
+        .replace(/\\\\rho(?![a-zA-Z])/g, "ρ")
+        .replace(/\\\\theta(?![a-zA-Z])/g, "θ")
+        .replace(/\\\\Theta(?![a-zA-Z])/g, "Θ")
+        .replace(/\\\\tau(?![a-zA-Z])/g, "τ")
+        .replace(/\\\\phi(?![a-zA-Z])|\\\\varphi(?![a-zA-Z])/g, "φ")
+        .replace(/\\\\Phi(?![a-zA-Z])/g, "Φ")
+        .replace(/\\\\eta(?![a-zA-Z])/g, "η")
+        .replace(/\\\\kappa(?![a-zA-Z])/g, "κ")
+        .replace(/\\\\epsilon(?![a-zA-Z])|\\\\varepsilon(?![a-zA-Z])/g, "ε")
+        .replace(/\\\\zeta(?![a-zA-Z])/g, "ζ")
+        .replace(/\\\\nu(?![a-zA-Z])/g, "ν")
+        .replace(/\\\\xi(?![a-zA-Z])/g, "ξ")
+        .replace(/\\\\chi(?![a-zA-Z])/g, "χ")
+        .replace(/\\\\psi(?![a-zA-Z])/g, "ψ")
+        .replace(/\\\\Psi(?![a-zA-Z])/g, "Ψ")
+        .replace(/\\\\(?:ln|exp|log|sin|cos|tan|min|max|lim|sup|inf)(?![a-zA-Z])/g, function (m) {
+          return m.slice(1);
+        })
+        .replace(/\\\\(?:circ|degree)(?![a-z])/g, "°");
+      for (let pass = 0; pass < 3; pass++) {
+        cleaned = cleaned
+          .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
+          .replace(/\\\\(?:xrightleftharpoons|rightleftharpoons)(?:\\[[^\\]]*\\])?(?:\\{[^{}]*\\})?/g, "⇌")
+          .replace(/\\\\(?:xrightarrow|xleftarrow)(?:\\[[^\\]]*\\])?(?:\\{[^{}]*\\})?/g, "→")
+          .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
+          .replace(/\\^\\{\\s*([0-9+\\-=()a-pr-z]+)\\s*\\}|\\^([0-9+\\-a-pr-z])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+            return String(b || s).replace(/[0-9+\\-=()a-pr-z]/g, function (d) {
+              return supMap[d] || d;
+            });
+          })
+          .replace(/_\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|_([+-]?[0-9])(?![0-9])/g, function (_m, b, s) {
+            return String(b || s).replace(/[0-9+-]/g, function (d) {
+              return subMap[d] || d;
+            });
+          })
+          .replace(/_\\{\\s*([aehijklmnoprstuvx]+)\\s*\\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g, function (_m, b, s) {
+            return String(b || s).replace(/[aehijklmnoprstuvx]/g, function (d) {
+              return subMap[d] || d;
+            });
+          })
+          .replace(/_\\{\\s*([^{}]+?)\\s*\\}|_([a-zA-Z0-9,]+)(?![a-zA-Z0-9])/g, function (_m, b, s) {
+            return "<sub>" + escapeHtml(String(b || s)) + "</sub>";
+          })
+          .replace(/\\^\\{\\s*([^{}]+?)\\s*\\}|\\^([a-zA-Z0-9+\\-]+)(?![a-zA-Z0-9])/g, function (_m, b, s) {
+            return "<sup>" + escapeHtml(String(b || s)) + "</sup>";
+          })
+          .replace(/\\\\frac\\{\\s*([^{}]+?)\\s*\\}\\{\\s*([^{}]+?)\\s*\\}/g, "$1/$2");
+      }
+      cleaned = cleaned
         .replace(/\\\\([$&%_#{}])/g, "$1")
-        .replace(/\\^\\{\\s*(?:°|o)\\s*([CFK])?\\s*\\}|\\^°/g, "°$1")
-        .replace(/\\^\\{\\s*([0-9+\\-=()a-pr-z]+)\\s*\\}|\\^([0-9+\\-a-pr-z])(?![a-zA-Z0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9+\\-=()a-pr-z]/g, function (d) {
-            return supMap[d] || d;
-          });
-        })
-        .replace(/_\\{\\s*([+-]?[0-9]+|[+-])\\s*\\}|_([+-]?[0-9])(?![0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[0-9+-]/g, function (d) {
-            return subMap[d] || d;
-          });
-        })
-        .replace(/_\\{\\s*([aehijklmnoprstuvx]+)\\s*\\}|_([aehijklmnoprstuvx])(?![a-zA-Z0-9])/g, function (_m, b, s) {
-          return String(b || s).replace(/[aehijklmnoprstuvx]/g, function (d) {
-            return subMap[d] || d;
-          });
-        })
-        .replace(/\\\\(?:text|mathrm|textbf|textit|mathit|mathsf|emph|operatorname)\\{([^{}]*)\\}/g, "$1")
         .replace(/\\s+/g, " ")
         .trim();
       if (!/[\\\\{}^_]/.test(cleaned)) {
@@ -9744,7 +10587,12 @@ const A2UI_STUDIO_JS = `
         narBox.style.background = "var(--bg)";
         narBox.style.borderRadius = "8px";
         narBox.style.borderLeft = "4px solid var(--primary)";
-        narBox.textContent = mod.narration;
+        if (window.marked && typeof window.marked.parse === "function") {
+          narBox.style.whiteSpace = "normal";
+          narBox.innerHTML = window.marked.parse(formatInlineLatexAndFootnotes(mod.narration, []));
+        } else {
+          narBox.textContent = mod.narration;
+        }
         card.appendChild(narBox);
 
         const ttsPlayer = renderComponent(surface, {
@@ -9752,7 +10600,7 @@ const A2UI_STUDIO_JS = `
           component: "AudioPlayer",
           url: "tts://web-speech/module/" + (idx + 1),
           description: mod.title,
-          ttsText: mod.narration,
+          ttsText: mod.spokenNarration || mod.narration,
         });
         card.appendChild(ttsPlayer);
       }
@@ -11009,9 +11857,9 @@ export function generateA2uiSurface(
     {
       id: 'overview_tts_player',
       component: 'AudioPlayer',
-      url: 'tts://web-speech/stage2/scriptBody',
+      url: 'tts://web-speech/stage2/spokenScript',
       description: { path: '/meta/title' },
-      ttsText: { path: '/stage2/scriptBody' },
+      ttsText: { path: '/stage2/spokenScript' },
     },
     {
       id: 'overview_narration_body',
@@ -11248,6 +12096,13 @@ export function generateA2uiSurface(
     },
     stage2: {
       scriptBody:
+        stage2Norm.scriptBody ||
+        okfDoc.frontmatter.description ||
+        (isNo
+          ? 'Ingen Stage 2-manustekst generert ennå.'
+          : 'No Stage 2 synthesis text generated yet.'),
+      spokenScript:
+        stage2Norm.spokenScript ||
         stage2Norm.scriptBody ||
         okfDoc.frontmatter.description ||
         (isNo
@@ -12633,6 +13488,235 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   } finally {
     fs.rmSync(tmpAuditDir, { recursive: true, force: true });
   }
+
+  // Fix 1 Self-Test: Deep-clone protection in setJsonPointer and client A2UI setPointer (no reference aliasing)
+  const rawInitialModel = {
+    modules: { currentIndex: 0, total: 5 },
+    checklist: { completedCount: 0, groups: [{ id: 'g1', items: [{ id: 'i1', checked: false }] }] },
+  };
+  const serverModelRoot: Record<string, unknown> = {};
+  setJsonPointer(serverModelRoot, '/', rawInitialModel);
+  (serverModelRoot.modules as Record<string, unknown>).currentIndex = 4;
+  ((serverModelRoot.checklist as Record<string, unknown>).groups as Array<{ items: Array<{ checked: boolean }> }>)[0].items[0].checked = true;
+  assert(
+    rawInitialModel.modules.currentIndex === 0 &&
+      rawInitialModel.checklist.groups[0].items[0].checked === false,
+    'setJsonPointer deep-clones assigned objects so mutating the target dataModel never mutates the source message value'
+  );
+
+  const clientModelRoot: Record<string, unknown> = {};
+  studioHooks.setPointer(clientModelRoot, '/', rawInitialModel);
+  (clientModelRoot.modules as Record<string, unknown>).currentIndex = 3;
+  ((clientModelRoot.checklist as Record<string, unknown>).groups as Array<{ items: Array<{ checked: boolean }> }>)[0].items[0].checked = true;
+  assert(
+    rawInitialModel.modules.currentIndex === 0 &&
+      rawInitialModel.checklist.groups[0].items[0].checked === false,
+    'A2UI_STUDIO_JS setPointer deep-clones assigned objects so UI interactions never mutate historical messages[2].updateDataModel.value'
+  );
+
+  // Fix 2 Self-Test: LaTeX-to-Unicode macro ordering (6\text{ }\mu\text{g} -> 6 μg), acronym ratios ($SC/OC$), leading-digit math ($8,450+\text{ t}$), nested \frac, $$...$$ display math, and word-boundary footnote stripping
+  const asteroidLatexChecklist =
+    'Verify $6\\text{ }\\mu\\text{g}$ sample, ($a$) = 2.81 AU, $e = 0.5818$, $SC/OC$ = $0.3600$, $\\frac{1}{r^{2}}$ flux, $\\frac{v_{\\text{esc}}}{c}$ ratio, $8,450+\\text{ t}$ mass, $\\Delta v = 4.630\\text{ km/s}$, $\\mathcal{R}$, and $\\text{Ni(CO)}_4 \\xrightleftharpoons[50^\\circ\\text{C}]{180^\\circ\\text{C}} \\text{Ni} + 4\\text{CO}$ across Boulder[^src-1]Armoring and orbital[^src-2]TRL 6 while keeping $62M–$70M and $1,438/oz';
+  const expectedAsteroidChecklist =
+    'Verify 6 μg sample, (a) = 2.81 AU, e = 0.5818, SC/OC = 0.3600, 1/r² flux, v_esc/c ratio, 8,450+ t mass, Δv = 4.630 km/s, ℛ, and Ni(CO)₄ ⇌ Ni + 4CO across Boulder Armoring and orbital TRL 6 while keeping $62M–$70M and $1,438/oz';
+  const serverAsteroidChk = cleanChecklistLabel(asteroidLatexChecklist);
+  const clientAsteroidChk = studioHooks.cleanClientChecklistLabel(asteroidLatexChecklist);
+  assert(
+    serverAsteroidChk === expectedAsteroidChecklist &&
+      clientAsteroidChk === expectedAsteroidChecklist,
+    `cleanChecklistLabel and cleanClientChecklistLabel convert $6\\text{ }\\mu\\text{g}$ -> 6 μg, $SC/OC$ -> SC/OC, nested \\frac{v_{\\text{esc}}}{c} -> v_esc/c, $8,450+\\text{ t}$ -> 8,450+ t, \\mathcal{R} -> ℛ, \\xrightleftharpoons -> ⇌, and preserve word boundaries around footnotes (got server="${serverAsteroidChk}", client="${clientAsteroidChk}")`
+  );
+
+  const displayAndComplexMathMd = [
+    '$$NPV_8 = \\sum_{t=1}^{15} \\frac{FCF_t}{(1+r)^t} - CAPEX_0$$',
+    '',
+    'Sample mass is $6\\text{ }\\mu\\text{g}$, polarization ratio $SC/OC$ = $0.3600$, flux $\\frac{1}{r^{2}}$, escape ratio $\\frac{v_{\\text{esc}}}{c}$, payload $100,000+\\text{ kg}$, reflectance $\\mathcal{R}$, $\\Delta v$, and $NPV_{8,\\text{base}}$ at $62M–$70M ($1,438/oz).',
+  ].join('\n');
+  const formattedComplexA2ui = String(studioHooks.formatInlineLatexAndFootnotes(displayAndComplexMathMd, []));
+  const renderedComplexViz = String(vizHooks.renderMarkdownWithOkfFootnotes(displayAndComplexMathMd, []));
+  assert(
+    formattedComplexA2ui.includes('6 μg') &&
+      formattedComplexA2ui.includes('SC/OC = 0.3600') &&
+      formattedComplexA2ui.includes('1/r²') &&
+      formattedComplexA2ui.includes('v<sub>esc</sub>/c') &&
+      formattedComplexA2ui.includes('100,000+ kg') &&
+      formattedComplexA2ui.includes('ℛ') &&
+      formattedComplexA2ui.includes('Δv') &&
+      formattedComplexA2ui.includes('<sub>8,base</sub>') &&
+      formattedComplexA2ui.includes('$62M–$70M ($1,438/oz)') &&
+      !formattedComplexA2ui.includes('6\\mug') &&
+      !formattedComplexA2ui.includes('<code>') &&
+      renderedComplexViz.includes('6 μg') &&
+      renderedComplexViz.includes('SC/OC = 0.3600') &&
+      renderedComplexViz.includes('1/r²') &&
+      renderedComplexViz.includes('v<sub>esc</sub>/c') &&
+      renderedComplexViz.includes('100,000+ kg') &&
+      renderedComplexViz.includes('ℛ') &&
+      renderedComplexViz.includes('Δv') &&
+      renderedComplexViz.includes('<sub>8,base</sub>') &&
+      renderedComplexViz.includes('$62M–$70M ($1,438/oz)') &&
+      !renderedComplexViz.includes('6\\mug') &&
+      !renderedComplexViz.includes('<code>'),
+    `formatInlineLatexAndFootnotes and renderMarkdownWithOkfFootnotes render $$...$$ display math, nested \\frac{v_{\\text{esc}}}{c}, 6 μg, SC/OC, 100,000+ kg, ℛ, Δv, and multi-char subscripts via <sub> without <code> fallbacks (got A2UI="${formattedComplexA2ui}")`
+  );
+
+  // Fix 3 Self-Test: Dual-register TTS normalizer & automatic multi-paragraph splitting for wall-of-text Stage 2 fields
+  const ttsSampleEn =
+    'NPV_8 of -$1,795.7M at 3.88 ± 0.25 g/cm³, Iₛₚ of 380 s, 6 μg sample, and Δv of 4.630 km/s with $10,000/kg cap, $1.77T–$1.98T range, and ~$800.0B valuation.';
+  const normalizedTtsEn = String(studioHooks.normalizeTextForTts(ttsSampleEn, 'en-US'));
+  const normalizedTtsNo = String(studioHooks.normalizeTextForTts('3,88 ± 0,25 g/cm³ og Iₛₚ på 380 s', 'nb-NO'));
+  assert(
+    normalizedTtsEn.includes('NPV 8 of negative 1,795.7 million dollars') &&
+      normalizedTtsEn.includes('3.88 plus or minus 0.25 grams per cubic centimeter') &&
+      normalizedTtsEn.includes('specific impulse of 380 s') &&
+      normalizedTtsEn.includes('6 micro-g sample') &&
+      normalizedTtsEn.includes('delta-v of 4.630 kilometers per second') &&
+      normalizedTtsEn.includes('10,000 dollars per kilogram cap') &&
+      normalizedTtsEn.includes('1.77 trillion dollars to 1.98 trillion dollars range') &&
+      normalizedTtsEn.includes('approximately 800.0 billion dollars valuation') &&
+      normalizedTtsNo.includes('3,88 pluss eller minus 0,25 gram per kubikkcentimeter') &&
+      normalizedTtsNo.includes('spesifikk impuls på 380 s'),
+    `normalizeTextForTts expands symbolic financial/scientific notation into natural spoken English and Norwegian for Web Speech API (got EN="${normalizedTtsEn}", NO="${normalizedTtsNo}")`
+  );
+
+  const wallOfTextThesis = [
+    'Sentence one establishes the macro thesis for orbital resource extraction across near-Earth C-type and M-type targets.',
+    'Sentence two quantifies the launch cost threshold at $500/kg required for positive net present value.',
+    'Sentence three evaluates the astrobiological sample return constraints and cohesive boulder armoring.',
+    'Sentence four models the 15-year discounted cash flow trajectory under 25% annual supply shock decay.',
+    'Sentence five stress-tests platinum group metal market elasticity and refining capital intensity.',
+    'Sentence six concludes with a disciplined capital allocation recommendation for institutional portfolios.',
+  ].join(' ');
+  const wallNorm = normalizeStage2ForA2ui(
+    {
+      reportTitle: 'Wall of Text Test',
+      visualSummary: wallOfTextThesis,
+      spokenScript: 'Spoken narration version without symbols.',
+      pillars: [
+        {
+          pillarNumber: 1,
+          pillarTitle: 'Pillar 1',
+          analysis: wallOfTextThesis,
+          spokenNarration: 'Spoken pillar narration.',
+        },
+      ],
+    },
+    'Fallback'
+  );
+  assert(
+    wallNorm.scriptBody.includes('\n\n') &&
+      wallNorm.spokenScript === 'Spoken narration version without symbols.' &&
+      wallNorm.modules[0].narration.includes('\n\n') &&
+      wallNorm.modules[0].spokenNarration === 'Spoken pillar narration.',
+    'normalizeStage2ForA2ui automatically splits dense single-paragraph Stage 2 prose (> 420 chars, 5+ sentences) into readable multi-paragraph blocks and preserves separate visualSummary vs spokenScript fields'
+  );
+
+  // Fix 4 Self-Test: Low-signal grounding domain filter, HTML <title> extraction (including 302 redirects), and bare-domain source title enrichment
+  assert(
+    isLowSignalGroundingUrl('https://www.facebook.com/groups/space/posts/12345') &&
+      isLowSignalGroundingUrl('https://old.reddit.com/r/SpaceXLounge/comments/abc') &&
+      isLowSignalGroundingUrl('https://www.quora.com/What-is-asteroid-mining') &&
+      isLowSignalGroundingUrl('https://gradesfixer.com/free-essay-examples/asteroid-mining/') &&
+      !isLowSignalGroundingUrl('https://ntrs.nasa.gov/api/citations/20240001/downloads/report.pdf') &&
+      !isLowSignalGroundingUrl('https://arxiv.org/pdf/2401.12345.pdf') &&
+      !isLowSignalGroundingUrl('https://www.sec.gov/Archives/edgar/data/0001/filing.htm'),
+    'isLowSignalGroundingUrl filters social media, forum, and essay-mill domains while preserving institutional, academic, and regulatory sources'
+  );
+
+  assert(
+    extractHtmlTitleFromSnippet(
+      '<html><head><meta property="og:title" content="JPL Small-Body Database &#8212; 1986 DA"><title>Fallback</title></head></html>'
+    ) === 'JPL Small-Body Database — 1986 DA' &&
+      extractHtmlTitleFromSnippet('<html><head><title>NASA Technical Reports Server - Psyche Mission</title></head></html>') ===
+        'NASA Technical Reports Server - Psyche Mission',
+    'extractHtmlTitleFromSnippet extracts and decodes og:title and <title> from HTML snippets'
+  );
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const reqUrl = String(input);
+      if (reqUrl.includes('vertexaisearch.cloud.google.com/grounding-api-redirect/')) {
+        return new Response('', {
+          status: 302,
+          headers: { location: 'https://ntrs.nasa.gov/citations/20240001' },
+        });
+      }
+      return new Response(
+        '<html><head><title>NASA Technical Reports Server &#x2014; Psyche Mission</title></head></html>',
+        {
+          status: 200,
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            'last-modified': 'Wed, 15 May 2024 12:00:00 GMT',
+          },
+        }
+      );
+    }) as typeof fetch;
+    const redirectResult = await resolveRedirect(
+      'https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQ_mock'
+    );
+    assert(
+      redirectResult.url === 'https://ntrs.nasa.gov/citations/20240001' &&
+        redirectResult.pageTitle === 'NASA Technical Reports Server — Psyche Mission' &&
+        redirectResult.lastModified === '2024-05-15T12:00:00Z',
+      `resolveRedirect follows 302 redirect Location and extracts HTML <title> and Last-Modified from the destination page (got ${JSON.stringify(redirectResult)})`
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert(
+    enrichBareDomainSourceTitle('arxiv.org', 'https://arxiv.org/pdf/2305.09876.pdf') ===
+      'arxiv.org — arXiv:2305.09876' &&
+      enrichBareDomainSourceTitle('arxiv.org — 1810.03706V2', 'https://arxiv.org/pdf/1810.03706v2.pdf') ===
+        'arxiv.org — arXiv:1810.03706v2' &&
+      enrichBareDomainSourceTitle('instagram.com — Dc4kfsNgXId', 'https://www.instagram.com/p/Dc4kfsNgXId/') ===
+        'instagram.com' &&
+      enrichBareDomainSourceTitle(
+        'downloads',
+        'https://ntrs.nasa.gov/api/citations/20190002745/downloads/20190002745.pdf'
+      ) === 'ntrs.nasa.gov — Citations 20190002745' &&
+      enrichBareDomainSourceTitle(
+        'scirp.org — paperinformation',
+        'https://www.scirp.org/journal/paperinformation?paperid=112233'
+      ) === 'scirp.org — Paper 112233',
+    'enrichBareDomainSourceTitle enriches bare domain, arXiv ID ("arxiv.org — 1810.03706V2" -> "arxiv.org — arXiv:1810.03706v2"), opaque short-code ("instagram.com — Dc4kfsNgXId" -> "instagram.com"), and path-segment titles ("downloads", "paperinformation")'
+  );
+
+  const lowSignalOkfDoc = parseOkfDocument(
+    [
+      '---',
+      'type: Research Report',
+      'title: Low Signal Pruning Test',
+      'description: Test pruning of auto-generated low-signal sources.',
+      'status: draft',
+      'generated:',
+      '  model: gemini-4-argon',
+      '  timestamp: 2026-11-01T10:00:00Z',
+      'sources:',
+      '  - id: nasa-ntrs-2026',
+      '    title: NASA Technical Reports Server (NTRS)',
+      '    url: https://ntrs.nasa.gov/citations/20260001',
+      '    retrieved_at: 2026-11-01T10:00:00Z',
+      '  - id: src-4',
+      '    title: facebook.com',
+      '    url: https://www.facebook.com/groups/space/posts/999',
+      '    retrieved_at: 2026-11-01T10:00:00Z',
+      '---',
+      'Verified Boulder[^src-4]Armoring and orbital[^nasa-ntrs-2026]TRL 6.',
+    ].join('\n')
+  );
+  const healedLowSignalChanged = healOrphanOkfFootnotes(lowSignalOkfDoc);
+  assert(
+    healedLowSignalChanged === true &&
+      lowSignalOkfDoc.frontmatter.sources?.length === 1 &&
+      lowSignalOkfDoc.frontmatter.sources[0].id === 'nasa-ntrs-2026' &&
+      lowSignalOkfDoc.body.includes('Boulder Armoring') &&
+      !lowSignalOkfDoc.body.includes('[^src-4]') &&
+      lowSignalOkfDoc.body.includes('[^nasa-ntrs-2026]'),
+    `healOrphanOkfFootnotes prunes auto-generated low-signal sources (src-4 facebook.com) and preserves word boundaries ("Boulder Armoring")`
+  );
 
   console.log(`[ICM Self-Test] ✅ All ${assertions} assertions passed (0 tokens, including tsc --noEmit).`);
   return { passed: assertions };
