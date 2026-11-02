@@ -506,7 +506,11 @@ export async function streamGemini4ArgonInteraction(
       throw err;
     }
 
-    if (event.event_type === 'interaction.created' || event.event_type === 'interaction.completed') {
+    if (
+      event.event_type === 'interaction.created' ||
+      event.event_type === 'interaction.completed' ||
+      event.event_type === 'interaction.complete'
+    ) {
       const { steps, ...rest } = event.interaction || {};
       Object.assign(interaction, rest);
       if (Array.isArray(steps) && steps.length > 0) {
@@ -785,6 +789,14 @@ export async function streamGemini4ArgonInteraction(
       .join('; ');
     const err: any = new Error(`Gemini 4 Argon interaction failed: ${details || 'Unknown error'}`);
     err.status = interaction.errors?.[0]?.code;
+    throw err;
+  }
+
+  if (interaction.status === 'in_progress') {
+    const err: any = new Error(
+      `Gemini 4 Argon SSE stream closed prematurely while status was still 'in_progress' (${accumulatedText.length} chars received before stream drop)`
+    );
+    err.status = 503;
     throw err;
   }
 
@@ -1927,10 +1939,29 @@ export function isOkfStale(frontmatter: Record<string, any>, now?: Date): boolea
 
 export const is_stale = isOkfStale;
 
+export function transliterateNordicAscii(str: string): string {
+  return String(str || '')
+    .replace(/æ/g, 'ae')
+    .replace(/Æ/g, 'Ae')
+    .replace(/ø/g, 'o')
+    .replace(/Ø/g, 'O')
+    .replace(/å/g, 'a')
+    .replace(/Å/g, 'A')
+    .replace(/ä/g, 'a')
+    .replace(/Ä/g, 'A')
+    .replace(/ö/g, 'o')
+    .replace(/Ö/g, 'O')
+    .replace(/ü/g, 'u')
+    .replace(/Ü/g, 'U')
+    .replace(/ß/g, 'ss')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
 export function truncateSlugAtWordBoundary(
   rawSlug: string,
   maxLen: number,
-  minSnapPos = 20
+  minSnapPos = 12
 ): string {
   const clean = String(rawSlug || '').replace(/^-+|-+$/g, '');
   if (clean.length <= maxLen) {
@@ -1952,7 +1983,7 @@ function generateSourceSlugId(
   resourceUrl: string,
   usedIds: Set<string>
 ): string {
-  let base = titleOrUrl
+  let base = transliterateNordicAscii(titleOrUrl)
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -2016,7 +2047,7 @@ export function normalizeCanonicalSourceUrl(rawUrl?: string): string {
 }
 
 function normalizeSourceMatchKey(input?: string): string {
-  return String(input || '')
+  return transliterateNordicAscii(String(input || ''))
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -2233,14 +2264,14 @@ function isBareDomainTitle(title?: string): boolean {
     return true;
   }
   if (
-    /^(?:id\d+|\w*servlet|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|paperinformation|index|default)$/i.test(
+    /^(?:id\d+|\w*servlet|legosh(?:[_ ][a-z]{2})?|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|paperinformation|index|default)$/i.test(
       t
     )
   ) {
     return true;
   }
   if (
-    /\s+[—–-]\s+(?:id\d+|\w*servlet|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|paperinformation)$/i.test(
+    /\s+[—–-]\s+(?:id\d+|\w*servlet|legosh(?:[_ ][a-z]{2})?|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|paperinformation)$/i.test(
       t
     )
   ) {
@@ -2257,7 +2288,7 @@ function isBareDomainTitle(title?: string): boolean {
       /^(?:[0-9a-f]{16,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[_-\s]+/i.test(
         slugPart
       ) ||
-      /^(?:id\d+|\w*servlet|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|paperinformation)$/i.test(
+      /^(?:id\d+|\w*servlet|legosh(?:[_ ][a-z]{2})?|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|paperinformation)$/i.test(
         slugPart
       ) ||
       (!/[\s_-]/.test(slugPart) &&
@@ -2280,6 +2311,37 @@ export function enrichBareDomainSourceTitle(
   const cleanTitle = decodeHtmlEntities(String(rawTitle || '')).trim();
   const cleanUrl = String(resourceUrl || '').trim();
   if (!isBareDomainTitle(cleanTitle) && cleanTitle !== cleanUrl) {
+    if (
+      /^[\p{L}\p{N}]{1,15}$/u.test(cleanTitle) &&
+      /\p{L}/u.test(cleanTitle) &&
+      /^https?:\/\//i.test(cleanUrl) &&
+      !isVertexRedirectUrl(cleanUrl)
+    ) {
+      try {
+        const host = new URL(cleanUrl).hostname.replace(/^www\./i, '');
+        const domain = /^assets\.website-files\.com$/i.test(host) ? 'website-files.com' : host;
+        const domainParts = domain.toLowerCase().split('.').slice(0, -1);
+        const domainStem =
+          domainParts.length >= 2 && /^(?:co|gov|org|ac|edu|net)$/.test(domainParts[domainParts.length - 1])
+            ? domainParts[domainParts.length - 2]
+            : domainParts.length > 0
+              ? domainParts[domainParts.length - 1]
+              : '';
+        const lowerTitle = cleanTitle.toLowerCase();
+        const matchesDomainStem =
+          Boolean(domainStem) &&
+          (lowerTitle === domainStem || (domainStem.length >= 4 && lowerTitle.includes(domainStem)));
+        if (
+          domain &&
+          !lowerTitle.includes(domain.toLowerCase()) &&
+          !matchesDomainStem
+        ) {
+          return `${domain} — ${cleanTitle}`;
+        }
+      } catch {
+        // Fall through and return cleanTitle
+      }
+    }
     return cleanTitle;
   }
   if (!/^https?:\/\//i.test(cleanUrl) || isVertexRedirectUrl(cleanUrl)) {
@@ -2318,10 +2380,16 @@ export function enrichBareDomainSourceTitle(
           !/^(?:index|default)\.(?:html?|aspx?|php)$/i.test(s)
       );
 
+    const isOracleApexPath =
+      /\/f$/i.test(parsed.pathname) && parsed.searchParams.has('p');
+
     const isOpaqueOrBucket = (seg: string): boolean => {
+      if (isOracleApexPath) {
+        return true;
+      }
       const noExt = seg.replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
       if (
-        /^(?:_f|p\d+|no|nb|nn|en|wiki|globalassets|contentassets|wp-content|uploads|dyn|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|reel|p|tv)$/i.test(
+        /^(?:_f|p\d+|no|nb|nn|en|wiki|globalassets|contentassets|wp-content|uploads|dyn|pls|ords|apex|legosh(?:_[a-z]{2})?|downloads?|files?|assets|media|documents?|docs|articles?|pages?|view|pdf|pmc|fulltext|abs|reel|p|tv)$/i.test(
           noExt
         )
       ) {
@@ -2470,11 +2538,8 @@ const SOURCE_MATCH_STOP_WORDS = new Set([
 ]);
 
 function normalizeTextForSourceMatch(raw: string): string {
-  return String(raw || '')
+  return transliterateNordicAscii(String(raw || ''))
     .toLowerCase()
-    .replace(/æ/g, 'ae')
-    .replace(/ø/g, 'o')
-    .replace(/å/g, 'a')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
 }
@@ -2584,7 +2649,7 @@ function isAutoDomainSlugTitle(title?: string): boolean {
   return /^[a-z0-9.-]+\.[a-z]{2,}\s+[—–-]\s+/i.test(String(title || '').trim());
 }
 
-function shouldUpgradeSourceTitle(
+export function shouldUpgradeSourceTitle(
   existingTitle: string | undefined,
   candidateTitle: string | undefined,
   resourceUrl?: string
@@ -2596,10 +2661,21 @@ function shouldUpgradeSourceTitle(
   if (!cur || (resourceUrl && cur === resourceUrl.trim()) || isBareDomainTitle(cur)) {
     return true;
   }
-  if (isAutoDomainSlugTitle(cur) && !isAutoDomainSlugTitle(cand)) {
+  const isShortSingleWordCand = /^[\p{L}\p{N}]{1,15}$/u.test(cand);
+  if (isAutoDomainSlugTitle(cur) && !isAutoDomainSlugTitle(cand) && !isShortSingleWordCand) {
     return true;
   }
   if (cur.length < 18 && !isAutoDomainSlugTitle(cand) && cand.length >= cur.length + 10) {
+    return true;
+  }
+  const curWordCount = cur.split(/\s+/).filter(Boolean).length;
+  if (
+    cur.length < 32 &&
+    curWordCount < 4 &&
+    !isAutoDomainSlugTitle(cand) &&
+    cand.length >= cur.length * 2 &&
+    cand.length >= 45
+  ) {
     return true;
   }
   return false;
@@ -2708,7 +2784,8 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
     '$1$3$2'
   );
 
-  // Convert bare `.^id` typos to `.[^id]` before rewriting aliases
+  // Strip redundant carets before `[^id]` (`^[^id]` -> `[^id]`) and convert bare `.^id` typos to `.[^id]` before rewriting aliases
+  proseText = proseText.replace(/\^+(\[\^[A-Za-z0-9_\-]+\])/g, '$1');
   proseText = proseText.replace(/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/gi, '.[^$1]');
 
   // Rewrite duplicate-URL source aliases
@@ -2747,6 +2824,48 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
       modified = true;
     }
   }
+
+  // Normalize trailing sentence & clause punctuation (`word.[^id]` -> `word[^id].`, `word:[^id]` -> `word[^id]:`, and `[^a].[^b]` -> `[^a] [^b].`) before collapsing duplicates
+  let prevProseText = '';
+  while (prevProseText !== proseText) {
+    prevProseText = proseText;
+    proseText = proseText.replace(
+      /((?:\[\^[A-Za-z0-9_\-]+\][ \t]*)+)([.?!:;]+)((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)/g,
+      (fullMatch, leftFns: string, punctCluster: string, rightFns: string, offset: number, str: string) => {
+        if (
+          punctCluster === ':' &&
+          /^\[\^[A-Za-z0-9_\-]+\]$/.test(leftFns.trim()) &&
+          /(?:^|\r?\n)[\t ]*$/.test(str.slice(0, offset))
+        ) {
+          return fullMatch;
+        }
+        const finalPunct = punctCluster[punctCluster.length - 1];
+        return `${leftFns.trimEnd()} ${rightFns.trimStart()}${finalPunct}`;
+      }
+    );
+  }
+  proseText = proseText.replace(
+    /([^\s.?!:;])([.?!:;])((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)([.?!:;]+)?/g,
+    (
+      fullMatch,
+      before: string,
+      punct: string,
+      fns: string,
+      trailingPunct: string | undefined,
+      offset: number,
+      str: string
+    ) => {
+      if (
+        punct === ':' &&
+        before === ']' &&
+        /(?:^|\r?\n)[\t ]*\[\^[A-Za-z0-9_\-]+\]$/.test(str.slice(0, offset + 1))
+      ) {
+        return fullMatch;
+      }
+      const finalPunct = trailingPunct ? trailingPunct[trailingPunct.length - 1] : punct;
+      return `${before}${fns.trimStart()}${finalPunct}`;
+    }
+  );
 
   // Collapse adjacent duplicate footnote citations (`[^a] [^a]` or `[^a][^a]` -> `[^a]`)
   proseText = proseText.replace(/(?:\[\^[A-Za-z0-9_\-]+\][ \t]*){2,}/g, (cluster) => {
@@ -3495,13 +3614,19 @@ export async function cleanGroundingLinks(
         .subarray(endIdx, Math.min(buf.length, endIdx + 64))
         .toString('utf8');
       const neededFootnotes = sourcesAtSpan
-        .filter(
-          (s) =>
+        .filter((s) => {
+          const escapedId = String(s.id || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const alreadyFollowsWithCaretOrPunct = new RegExp(
+            `^[\\s.?!:;]*\\^*\\[\\^${escapedId}\\]`
+          ).test(followingSlice);
+          return (
             !precedingSlice.endsWith(`[^${s.id}]`) &&
             !followingSlice.startsWith(`[^${s.id}]`) &&
             !followingSlice.startsWith(`.^${s.id}`) &&
-            !followingSlice.startsWith(`?^${s.id}`)
-        )
+            !followingSlice.startsWith(`?^${s.id}`) &&
+            !alreadyFollowsWithCaretOrPunct
+          );
+        })
         .map((s) => `[^${s.id}]`)
         .join('');
       chunks.unshift(buf.subarray(endIdx, cursor));
@@ -3732,7 +3857,8 @@ export async function cleanGroundingLinks(
   orderedSources.length = 0;
   orderedSources.push(...dedupedSources);
 
-  // Convert bare `.^id` typos (`/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/g`) to `.[^$1]` before alias rewriting
+  // Strip redundant carets before `[^id]` (`^[^id]` -> `[^id]`) and convert bare `.^id` typos (`/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/g`) to `.[^$1]` before alias rewriting
+  bodyText = bodyText.replace(/\^+(\[\^[A-Za-z0-9_\-]+\])/g, '$1');
   bodyText = bodyText.replace(/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/gi, '.[^$1]');
   bodyText = bodyText.replace(
     /([.?!:;]?)(?<!\[)\^([A-Za-z0-9_\-]+)(?!\])/g,
@@ -3784,19 +3910,46 @@ export async function cleanGroundingLinks(
     }
   }
 
-  // Normalize trailing sentence punctuation (`word.[^id]` -> `word[^id].` and `[^a].[^b]` -> `[^a] [^b].`)
+  // Normalize trailing sentence & clause punctuation (`word.[^id]` -> `word[^id].`, `word:[^id]` -> `word[^id]:`, and `[^a].[^b]` -> `[^a] [^b].`)
   let prevBodyText = '';
   while (prevBodyText !== bodyText) {
     prevBodyText = bodyText;
     bodyText = bodyText.replace(
-      /((?:\[\^[A-Za-z0-9_\-]+\][ \t]*)+)([.?!:;])[.?!:;]*((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)/g,
-      '$1 $3$2'
+      /((?:\[\^[A-Za-z0-9_\-]+\][ \t]*)+)([.?!:;]+)((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)/g,
+      (fullMatch, leftFns: string, punctCluster: string, rightFns: string, offset: number, str: string) => {
+        if (
+          punctCluster === ':' &&
+          /^\[\^[A-Za-z0-9_\-]+\]$/.test(leftFns.trim()) &&
+          /(?:^|\r?\n)[\t ]*$/.test(str.slice(0, offset))
+        ) {
+          return fullMatch;
+        }
+        const finalPunct = punctCluster[punctCluster.length - 1];
+        return `${leftFns.trimEnd()} ${rightFns.trimStart()}${finalPunct}`;
+      }
     );
   }
   bodyText = bodyText.replace(
-    /([^\s.?!:;])([.?!])((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)([.?!]+)?/g,
-    (_m, before: string, punct: string, fns: string, trailingPunct?: string) =>
-      `${before}${fns.trimStart()}${(trailingPunct || punct)[0]}`
+    /([^\s.?!:;])([.?!:;])((?:[ \t]*\[\^[A-Za-z0-9_\-]+\])+)([.?!:;]+)?/g,
+    (
+      fullMatch,
+      before: string,
+      punct: string,
+      fns: string,
+      trailingPunct: string | undefined,
+      offset: number,
+      str: string
+    ) => {
+      if (
+        punct === ':' &&
+        before === ']' &&
+        /(?:^|\r?\n)[\t ]*\[\^[A-Za-z0-9_\-]+\]$/.test(str.slice(0, offset + 1))
+      ) {
+        return fullMatch;
+      }
+      const finalPunct = trailingPunct ? trailingPunct[trailingPunct.length - 1] : punct;
+      return `${before}${fns.trimStart()}${finalPunct}`;
+    }
   );
   bodyText = bodyText.replace(
     /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
@@ -3885,7 +4038,9 @@ export async function cleanGroundingLinks(
     if (options?.tags && options.tags.length > 0) {
       fm.tags = options.tags;
     } else {
-      const topicWords = String(options?.topic || fm.title || 'research')
+      const topicWords = transliterateNordicAscii(
+        String(options?.topic || fm.title || 'research')
+      )
         .toLowerCase()
         .normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '')
@@ -4948,7 +5103,7 @@ export function injectBidirectionalBundleLinks(
     }
 
     const toCanonicalSlug = (raw: string): string => {
-      const s = String(raw || '')
+      const s = transliterateNordicAscii(String(raw || ''))
         .toLowerCase()
         .normalize('NFD')
         .replace(/[\u0300-\u036f]/g, '')
@@ -5056,7 +5211,7 @@ export function syncRunToBundle(
     fs.writeFileSync(researchPath, serializeOkfDocument(doc), 'utf-8');
   }
 
-  const rawTitleSlug = String(doc.frontmatter.title || runId)
+  const rawTitleSlug = transliterateNordicAscii(String(doc.frontmatter.title || runId))
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -7427,6 +7582,31 @@ const OKF_VIZ_JS = `
 })();
 `.trim();
 
+function extractLastUrlPathSlug(rawUrl: string): string {
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    const segs = u.pathname
+      .split('/')
+      .map((s) => {
+        try {
+          return decodeURIComponent(s).trim();
+        } catch {
+          return s.trim();
+        }
+      })
+      .filter(
+        (s) =>
+          s.length > 1 &&
+          !/^(?:index|default)\.(?:html?|aspx?|php)$/i.test(s) &&
+          !/^(?:id\d+|\d+|_f|p\d+|no|nb|nn|en|globalassets|contentassets)$/i.test(s)
+      );
+    if (segs.length === 0) return '';
+    return segs[segs.length - 1].replace(/\.(?:pdf|html?|aspx?|php|md|docx?)$/i, '');
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Generates a single-file interactive OKF v0.2 knowledge graph explorer (`viz.html`)
  * powered by Cytoscape.js and Marked, with unified `/` and `../` link resolution and trust badges.
@@ -7554,22 +7734,39 @@ export function generateBundleVisualization(
         if (canonicalUrl) {
           sourceNodeByUrl.set(canonicalUrl, srcNodeId);
         }
+        const displayFnId = srcNodeId.replace(/^source:/, '');
+        let effectiveFullTitle = fullTitleText;
+        let effectiveShortTitle = shortTitleText;
+        if (displayFnId !== srcId) {
+          const firstNodeData = sourceNodeDataById.get(`source:${srcId}`);
+          const firstBaseTitle = String(
+            firstNodeData?.baseTitle || firstNodeData?.description || ''
+          ).trim();
+          if (firstBaseTitle && firstBaseTitle.toLowerCase() === fullTitleText.toLowerCase()) {
+            const pathSlug = extractLastUrlPathSlug(srcUrl);
+            if (pathSlug) {
+              effectiveFullTitle = `${fullTitleText} (${pathSlug})`;
+              effectiveShortTitle = `${shortTitleText} (${pathSlug})`;
+            }
+          }
+        }
         const nodeData: Record<string, unknown> = {
           id: srcNodeId,
           group: 'source',
-          primaryFnId: srcId,
-          label: `[^${srcId}] ${shortTitleText}`,
-          fullTitle: `[^${srcId}] ${fullTitleText}`,
+          primaryFnId: displayFnId,
+          baseTitle: fullTitleText,
+          label: `[^${displayFnId}] ${effectiveShortTitle}`,
+          fullTitle: `[^${displayFnId}] ${effectiveFullTitle}`,
           parentConceptId: c.id,
           citedByConcepts: [c.id],
           type: 'Verified Source',
-          description: fullTitleText,
+          description: effectiveFullTitle,
           resource: srcUrl,
           tags: ['verified-source'],
           status: 'stable',
           generated: c.generated,
           verified: c.verified,
-          sources: [{ ...src, title: fullTitleText }],
+          sources: [{ ...src, id: displayFnId, title: effectiveFullTitle }],
           trust_tier: c.trust_tier,
           stale: false,
           color: '#10b981',
@@ -9932,6 +10129,17 @@ const A2UI_STUDIO_JS = `
     surface.runStates = surface.runStates || {};
     const curRunId = surface.activeRunId || resolvePointer(surface.dataModel, "/meta/runId");
     if (curRunId) {
+      if (
+        surface.viewingStubConcept ||
+        Boolean(resolvePointer(surface.dataModel, "/okf/viewingStubConcept"))
+      ) {
+        if (typeof syncChecklistToOkfBody === "function") {
+          syncChecklistToOkfBody(surface);
+        }
+        const primaryCid = resolvePointer(surface.dataModel, "/okf/primaryConceptId") || "";
+        navigateOkfMarkdownConcept(surface, primaryCid);
+        surface.viewingStubConcept = false;
+      }
       surface.runStates[curRunId] = cloneDataValue(surface.dataModel);
     }
     const targetEntry = runs.find((r) => r && r.runId === targetRunId);
@@ -9946,6 +10154,9 @@ const A2UI_STUDIO_JS = `
     }
     setPointer(surface.dataModel, "/", nextState);
     surface.activeRunId = targetRunId;
+    surface.viewingStubConcept = Boolean(
+      resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
+    );
     syncSurfaceBadgeTones(surface);
 
     if (
@@ -10002,7 +10213,10 @@ const A2UI_STUDIO_JS = `
     const isNo = isNorwegianSurface(surface);
     const primaryConceptId = String(resolvePointer(surface.dataModel, "/okf/primaryConceptId") || "");
 
-    if (!resolvePointer(surface.dataModel, "/okf/viewingStubConcept")) {
+    if (
+      !surface.viewingStubConcept &&
+      !resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
+    ) {
       setPointer(surface.dataModel, "/okf/primaryBody", resolvePointer(surface.dataModel, "/okf/body") || "");
       setPointer(surface.dataModel, "/okf/primaryTitle", resolvePointer(surface.dataModel, "/okf/title") || "");
       setPointer(surface.dataModel, "/okf/primarySources", resolvePointer(surface.dataModel, "/okf/sources") || []);
@@ -10066,6 +10280,7 @@ const A2UI_STUDIO_JS = `
       if (origSourcesBadge) setPointer(surface.dataModel, "/okf/sourcesBadge", origSourcesBadge);
       setPointer(surface.dataModel, "/okf/activeConceptId", primaryConceptId || targetConceptId || "");
       setPointer(surface.dataModel, "/okf/viewingStubConcept", false);
+      surface.viewingStubConcept = false;
       setPointer(surface.dataModel, "/okf/editMode", false);
       syncSurfaceBadgeTones(surface);
       syncOkfBodyToChecklist(surface);
@@ -10106,6 +10321,7 @@ const A2UI_STUDIO_JS = `
       if (cMeta.sourcesBadge) setPointer(surface.dataModel, "/okf/sourcesBadge", cMeta.sourcesBadge);
     }
     setPointer(surface.dataModel, "/okf/viewingStubConcept", true);
+    surface.viewingStubConcept = true;
     setPointer(surface.dataModel, "/okf/editMode", false);
     syncSurfaceBadgeTones(surface);
     syncOkfBodyToChecklist(surface);
@@ -10651,7 +10867,9 @@ const A2UI_STUDIO_JS = `
     if (resolvePointer(surface.dataModel, "/checklist/fromStage2")) {
       return;
     }
-    const isViewingStub = Boolean(resolvePointer(surface.dataModel, "/okf/viewingStubConcept"));
+    const isViewingStub = Boolean(
+      surface.viewingStubConcept || resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
+    );
     const targetBodyPath = isViewingStub ? "/okf/primaryBody" : "/okf/body";
     const body = resolvePointer(surface.dataModel, targetBodyPath);
     if (typeof body !== "string" || !body) return;
@@ -10701,6 +10919,7 @@ const A2UI_STUDIO_JS = `
   function syncOkfBodyToChecklist(surface) {
     if (
       resolvePointer(surface.dataModel, "/checklist/fromStage2") ||
+      surface.viewingStubConcept ||
       resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
     ) {
       return;
@@ -12515,7 +12734,7 @@ export function generateA2uiSurface(
     fs.writeFileSync(stage1OutputPath, serializeOkfDocument(okfDoc), 'utf-8');
   }
   if (fs.existsSync(bundleRoot) && stage1OutputPath && fs.existsSync(stage1OutputPath)) {
-    const rawTitleSlug = String(okfDoc.frontmatter.title || resolvedRunId)
+    const rawTitleSlug = transliterateNordicAscii(String(okfDoc.frontmatter.title || resolvedRunId))
       .toLowerCase()
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
@@ -12615,7 +12834,7 @@ export function generateA2uiSurface(
   ): string => {
     const existing = String(runMeta?.okf?.bundleConceptId || '').trim();
     if (existing) return existing;
-    const rawSlug = String(runOkfDoc.frontmatter.title || runIdStr)
+    const rawSlug = transliterateNordicAscii(String(runOkfDoc.frontmatter.title || runIdStr))
       .toLowerCase()
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
@@ -13151,17 +13370,34 @@ export function generateA2uiSurface(
         if (canonicalUrl) {
           sourceNodeIdByCanonicalUrl.set(canonicalUrl, srcNodeId);
         }
+        const displayFnId = srcNodeId.replace(/^source:/, '');
+        let effectiveFullTitle = fullTitleText;
+        let effectiveShortTitle = shortTitleText;
+        if (displayFnId !== rawSrcId) {
+          const firstBaseNode = sourceNodeDataById.get(`source:${rawSrcId}`);
+          const firstBaseTitle = String(
+            firstBaseNode?.baseTitle || firstBaseNode?.titleSummary || ''
+          ).trim();
+          if (firstBaseTitle && firstBaseTitle.toLowerCase() === fullTitleText.toLowerCase()) {
+            const pathSlug = extractLastUrlPathSlug(srcUrl);
+            if (pathSlug) {
+              effectiveFullTitle = `${fullTitleText} (${pathSlug})`;
+              effectiveShortTitle = `${shortTitleText} (${pathSlug})`;
+            }
+          }
+        }
         const nodeData: Record<string, any> = {
           id: srcNodeId,
           group: 'source',
-          primaryFnId: rawSrcId,
-          titleSummary: fullTitleText,
-          label: `[^${rawSrcId}] ${shortTitleText}`,
-          fullTitle: `[^${rawSrcId}] ${fullTitleText}`,
+          primaryFnId: displayFnId,
+          baseTitle: fullTitleText,
+          titleSummary: effectiveFullTitle,
+          label: `[^${displayFnId}] ${effectiveShortTitle}`,
+          fullTitle: `[^${displayFnId}] ${effectiveFullTitle}`,
           parentConceptId: c.id,
           citedByConcepts: [c.id],
           type: 'Verified Source',
-          description: srcUrl || fullTitleText,
+          description: srcUrl || effectiveFullTitle,
           resource: srcUrl,
           status: 'stable',
           trust_tier: c.trust_tier,
@@ -13555,7 +13791,8 @@ export function generateA2uiSurface(
   const primaryBodyStr =
     okfDoc.body ||
     (isNo ? '*Ingen Stage 1 OKF-kropp funnet.*' : '*No Stage 1 OKF body found.*');
-  const primaryStatusBadgeStr = `status: ${okfDoc.frontmatter.status || 'draft'}`;
+  const primaryStatusStr = String(okfDoc.frontmatter.status || 'draft');
+  const primaryStatusBadgeStr = `status: ${primaryStatusStr}`;
   const primaryTrustBadgeStr = `trust: ${okfTrustTier}`;
   const primaryFreshnessBadgeStr = okfStale ? 'stale' : 'fresh';
   const primarySourcesBadgeStr = isNo
@@ -13590,6 +13827,7 @@ export function generateA2uiSurface(
       primaryTitle: primaryTitleStr,
       primaryBody: primaryBodyStr,
       primarySources: okfSources,
+      primaryStatus: primaryStatusStr,
       primaryTrustTier: okfTrustTier,
       primaryIsStale: okfStale,
       primaryStatusBadge: primaryStatusBadgeStr,
@@ -13598,7 +13836,7 @@ export function generateA2uiSurface(
       primarySourcesBadge: primarySourcesBadgeStr,
       title: primaryTitleStr,
       type: String(okfDoc.frontmatter.type || 'Research Concept'),
-      status: String(okfDoc.frontmatter.status || 'draft'),
+      status: primaryStatusStr,
       trustTier: okfTrustTier,
       isStale: okfStale,
       statusBadge: primaryStatusBadgeStr,
@@ -13731,12 +13969,17 @@ export function generateA2uiSurface(
     },
   };
 
-  const html = `<!DOCTYPE html>
-<html lang="${surfaceLang}">
+  const renderA2uiHtmlDocument = (
+    docLang: string,
+    docTitle: string,
+    docIsNo: boolean,
+    payload: Record<string, any>
+  ): string => `<!DOCTYPE html>
+<html lang="${docLang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeA2uiHtml(stage2Norm.title)} — A2UI v0.9.1 Studio</title>
+<title>${escapeA2uiHtml(docTitle)} — A2UI v0.9.1 Studio</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
 <style>
@@ -13747,11 +13990,11 @@ ${A2UI_STUDIO_CSS}
 <header class="a2ui-topbar">
   <div class="a2ui-topbar-brand">
     <span class="a2ui-protocol-pill">A2UI ${A2UI_PROTOCOL_VERSION}</span>
-    <span class="a2ui-topbar-title">${escapeA2uiHtml(stage2Norm.title)}</span>
+    <span class="a2ui-topbar-title">${escapeA2uiHtml(docTitle)}</span>
   </div>
   <div class="a2ui-topbar-actions">
     <button class="a2ui-top-btn" id="a2ui-open-inspector">🔍 A2UI Surface &amp; Data Model Inspector</button>
-    <button class="a2ui-top-btn" id="a2ui-export-json">${isNo ? '⬇ Eksporter A2UI Tilstand (.json)' : '⬇ Export A2UI State (.json)'}</button>
+    <button class="a2ui-top-btn" id="a2ui-export-json">${docIsNo ? '⬇ Eksporter A2UI Tilstand (.json)' : '⬇ Export A2UI State (.json)'}</button>
   </div>
 </header>
 
@@ -13760,8 +14003,8 @@ ${A2UI_STUDIO_CSS}
 <div class="a2ui-modal-backdrop" id="a2ui-inspector-modal" hidden>
   <div class="a2ui-modal-dialog">
     <div class="a2ui-modal-header">
-      <strong>${isNo ? 'A2UI v0.9.1 Deklarativ Surface, Data Model &amp; Action Log' : 'A2UI v0.9.1 Declarative Surface, Data Model &amp; Action Log'}</strong>
-      <button class="a2ui-btn" id="a2ui-close-inspector">${isNo ? 'Lukk' : 'Close'}</button>
+      <strong>${docIsNo ? 'A2UI v0.9.1 Deklarativ Surface, Data Model &amp; Action Log' : 'A2UI v0.9.1 Declarative Surface, Data Model &amp; Action Log'}</strong>
+      <button class="a2ui-btn" id="a2ui-close-inspector">${docIsNo ? 'Lukk' : 'Close'}</button>
     </div>
     <div class="a2ui-modal-body">
       <pre id="a2ui-inspector-content" style="background:#0f172a;color:#e2e8f0;padding:14px;border-radius:8px;font-size:12px;overflow-x:auto;margin:0"></pre>
@@ -13770,7 +14013,7 @@ ${A2UI_STUDIO_CSS}
 </div>
 
 <script>
-window.A2UI_SURFACE_PAYLOAD = ${JSON.stringify(clientPayload).replace(/<\//g, '<\\/')};
+window.A2UI_SURFACE_PAYLOAD = ${JSON.stringify(payload).replace(/<\//g, '<\\/')};
 </script>
 <script>
 ${A2UI_STUDIO_JS}
@@ -13778,6 +14021,8 @@ ${A2UI_STUDIO_JS}
 </body>
 </html>
 `;
+
+  const html = renderA2uiHtmlDocument(surfaceLang, stage2Norm.title, isNo, clientPayload);
 
   fs.mkdirSync(path.dirname(htmlOutputPath), { recursive: true });
   fs.writeFileSync(htmlOutputPath, html, 'utf-8');
@@ -13794,6 +14039,85 @@ ${A2UI_STUDIO_JS}
       bundleVizPath = vizResult.outputPath;
     } catch {
       // Non-fatal if bundle has no concepts yet
+    }
+  }
+
+  // Also refresh sibling completed runs' a2ui.html so every run has the full multi-run switcher and unified bundle graph
+  if (shouldMirrorBundle && bundleRuns.length > 1) {
+    const activeRunKey = resolvedRunId || 'workspace';
+    for (const br of bundleRuns) {
+      if (!br.runId || br.runId === activeRunKey || br.runId === 'workspace') continue;
+      const siblingRunDir = path.join(runsRoot, br.runId);
+      if (!fs.existsSync(siblingRunDir) || !isCompleteRunDir(siblingRunDir)) continue;
+      const siblingHtmlPath = path.join(siblingRunDir, 'a2ui.html');
+      if (path.resolve(siblingHtmlPath) === path.resolve(htmlOutputPath)) continue;
+      const siblingSurfaceId = `icm_${br.runId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+      const siblingLang = String(br.dataModel?.meta?.lang || surfaceLang);
+      const siblingIsNo = siblingLang === 'no';
+      const siblingComponents = components.map((comp) => {
+        if (comp.id === 'badge_status') {
+          return { ...comp, tone: br.status === 'stable' ? 'success' : 'warn' };
+        }
+        if (comp.id === 'badge_trust') {
+          return { ...comp, tone: br.trustTier === 'human-reviewed' ? 'accent' : 'primary' };
+        }
+        if (comp.id === 'badge_freshness') {
+          return { ...comp, tone: br.isStale ? 'danger' : 'success' };
+        }
+        if (comp.id === 'main_tabs' && Array.isArray((comp as any).tabs)) {
+          return {
+            ...comp,
+            tabs: (comp as any).tabs.map((t: { title: string; child: string }) => ({
+              ...t,
+              title: br.tabTitles?.[t.child] || t.title,
+            })),
+          };
+        }
+        return comp;
+      });
+      const siblingMessages: A2uiEnvelopeMessage[] = [
+        {
+          version: A2UI_PROTOCOL_VERSION,
+          createSurface: {
+            surfaceId: siblingSurfaceId,
+            catalogId: A2UI_ICM_CATALOG_ID,
+            theme: {
+              primaryColor: '#1d4ed8',
+              agentDisplayName: 'ICM + OKF v0.2 A2UI Studio',
+            },
+            sendDataModel: true,
+          },
+        },
+        {
+          version: A2UI_PROTOCOL_VERSION,
+          updateComponents: {
+            surfaceId: siblingSurfaceId,
+            components: siblingComponents,
+          },
+        },
+        {
+          version: A2UI_PROTOCOL_VERSION,
+          updateDataModel: {
+            surfaceId: siblingSurfaceId,
+            path: '/',
+            value: br.dataModel,
+          },
+        },
+      ];
+      const siblingPayload = {
+        surfaceId: siblingSurfaceId,
+        catalogId: A2UI_ICM_CATALOG_ID,
+        messages: siblingMessages,
+        bundleRuns,
+        bundleGraph: clientPayload.bundleGraph,
+      };
+      const siblingHtml = renderA2uiHtmlDocument(
+        siblingLang,
+        br.title || stage2Norm.title,
+        siblingIsNo,
+        siblingPayload
+      );
+      fs.writeFileSync(siblingHtmlPath, siblingHtml, 'utf-8');
     }
   }
 
@@ -14072,7 +14396,9 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     fmBytePrefix + bodyBuf.length > slashWordByteOffset,
     'UTF-8 buffer covers test byte offsets'
   );
-  const cleanedMd = await cleanGroundingLinks(rawTestMarkdown, mockOutputs);
+  const cleanedMd = await cleanGroundingLinks(rawTestMarkdown, mockOutputs, {
+    bundleRoot: './workspace/runs/_selftest_empty_bundle',
+  });
   assert(!cleanedMd.includes('\uFFFD'), 'No UTF-8 replacement characters (U+FFFD) after byte-offset injection');
   assert(
     cleanedMd.includes('## 1. Hovedkrav for særskilte brannobjekter (§ 13)'),
@@ -14138,7 +14464,19 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       enrichBareDomainSourceTitle(
         'ilo.org',
         'https://wwwex.ilo.org/dyn/legosh_en/f?p=14100:503:0::NO::P503_REFERENCE_ID:310536'
-      ) === 'ilo.org — Legosh en' &&
+      ) === 'ilo.org' &&
+      enrichBareDomainSourceTitle(
+        'ilo.org — Legosh en',
+        'https://wwwex.ilo.org/dyn/legosh_en/f?p=14100:503:0::NO::P503_REFERENCE_ID:310536'
+      ) === 'ilo.org' &&
+      enrichBareDomainSourceTitle(
+        'example.org',
+        'https://example.org/pls/apex/f?p=100:1'
+      ) === 'example.org' &&
+      enrichBareDomainSourceTitle('Sommerskolen', 'https://orbrann.no/sommerskolen') ===
+        'orbrann.no — Sommerskolen' &&
+      enrichBareDomainSourceTitle('Sommerskolen', 'https://en.orbrann.no/sommerskolen') ===
+        'en.orbrann.no — Sommerskolen' &&
       enrichBareDomainSourceTitle('dibk.no', 'https://www.dibk.no/regelverk/tek/3/11/iv/11-12') ===
         'dibk.no — Tek 11-12' &&
       enrichBareDomainSourceTitle(
@@ -14167,7 +14505,23 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         'kniftrygghet.no — ResourceServlet',
         'https://www.kniftrygghet.no/ResourceServlet/af1f7f4264e0453ea33e7e2d0dd8680e'
       ) === 'kniftrygghet.no',
-    'enrichBareDomainSourceTitle decodes UTF-8, skips 1-char servlet, Episerver /id<digits>/, and *Servlet paths, pairs /1 and YYYY/MM/DD paths, uppercases first alphabetic char, and self-heals polluted Id87138/ResourceServlet titles'
+    'enrichBareDomainSourceTitle decodes UTF-8, skips 1-char/APEX servlet (f?p=..., legosh_en, /pls/apex/f), Episerver /id<digits>/, and *Servlet paths, prefixes domain on 1-word titles ("Sommerskolen" -> "orbrann.no — Sommerskolen", including subdomains), and self-heals polluted titles'
+  );
+  assert(
+    shouldUpgradeSourceTitle(
+      'Regelverk med veiledning',
+      'Veiledning til forskrift om brannforebygging (§ 11 og § 12) — Direktoratet for samfunnssikkerhet og beredskap'
+    ) === true &&
+      shouldUpgradeSourceTitle(
+        'Veiledning til forskrift om brannforebygging (§ 11 og § 12) — Direktoratet for samfunnssikkerhet og beredskap',
+        'Regelverk med veiledning'
+      ) === false &&
+      shouldUpgradeSourceTitle(
+        'orbrann.no — Sommerskolen',
+        'Sommerskolen',
+        'https://orbrann.no/sommerskolen'
+      ) === false,
+    'shouldUpgradeSourceTitle upgrades short generic <4-word titles (<32 chars) when candidate is >=2x longer and >=45 chars, and never downgrades domain-prefixed 1-word titles'
   );
 
   // 2b. Duplicate-URL footnote alias rewriting & orphan footnote healing (cleanGroundingLinks + healOrphanOkfFootnotes)
@@ -14197,9 +14551,9 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     '    resource: "https://www.kniftrygghet.no/ResourceServlet/af1f7f4264e0453ea33e7e2d0dd8680e"',
     '---',
     '',
-    'Eier har ansvar etter veiledningen[^dsb-veiledning-brannforebygging] og kapittel 3–4[^dsb-veiledning-kap3-4].',
-    'Slokkeutstyr kontrolleres jevnlig[^dsb-faq-slokkeutstyr] i tråd med internkontroll[^snl-internkontrollforskriften].',
-    'Brannloven[^regjeringen-no] og forsikringskrav[^kniftrygghet-no] gjelder også[^hallucinated-nonexistent-999].',
+    'Eier har ansvar etter veiledningen^[^dsb-veiledning-brannforebygging] og kapittel 3–4:[^dsb-veiledning-kap3-4]',
+    'Slokkeutstyr kontrolleres jevnlig.[^dsb-faq-slokkeutstyr] I tråd med internkontroll;[^snl-internkontrollforskriften]',
+    'Brannloven[^regjeringen-no]:[^kniftrygghet-no] gjelder også[^hallucinated-nonexistent-999]. Samlet krav:[^dsb-veiledning-brannforebygging];[^regjeringen-no].[^kniftrygghet-no]',
     '',
     '[^dsb-veiledning-brannforebygging]: Veiledning til forskrift om brannforebygging',
     '[^dsb-veiledning-kap3-4]: Veiledning til forskrift om brannforebygging (§§ 13–15) - DSB',
@@ -14210,19 +14564,26 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     '',
   ].join('\n');
 
-  const cleanedDupMd = await cleanGroundingLinks(dupAliasRawMd, []);
+  const cleanedDupMd = await cleanGroundingLinks(dupAliasRawMd, [], {
+    bundleRoot: './workspace/runs/_selftest_empty_bundle',
+  });
   const parsedCleanedDup = parseOkfDocument(cleanedDupMd);
   assert(
     !parsedCleanedDup.body.includes('[^dsb-veiledning-kap3-4]') &&
       !parsedCleanedDup.body.includes('[^dsb-faq-slokkeutstyr]') &&
       !parsedCleanedDup.body.includes('[^snl-internkontrollforskriften]') &&
-      !parsedCleanedDup.body.includes('[^hallucinated-nonexistent-999]'),
-    `cleanGroundingLinks rewrites duplicate-URL alias and orphan footnotes and strips ungrounded footnotes (got body: "${parsedCleanedDup.body}")`
+      !parsedCleanedDup.body.includes('[^hallucinated-nonexistent-999]') &&
+      !parsedCleanedDup.body.includes('^[^'),
+    `cleanGroundingLinks rewrites duplicate-URL alias and orphan footnotes, strips redundant ^[^id] carets, and strips ungrounded footnotes (got body: "${parsedCleanedDup.body}")`
   );
   assert(
-    parsedCleanedDup.body.includes('[^dsb-faq-brannforebygging]') &&
-      parsedCleanedDup.body.includes('[^snl-no]'),
-    'cleanGroundingLinks maps [^dsb-faq-slokkeutstyr] -> [^dsb-faq-brannforebygging] and [^snl-internkontrollforskriften] -> [^snl-no]'
+    parsedCleanedDup.body.includes('veiledningen[^dsb-veiledning-brannforebygging]') &&
+      parsedCleanedDup.body.includes('kapittel 3–4[^dsb-veiledning-brannforebygging]:') &&
+      parsedCleanedDup.body.includes('jevnlig[^dsb-faq-brannforebygging].') &&
+      parsedCleanedDup.body.includes('internkontroll[^snl-no];') &&
+      parsedCleanedDup.body.includes('Brannloven[^regjeringen-no] [^kniftrygghet-no]:') &&
+      parsedCleanedDup.body.includes('Samlet krav[^dsb-veiledning-brannforebygging] [^regjeringen-no] [^kniftrygghet-no].'),
+    `cleanGroundingLinks normalizes sentence and clause punctuation ([.?!:;], including 3+ footnote chains) after footnote brackets and maps [^dsb-faq-slokkeutstyr] -> [^dsb-faq-brannforebygging] and [^snl-internkontrollforskriften] -> [^snl-no] (got body: "${parsedCleanedDup.body}")`
   );
   const cleanedDupDefMatches = Array.from(parsedCleanedDup.body.matchAll(/^\[\^([^\]]+)\]:/gm));
   assert(
@@ -14249,9 +14610,16 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       !savedOrphanDoc.body.includes('[^dsb-veiledning-kap3-4]') &&
       !savedOrphanDoc.body.includes('[^dsb-faq-slokkeutstyr]') &&
       !savedOrphanDoc.body.includes('[^snl-internkontrollforskriften]') &&
+      !savedOrphanDoc.body.includes('^[^') &&
+      savedOrphanDoc.body.includes('veiledningen[^dsb-veiledning-brannforebygging]') &&
+      savedOrphanDoc.body.includes('kapittel 3–4[^dsb-veiledning-brannforebygging]:') &&
+      savedOrphanDoc.body.includes('jevnlig[^dsb-faq-brannforebygging].') &&
+      savedOrphanDoc.body.includes('internkontroll[^snl-no];') &&
+      savedOrphanDoc.body.includes('Brannloven[^regjeringen-no] [^kniftrygghet-no]:') &&
+      savedOrphanDoc.body.includes('Samlet krav[^dsb-veiledning-brannforebygging] [^regjeringen-no] [^kniftrygghet-no].') &&
       healedRegjeringen?.title === 'regjeringen.no — Brann og eksplosjonsvernloven' &&
       healedKnif?.title === 'kniftrygghet.no',
-    `healOrphanOkfFootnotes self-heals orphan footnotes and polluted Episerver/Servlet titles on existing OKF documents (defs=${healedDefMatches.length}, reg="${healedRegjeringen?.title}", knif="${healedKnif?.title}")`
+    `healOrphanOkfFootnotes self-heals orphan footnotes, strips ^[^id], normalizes [.?!:;] punctuation before footnotes (including 3+ footnote chains), and heals polluted Episerver/Servlet titles (defs=${healedDefMatches.length}, reg="${healedRegjeringen?.title}", knif="${healedKnif?.title}")`
   );
 
   // Test duplicate-URL title upgrade (bare-domain/short generic title -> rich descriptive title),
@@ -14280,7 +14648,9 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     '[^dup1]: Veiledning til forskrift om brannforebygging (§§ 13–15) - DSB',
     '',
   ].join('\n');
-  const cleanedShortAliasMd = await cleanGroundingLinks(shortTitleAndDotAliasMd, []);
+  const cleanedShortAliasMd = await cleanGroundingLinks(shortTitleAndDotAliasMd, [], {
+    bundleRoot: './workspace/runs/_selftest_empty_bundle',
+  });
   const parsedShortAlias = parseOkfDocument(cleanedShortAliasMd);
   assert(
     parsedShortAlias.frontmatter.sources?.length === 1 &&
@@ -14292,6 +14662,16 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     `cleanGroundingLinks upgrades short generic duplicate-URL title, rewrites 1-token .^dup1 typo via sourceIdAliases, and strips trailing empty ## Kildehenvisninger (got: "${cleanedShortAliasMd}")`
   );
   assert(
+    transliterateNordicAscii('Brannvern i Østfold: æøå ÆØÅ, arbeidsmiljøet og førstehjelp') ===
+      'Brannvern i Ostfold: aeoa AeOA, arbeidsmiljoet og forstehjelp' &&
+      generateSourceSlugId(
+        'Østfold brann — Førstehjelp i arbeidsmiljøet',
+        'https://ostfold-brann.no/forebyggende',
+        new Set()
+      ) === 'ostfold-brann-forstehjelp-i',
+    'transliterateNordicAscii transliterates æ/ø/å/Æ/Ø/Å to ae/o/a/Ae/O/A before NFD normalization'
+  );
+  assert(
     truncateSlugAtWordBoundary(
       'systematisk-brannvern-ansvarsfordeling-og-krav-til-romningsveier-i-naeringsbygg',
       48
@@ -14299,8 +14679,10 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       truncateSlugAtWordBoundary(
         'systematisk-brannvern-ansvarsfordeling-og-krav-til-romningsveier-i-naeringsbygg',
         32
-      ) === 'systematisk-brannvern',
-    'truncateSlugAtWordBoundary snaps 48-char and 32-char slugs to the last word boundary dash'
+      ) === 'systematisk-brannvern' &&
+      truncateSlugAtWordBoundary('brannsikker-bruk-av-elsparkesykkel', 32) ===
+        'brannsikker-bruk-av',
+    'truncateSlugAtWordBoundary snaps 48-char and 32-char slugs (including 34-char 4-word slugs like brannsikker-bruk-av-elsparkesykkel -> brannsikker-bruk-av) to the last word boundary dash'
   );
 
   // 3. A2UI v0.9.1 validation, checklist label cleaning, checklist group hierarchy/ordering, totalEstimatedMinutes, synthesized highlights, and CaseSimulator synthesis
@@ -15507,6 +15889,17 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       `generateA2uiSurface embeds chronological bundleRuns with complete A2uiBundleRunEntry metadata for multi-module run switching and deduplicates shared graph source nodes`
     );
 
+    const run1SiblingA2uiPath = path.join(run1Dir, 'a2ui.html');
+    const run1SiblingHtml = fs.existsSync(run1SiblingA2uiPath)
+      ? fs.readFileSync(run1SiblingA2uiPath, 'utf-8')
+      : '';
+    assert(
+      fs.existsSync(run1SiblingA2uiPath) &&
+        run1SiblingHtml.includes('a2ui-run-switcher') &&
+        run1SiblingHtml.includes(`"surfaceId":"icm_${run1Id.replace(/[^a-zA-Z0-9_-]/g, '_')}"`),
+      'generateA2uiSurface auto-refreshes sibling completed runs a2ui.html files with their own surfaceId and the unified multi-run switcher'
+    );
+
     assert(
       studioHooks.resolveClientConceptId('./modul-1-lovverk.md', 'research/modul-2-praktiske-rutiner') ===
         'research/modul-1-lovverk' &&
@@ -15609,6 +16002,85 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         simSurface.dataModel.checklist.groups[0].items[0].checked === true &&
         simSurface.components.main_tabs.tabs[0].title === '✅ Interaktiv Sjekkliste (2)',
       'switchActiveRun restores cached Run 2 state including in-session checklist progress'
+    );
+
+    // Test Item 4: Navigating to a cross-referenced concept (viewingStubConcept = true) and immediately switching runs resets viewingStubConcept before snapshotting the outgoing run
+    activeHooks.navigateOkfMarkdownConcept(simSurface, 'research/modul-1-lovverk', 'Modul 1');
+    assert(
+      simSurface.viewingStubConcept === true &&
+        simSurface.dataModel.okf.viewingStubConcept === true &&
+        simSurface.dataModel.okf.activeConceptId === 'research/modul-1-lovverk',
+      'Precondition: viewingStubConcept is true on Run 2 before switching runs'
+    );
+    activeHooks.switchActiveRun(simSurface, run1Id);
+    activeHooks.switchActiveRun(simSurface, run2Id);
+    assert(
+      simSurface.viewingStubConcept === false &&
+        simSurface.dataModel.okf.viewingStubConcept === false &&
+        simSurface.dataModel.okf.activeConceptId === 'research/modul-2-praktiske-rutiner' &&
+        simSurface.dataModel.okf.title === 'Modul 2: Praktiske brannvernrutiner' &&
+        simSurface.components.badge_status.tone === 'warn' &&
+        simSurface.components.badge_trust.tone === 'primary',
+      'switchActiveRun restores the outgoing run primary concept before snapshotting runStates[curRunId] so switching back never leaves the run stuck on a foreign stub concept'
+    );
+    simSurface.viewingStubConcept = true;
+    simSurface.dataModel.okf.viewingStubConcept = false;
+    simSurface.dataModel.okf.title = 'Foreign Stub Title';
+    simSurface.dataModel.okf.body = 'Foreign Stub Body';
+    activeHooks.switchActiveRun(simSurface, run1Id);
+    activeHooks.switchActiveRun(simSurface, run2Id);
+    assert(
+      simSurface.viewingStubConcept === false &&
+        simSurface.dataModel.okf.title === 'Modul 2: Praktiske brannvernrutiner',
+      'switchActiveRun restores primaryTitle even when only surface.viewingStubConcept is true without overwriting primaryTitle'
+    );
+
+    // Test Item 8: Disambiguated --2 source node visual label & URL path slug parenthetical in generateBundleVisualization() and generateA2uiSurface()
+    const mod1WithDsb = `${mod1Md.replace(
+      'sources:\n',
+      [
+        'sources:',
+        '  - id: dsb-veiledning-brannforebygging',
+        '    title: "Veiledning til forskrift om brannforebygging — DSB"',
+        '    url: https://www.dsb.no/brannsikkerhet/tema/forskrift-om-brannforebygging/',
+        '    retrieved_at: 2026-11-01T10:00:00Z',
+      ].join('\n') + '\n'
+    )}\nVeiledning [^dsb-veiledning-brannforebygging].\n[^dsb-veiledning-brannforebygging]: Veiledning til forskrift om brannforebygging — DSB\n`;
+    const mod2WithDsb = `${mod2Md.replace(
+      'sources:\n',
+      [
+        'sources:',
+        '  - id: dsb-veiledning-brannforebygging',
+        '    title: "Veiledning til forskrift om brannforebygging — DSB"',
+        '    url: https://www.dsb.no/lover/brannvern-brannvesen-nodnett/veiledning-til-forskrift-om-brannforebygging/',
+        '    retrieved_at: 2026-11-01T12:00:00Z',
+      ].join('\n') + '\n'
+    )}\nVeiledning [^dsb-veiledning-brannforebygging].\n[^dsb-veiledning-brannforebygging]: Veiledning til forskrift om brannforebygging — DSB\n`;
+    fs.writeFileSync(path.join(mrResearchDir, 'modul-1-lovverk.md'), mod1WithDsb, 'utf-8');
+    fs.writeFileSync(path.join(mrResearchDir, 'modul-2-praktiske-rutiner.md'), mod2WithDsb, 'utf-8');
+    const disambigViz = generateBundleVisualization(mrBundleDir);
+    const disambigVizHtml = fs.readFileSync(disambigViz.outputPath, 'utf-8');
+    const disambigA2ui = generateA2uiSurface({ workspaceRoot: tmpMultiRunDir, runId: run2Id });
+    const disambigA2uiHtml = fs.readFileSync(disambigA2ui.htmlOutputPath, 'utf-8');
+    const disambigA2uiPayloadMatch = disambigA2uiHtml.match(
+      /window\.A2UI_SURFACE_PAYLOAD\s*=\s*(\{[\s\S]*?\});\s*<\/script>/
+    );
+    const disambigA2uiPayload = disambigA2uiPayloadMatch
+      ? JSON.parse(disambigA2uiPayloadMatch[1])
+      : null;
+    const disambigA2uiNode2 = disambigA2uiPayload?.bundleGraph?.nodes?.find(
+      (n: any) => n?.data?.id === 'source:dsb-veiledning-brannforebygging--2'
+    )?.data;
+    assert(
+      disambigVizHtml.includes('"id":"source:dsb-veiledning-brannforebygging--2"') &&
+        disambigVizHtml.includes('[^dsb-veiledning-brannforebygging--2]') &&
+        disambigVizHtml.includes('(veiledning-til-forskrift-om-brannforebygging)') &&
+        disambigA2uiNode2 &&
+        String(disambigA2uiNode2.label).includes('[^dsb-veiledning-brannforebygging--2]') &&
+        String(disambigA2uiNode2.label).includes('(veiledning-til-forskrift-om-brannforebygging)') &&
+        String(disambigA2uiNode2.fullTitle).includes('[^dsb-veiledning-brannforebygging--2]') &&
+        String(disambigA2uiNode2.fullTitle).includes('(veiledning-til-forskrift-om-brannforebygging)'),
+      'generateBundleVisualization and generateA2uiSurface disambiguate --2 source node visual labels (both label and fullTitle) and append the last URL path slug in parentheses when titles match'
     );
   } finally {
     fs.rmSync(tmpMultiRunDir, { recursive: true, force: true });
@@ -15792,7 +16264,7 @@ if (
       console.log('Stage 2 CLI Run Complete:', result);
     } else {
       const slug = truncateSlugAtWordBoundary(
-        argValue
+        transliterateNordicAscii(argValue)
           .toLowerCase()
           .normalize('NFD')
           .replace(/[\u0300-\u036f]/g, '')
