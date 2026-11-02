@@ -2815,11 +2815,12 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
       } else {
         proseText = removeSpecificFootnotePreservingBoundary(proseText, fnId);
         proseText = proseText.replace(
-          /[ \t]+(\[\^[A-Za-z0-9_\-]+\])/g,
-          (_m, fn: string, offset: number, str: string) =>
-            /\][ \t]*$/.test(str.slice(0, offset)) ? ` ${fn}` : fn
+          /(?<=[\p{L}\p{N})”"»'])[ \t]+(\[\^[A-Za-z0-9_\-]+\])/gu,
+          '$1'
         );
         proseText = proseText.replace(/[ \t]+([.,;!?])/g, '$1');
+        proseText = proseText.replace(/(?<=\S)[ \t]{2,}/g, ' ');
+        proseText = proseText.replace(/[ \t]+$/gm, '');
       }
       modified = true;
     }
@@ -2921,6 +2922,291 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
 
   return modified;
 }
+
+export interface CurateOkfSourcesOptions {
+  rejectSourceIds?: string[];
+  addSources?: Array<{
+    url: string;
+    title?: string;
+    id?: string;
+    retrievedAt?: string;
+    retrieved_at?: string;
+    lastModified?: string;
+    last_modified?: string;
+  }>;
+}
+
+/**
+ * Deterministically curates an OKF v0.2 Markdown document by:
+ * 1. Rejecting specified source IDs (`rejectSourceIds`), detecting any prose lines or sentences/table cells
+ *    whose only remaining citation was a rejected source (`orphanClaimLines`), removing the rejected sources
+ *    from `frontmatter.sources`, and stripping `[^rejected-id]` inline tags and bottom definitions
+ *    while preserving word boundaries and sentence punctuation.
+ * 2. Adding human-supplied sources (`addSources`), deduplicating by canonical URL, generating
+ *    clean Nordic-transliterated slug IDs, enriching titles, and weaving `[^id]` inline + bottom
+ *    definitions so 3-way OKF v0.2 footnote parity (`frontmatter.sources == inline [^id] == bottom definitions`)
+ *    is guaranteed.
+ */
+export function curateOkfSources(
+  rawMarkdown: string,
+  options: CurateOkfSourcesOptions
+): {
+  markdown: string;
+  rejectedIds: string[];
+  addedSources: OKFSource[];
+  orphanClaimLines: string[];
+} {
+  const doc = parseOkfDocument(rawMarkdown);
+  if (!doc.frontmatter) {
+    doc.frontmatter = { type: 'Research Concept', status: 'draft' };
+  }
+  const initialSources: OKFSource[] = Array.isArray(doc.frontmatter.sources)
+    ? doc.frontmatter.sources.map((s) => ({ ...s }))
+    : [];
+
+  const normalizedRejectIds = Array.from(
+    new Set(
+      (options?.rejectSourceIds || [])
+        .map((id) =>
+          String(id || '')
+            .trim()
+            .replace(/^\[\^/, '')
+            .replace(/\]$/, '')
+            .trim()
+        )
+        .filter(Boolean)
+    )
+  );
+  const rejectSet = new Set(normalizedRejectIds);
+
+  const rawBody = String(doc.body || '');
+  const existingDefs = new Map<string, string>();
+  const proseLines: string[] = [];
+  for (const rawLine of rawBody.split(/\r?\n/)) {
+    const defMatch = rawLine.trim().match(/^\[\^([A-Za-z0-9_\-]+)\]:\s*(.+)$/);
+    if (defMatch) {
+      if (!rejectSet.has(defMatch[1])) {
+        existingDefs.set(defMatch[1], decodeHtmlEntities(defMatch[2].trim()));
+      }
+    } else {
+      // Pre-normalize malformed `^[^id]` or `.^id` so rejected inline markers are caught cleanly
+      const cleanedLine = rawLine
+        .replace(/\^\[\^([A-Za-z0-9_\-]+)\]/g, '[^$1]')
+        .replace(/([a-zA-ZæøåÆØÅ0-9.)”"»])\^([a-z][a-z0-9_\-]{2,})(?=[\s.,;!?)\]]|$)/g, '$1[^$2]');
+      proseLines.push(cleanedLine);
+    }
+  }
+
+  // Detect prose lines (or individual sentences / table cells on multi-citation lines) that cite a rejected source
+  // and have no other non-rejected citation backing that claim.
+  const orphanClaimLines: string[] = [];
+  if (rejectSet.size > 0) {
+    for (const line of proseLines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const citedOnLine = Array.from(trimmed.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1]);
+      if (citedOnLine.length === 0) continue;
+      const citesRejected = citedOnLine.some((id) => rejectSet.has(id));
+      const citesNonRejected = citedOnLine.some((id) => !rejectSet.has(id));
+      if (citesRejected && !citesNonRejected) {
+        orphanClaimLines.push(trimmed);
+      } else if (citesRejected && citesNonRejected) {
+        const subSegments =
+          trimmed.startsWith('|') && trimmed.endsWith('|')
+            ? trimmed
+                .split('|')
+                .map((s) => s.trim())
+                .filter(Boolean)
+            : trimmed
+                .split(/(?<=[.?!](?:\s*\[\^[A-Za-z0-9_\-]+\])*)\s+/)
+                .map((s) => s.trim())
+                .filter(Boolean);
+        if (subSegments.length > 1) {
+          for (const seg of subSegments) {
+            const segCited = Array.from(seg.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1]);
+            if (segCited.length === 0) continue;
+            const segRej = segCited.some((id) => rejectSet.has(id));
+            const segKeep = segCited.some((id) => !rejectSet.has(id));
+            if (segRej && !segKeep) {
+              orphanClaimLines.push(seg);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Track actually rejected IDs (present in frontmatter.sources or inline body)
+  const existingSourceIds = new Set(
+    initialSources.map((s) => String(s?.id || '').trim()).filter(Boolean)
+  );
+  const inlineBodyIds = new Set(
+    Array.from(proseLines.join('\n').matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1])
+  );
+  const rejectedIds = normalizedRejectIds.filter(
+    (id) => existingSourceIds.has(id) || inlineBodyIds.has(id)
+  );
+
+  // Filter out rejected sources from frontmatter.sources
+  const remainingSources: OKFSource[] = initialSources.filter(
+    (s) => s && !rejectSet.has(String(s.id || '').trim())
+  );
+
+  // Strip rejected [^id] citations from prose while preserving word boundaries, table cells, and punctuation
+  let proseText = proseLines.join('\n');
+  for (const rejId of normalizedRejectIds) {
+    proseText = removeSpecificFootnotePreservingBoundary(proseText, rejId);
+    proseText = proseText.replace(
+      /(?<=[\p{L}\p{N})”"»'])[ \t]+(\[\^[A-Za-z0-9_\-]+\])/gu,
+      '$1'
+    );
+    proseText = proseText.replace(/[ \t]+([.,;!?])/g, '$1');
+    proseText = proseText.replace(/(?<=\S)[ \t]{2,}/g, ' ');
+    proseText = proseText.replace(/[ \t]+$/gm, '');
+  }
+
+  // Add new sources
+  const addedSources: OKFSource[] = [];
+  const addList = Array.isArray(options?.addSources) ? options.addSources : [];
+  if (addList.length > 0) {
+    const nowIso = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const usedIds = new Set<string>(
+      remainingSources.map((s) => String(s?.id || '').trim()).filter(Boolean)
+    );
+    for (const m of proseText.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)) {
+      usedIds.add(m[1]);
+    }
+
+    const existingByCanonUrl = new Map<string, OKFSource>();
+    for (const s of remainingSources) {
+      const cUrl = normalizeCanonicalSourceUrl(String(s.resource || s.url || ''));
+      if (cUrl) existingByCanonUrl.set(cUrl, s);
+    }
+
+    const ensureInlineCitationWeaved = (fnId: string) => {
+      const escaped = fnId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (new RegExp(`\\[\\^${escaped}\\]`).test(proseText)) {
+        return;
+      }
+      const lines = proseText.split(/\r?\n/);
+      let targetIdx = -1;
+      let fallbackListIdx = -1;
+      let inFence = false;
+      for (let i = 0; i < lines.length; i++) {
+        const t = lines[i].trim();
+        if (t.startsWith('```')) {
+          inFence = !inFence;
+          continue;
+        }
+        if (inFence || !t) continue;
+        if (/^#{1,4}\s+(?:Relaterte\s+konsepter|Related\s+(?:Bundle\s+)?Concepts?)\b/i.test(t)) {
+          break;
+        }
+        if (
+          t.startsWith('#') ||
+          /^---+\s*$/.test(t) ||
+          t.startsWith('|') ||
+          t.startsWith('>') ||
+          /^\[\^[A-Za-z0-9_\-]+\]:/.test(t)
+        ) {
+          continue;
+        }
+        if (/^(?:[-*+]|\d+\.)\s+/.test(t)) {
+          if (fallbackListIdx < 0) fallbackListIdx = i;
+          continue;
+        }
+        targetIdx = i;
+        break;
+      }
+      if (targetIdx < 0 && fallbackListIdx >= 0) {
+        targetIdx = fallbackListIdx;
+      }
+      if (targetIdx >= 0) {
+        lines[targetIdx] = lines[targetIdx].replace(
+          /([.?!])?(\s*)$/,
+          (_m, punct: string | undefined, ws: string) => `[^${fnId}]${punct || ''}${ws || ''}`
+        );
+        proseText = lines.join('\n');
+      } else {
+        proseText = proseText.trim()
+          ? `${proseText.trim()}\n\nKilde[^${fnId}].`
+          : `Kilde[^${fnId}].`;
+      }
+    };
+
+    for (const item of addList) {
+      const rawUrl = String(item?.url || '').trim();
+      if (!rawUrl) continue;
+      const rawLastMod = item.lastModified || item.last_modified;
+      const rawRetAt = item.retrievedAt || item.retrieved_at;
+      const canonUrl = normalizeCanonicalSourceUrl(rawUrl) || rawUrl;
+      const existingMatch = existingByCanonUrl.get(canonUrl);
+      if (existingMatch && existingMatch.id) {
+        if (item.title && shouldUpgradeSourceTitle(existingMatch.title, item.title, rawUrl)) {
+          existingMatch.title = enrichBareDomainSourceTitle(item.title, rawUrl);
+          existingDefs.set(existingMatch.id, existingMatch.title);
+        }
+        if (rawLastMod && !existingMatch.last_modified) {
+          const validLm = parseValidIsoTimestamp(rawLastMod);
+          if (validLm) existingMatch.last_modified = validLm;
+        }
+        ensureInlineCitationWeaved(existingMatch.id);
+        continue;
+      }
+
+      const rawCustomId = item.id
+        ? transliterateNordicAscii(String(item.id))
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+        : '';
+      let slugId = '';
+      if (rawCustomId && !usedIds.has(rawCustomId)) {
+        slugId = rawCustomId;
+        usedIds.add(slugId);
+      } else {
+        slugId = generateSourceSlugId(item.title || rawUrl, rawUrl, usedIds);
+      }
+
+      const enrichedTitle = enrichBareDomainSourceTitle(item.title || rawUrl, rawUrl);
+      const retrievedAt = parseValidIsoTimestamp(rawRetAt) || nowIso;
+      const lastModified = parseValidIsoTimestamp(rawLastMod);
+      const newSrc: OKFSource = {
+        id: slugId,
+        resource: rawUrl,
+        title: enrichedTitle,
+        retrieved_at: retrievedAt,
+        ...(lastModified ? { last_modified: lastModified } : {}),
+      };
+      remainingSources.push(newSrc);
+      addedSources.push(newSrc);
+      existingByCanonUrl.set(canonUrl, newSrc);
+      existingDefs.set(slugId, enrichedTitle);
+      ensureInlineCitationWeaved(slugId);
+    }
+  }
+
+  // Rebuild body with bottom definitions and run healOrphanOkfFootnotes for 100% 3-way parity
+  const defLines: string[] = [];
+  for (const s of remainingSources) {
+    if (!s || !s.id) continue;
+    const label = decodeHtmlEntities(s.title || existingDefs.get(s.id) || s.resource || s.id);
+    defLines.push(`[^${s.id}]: ${label}`);
+  }
+  doc.frontmatter.sources = remainingSources;
+  doc.body =
+    defLines.length > 0 ? `${proseText.trimEnd()}\n\n${defLines.join('\n')}\n` : `${proseText.trimEnd()}\n`;
+
+  healOrphanOkfFootnotes(doc);
+
+  return {
+    markdown: serializeOkfDocument(doc),
+    rejectedIds,
+    addedSources,
+    orphanClaimLines,
+  };
+}
+
 
 
 /**
@@ -5193,6 +5479,7 @@ export function syncRunToBundle(
   options?: {
     conceptSlug?: string;
     actionOverride?: 'Creation' | 'Update' | 'Verification';
+    allowDestructiveOverwrite?: boolean;
   }
 ): { conceptId: string; bundleFilePath: string } | null {
   const resolvedWorkspace = path.resolve(workspacePath);
@@ -5266,7 +5553,10 @@ export function syncRunToBundle(
 
   const conceptId = `research/${slug}`;
   const bundleFilePath = path.join(bundleRoot, `${conceptId}.md`);
-  const writeResult = writeBundleConcept(bundleRoot, conceptId, doc, { mergeExisting: true });
+  const writeResult = writeBundleConcept(bundleRoot, conceptId, doc, {
+    mergeExisting: !options?.allowDestructiveOverwrite,
+    allowDestructiveOverwrite: options?.allowDestructiveOverwrite,
+  });
   injectBidirectionalBundleLinks(bundleRoot, conceptId, doc, resolvedWorkspace);
   regenerateBundleIndexes(bundleRoot);
 
@@ -5732,6 +6022,20 @@ export async function runStage1Flow(input: {
     // Ignore metadata update errors
   }
 
+  try {
+    const bundleDir = path.join(workspacePath, 'bundle');
+    if (fs.existsSync(bundleDir)) {
+      const vizRes = generateBundleVisualization(bundleDir);
+      console.log(`[OKF Graph Viz]: ${vizRes.outputPath}`);
+    }
+    const a2uiRes = generateA2uiSurface(input.runId, { workspaceRoot: workspacePath });
+    console.log(
+      `[Stage 1 Intermission A2UI Review]: ${a2uiRes.htmlOutputPath}${a2uiRes.bundleHtmlPath ? ` (bundle mirror: ${a2uiRes.bundleHtmlPath})` : ''}`
+    );
+  } catch (err: any) {
+    console.warn(`[Stage 1 A2UI Review Warning]: ${err?.message || String(err)}`);
+  }
+
   return {
     success: true,
     runId: input.runId,
@@ -5754,7 +6058,8 @@ function normalizeVerifierActor(actor?: string): string {
 
 /**
  * Stamps OKF v0.2 `verified: [{ by, at }]` and `status: stable` onto a Stage 1 `research_summary.md`
- * (by `<runId>`) or a bundle concept `.md` file, updates `meta.json`, and syncs to `workspace/bundle/`.
+ * (by `<runId>`) or a bundle concept `.md` file, optionally curating sources (`rejectSourceIds`, `addSources`),
+ * updates `meta.json`, syncs to `workspace/bundle/`, and refreshes `viz.html` & `a2ui.html`.
  */
 export function verifyOkfConcept(
   runIdOrPath: string,
@@ -5762,6 +6067,8 @@ export function verifyOkfConcept(
     workspaceRoot?: string;
     by?: string;
     at?: string;
+    rejectSourceIds?: string[];
+    addSources?: CurateOkfSourcesOptions['addSources'];
   }
 ): {
   filePath: string;
@@ -5771,6 +6078,9 @@ export function verifyOkfConcept(
   trust_tier: TrustTier;
   is_stale: boolean;
   verified: OKFActorEvent[];
+  rejectedIds: string[];
+  addedSources: OKFSource[];
+  orphanClaimLines: string[];
 } {
   const workspacePath = path.resolve(options?.workspaceRoot || './workspace');
   const actor = normalizeVerifierActor(options?.by);
@@ -5826,7 +6136,37 @@ export function verifyOkfConcept(
     }
   }
 
-  const raw = fs.readFileSync(targetFilePath, 'utf-8');
+  let raw = fs.readFileSync(targetFilePath, 'utf-8');
+  let rejectedIds: string[] = [];
+  let addedSources: OKFSource[] = [];
+  let orphanClaimLines: string[] = [];
+
+  if (
+    (options?.rejectSourceIds && options.rejectSourceIds.length > 0) ||
+    (options?.addSources && options.addSources.length > 0)
+  ) {
+    const curated = curateOkfSources(raw, {
+      rejectSourceIds: options.rejectSourceIds,
+      addSources: options.addSources,
+    });
+    raw = curated.markdown;
+    rejectedIds = curated.rejectedIds;
+    addedSources = curated.addedSources;
+    orphanClaimLines = curated.orphanClaimLines;
+    if (options?.rejectSourceIds && options.rejectSourceIds.length > 0) {
+      for (const reqId of options.rejectSourceIds) {
+        const cleanId = String(reqId || '')
+          .trim()
+          .replace(/^\[\^/, '')
+          .replace(/\]$/, '')
+          .trim();
+        if (cleanId && !rejectedIds.includes(cleanId)) {
+          rejectedIds.push(cleanId);
+        }
+      }
+    }
+  }
+
   const doc = parseOkfDocument(raw);
   if (!doc.frontmatter.type) {
     doc.frontmatter.type = 'Research Concept';
@@ -5869,10 +6209,12 @@ export function verifyOkfConcept(
   if (detectedRunId) {
     const synced = syncRunToBundle(workspacePath, detectedRunId, {
       actionOverride: 'Verification',
+      allowDestructiveOverwrite: true,
     });
     bundleConceptId = synced?.conceptId;
 
-    const metaPath = path.join(candidateRunDir, 'meta.json');
+    const resolvedRunDir = path.join(workspacePath, 'runs', detectedRunId);
+    const metaPath = path.join(resolvedRunDir, 'meta.json');
     try {
       const meta: Record<string, any> = fs.existsSync(metaPath)
         ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
@@ -5910,10 +6252,21 @@ export function verifyOkfConcept(
       if (meta.stage1Telemetry) {
         meta.stage1Telemetry.trust_tier = trustTier;
         meta.stage1Telemetry.is_stale = stale;
+        meta.stage1Telemetry.sourcesCount = sourcesCount;
       }
       fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
     } catch {
       // Ignore meta update errors
+    }
+
+    try {
+      const bundleDir = path.join(workspacePath, 'bundle');
+      if (fs.existsSync(bundleDir)) {
+        generateBundleVisualization(bundleDir);
+      }
+      generateA2uiSurface(detectedRunId, { workspaceRoot: workspacePath });
+    } catch {
+      // Ignore visualization/A2UI refresh errors during verification
     }
   } else {
     const bundleRoot = path.join(workspacePath, 'bundle');
@@ -5931,12 +6284,22 @@ export function verifyOkfConcept(
         String(doc.frontmatter.title || relCid),
         `verified by ${actor}, trust_tier: ${trustTier}`
       );
+      try {
+        generateBundleVisualization(bundleRoot);
+      } catch {
+        // Ignore visualization errors
+      }
     }
   }
 
   console.log(
-    `[OKF Verification Gate]: Verified ${targetFilePath} (by: ${actor}, status: stable, trust_tier: ${trustTier}, is_stale: ${stale})`
+    `[OKF Verification Gate]: Verified ${targetFilePath} (by: ${actor}, status: stable, trust_tier: ${trustTier}, is_stale: ${stale}${rejectedIds.length > 0 ? `, rejected: [${rejectedIds.join(', ')}]` : ''}${addedSources.length > 0 ? `, added: [${addedSources.map((s) => s.id).join(', ')}]` : ''})`
   );
+  if (orphanClaimLines.length > 0) {
+    console.warn(
+      `[OKF Source Curation Notice]: ${orphanClaimLines.length} claim line(s) were backed solely by rejected source(s): ${JSON.stringify(orphanClaimLines)}`
+    );
+  }
 
   return {
     filePath: targetFilePath,
@@ -5946,6 +6309,9 @@ export function verifyOkfConcept(
     trust_tier: trustTier,
     is_stale: stale,
     verified: existingVerified,
+    rejectedIds,
+    addedSources,
+    orphanClaimLines,
   };
 }
 
@@ -8022,6 +8388,7 @@ export interface A2uiBundleRunEntry {
   conceptId: string;
   title: string;
   shortLabel: string;
+  isStage1Only?: boolean;
   status: string;
   trustTier: string;
   isStale: boolean;
@@ -8032,6 +8399,7 @@ export interface A2uiBundleRunEntry {
   caseCount: number;
   quizCount: number;
   tabTitles: Record<string, string>;
+  tabs?: Array<{ title: string; child: string }>;
   dataModel: Record<string, any>;
 }
 
@@ -8039,6 +8407,7 @@ export interface A2uiSurfaceGenerationResult {
   runId: string;
   surfaceId: string;
   catalogId: string;
+  isStage1Only?: boolean;
   componentCount: number;
   tabCount: number;
   checklistItemCount: number;
@@ -9747,6 +10116,94 @@ body {
 }
 .src-chip.retrieved { background: #e2e8f0; color: #334155; }
 .src-chip.modified { background: #dbeafe; color: #1e40af; }
+.src-chip.citations { background: #e0f2fe; color: #0369a1; font-weight: 600; }
+.src-chip.sole-warning { background: #fef3c7; color: #92400e; font-weight: 600; border: 1px solid #f59e0b; }
+.src-chip.rejected-badge { background: #fee2e2; color: #991b1b; font-weight: 700; border: 1px solid #f87171; }
+.src-chip.added-badge { background: #dcfce7; color: #166534; font-weight: 700; border: 1px solid #4ade80; }
+.okf-md-outer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.okf-curation-banner {
+  border-left: 4px solid var(--primary);
+  background: linear-gradient(135deg, #f8fafc 0%, #eff6ff 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.okf-curation-prompt-box {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 9px 12px;
+  border-radius: 7px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.okf-source-card.rejected {
+  border: 1px dashed #ef4444;
+  background: #fef2f2;
+  opacity: 0.88;
+}
+.okf-source-card.rejected .okf-src-title {
+  text-decoration: line-through;
+  color: #991b1b !important;
+}
+.okf-md-body sup.fn-ref.fn-rejected a {
+  color: #dc2626 !important;
+  text-decoration: line-through !important;
+  background: #fee2e2;
+  border-radius: 3px;
+  padding: 0 3px;
+}
+.okf-add-source-box {
+  padding: 10px 12px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.okf-add-source-box input {
+  width: 100%;
+  padding: 6px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  background: #fff;
+}
+.okf-search-log-details {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  font-size: 12.5px;
+  margin-bottom: 10px;
+}
+.okf-search-log-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+}
+.okf-sole-claims-details {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  font-size: 11.5px;
+  color: #78350f;
+}
+.okf-sole-claims-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
 
 /* Tier 2: OkfKnowledgeGraph */
 .okf-graph-split {
@@ -10149,6 +10606,7 @@ const A2UI_STUDIO_JS = `
     const nextState = surface.runStates[targetRunId];
     if (!nextState) return false;
 
+    const prevIsStage1Only = Boolean(resolvePointer(surface.dataModel, "/meta/isStage1Only"));
     if (typeof stopActiveSpeech === "function") {
       stopActiveSpeech();
     }
@@ -10159,11 +10617,42 @@ const A2UI_STUDIO_JS = `
     );
     syncSurfaceBadgeTones(surface);
 
+    const nextIsStage1Only = Boolean(
+      resolvePointer(surface.dataModel, "/meta/isStage1Only") ||
+        (targetEntry && targetEntry.isStage1Only)
+    );
+    if (surface.components) {
+      if (surface.components["overview_narration_col"]) {
+        surface.components["overview_narration_col"].children = nextIsStage1Only
+          ? ["overview_narration_heading", "overview_narration_body"]
+          : surface.components["overview_tts_player"]
+            ? ["overview_narration_heading", "overview_tts_player", "overview_narration_body"]
+            : ["overview_narration_heading", "overview_narration_body"];
+      }
+      if (surface.components["tab_overview"]) {
+        surface.components["tab_overview"].children = nextIsStage1Only
+          ? ["overview_narration_card"]
+          : surface.components["overview_highlights_card"]
+            ? ["overview_narration_card", "overview_highlights_card"]
+            : ["overview_narration_card"];
+      }
+    }
     if (
       surface.components &&
       surface.components["main_tabs"] &&
       Array.isArray(surface.components["main_tabs"].tabs)
     ) {
+      if (
+        (prevIsStage1Only !== nextIsStage1Only || nextIsStage1Only) &&
+        targetEntry &&
+        Array.isArray(targetEntry.tabs) &&
+        targetEntry.tabs.length > 0
+      ) {
+        surface.components["main_tabs"].tabs = cloneDataValue(targetEntry.tabs);
+        if (surface.uiState && surface.uiState.activeTabs) {
+          surface.uiState.activeTabs["main_tabs"] = 0;
+        }
+      }
       const clCount = Number(resolvePointer(surface.dataModel, "/checklist/totalCount") || 0);
       for (const tab of surface.components["main_tabs"].tabs) {
         if (!tab || !tab.child) continue;
@@ -10174,6 +10663,7 @@ const A2UI_STUDIO_JS = `
           tab.title = tab.title.replace(/\\(\\d+\\)\\s*$/, "(" + clCount + ")");
         }
       }
+      updateSourcesBadgeInStudio(surface);
     }
 
     const nextTitle =
@@ -10328,10 +10818,346 @@ const A2UI_STUDIO_JS = `
     return true;
   }
 
+  function inspectSourceCitationsInBody(bodyMd, srcId, rejectedSourceIds) {
+    if (Array.isArray(srcId)) {
+      const mapRes = {};
+      for (let idx = 0; idx < srcId.length; idx++) {
+        const sItem = srcId[idx];
+        const sid = sItem && typeof sItem === "object" ? sItem.id : sItem;
+        if (sid) {
+          mapRes[String(sid)] = inspectSourceCitationsInBody(bodyMd, String(sid), rejectedSourceIds);
+        }
+      }
+      return mapRes;
+    }
+    const targetId = String(srcId || "").trim().replace(/^\\[\\^?/, "").replace(/\\]$/, "");
+    if (!targetId) {
+      return { mentionCount: 0, soleClaimLines: [] };
+    }
+    const rejectedSet = new Set(
+      Array.isArray(rejectedSourceIds)
+        ? rejectedSourceIds.map(function (r) {
+            return String(r || "").trim().replace(/^\\[\\^?/, "").replace(/\\]$/, "");
+          })
+        : []
+    );
+    const lines = String(bodyMd || "").split(/\\r?\\n/);
+    let mentionCount = 0;
+    const soleClaimLines = [];
+    function extractCitedIds(text) {
+      const fnRegex = /\\[\\^([^\\r\\n\\]]+)\\]/g;
+      const ids = [];
+      let m;
+      while ((m = fnRegex.exec(text)) !== null) {
+        const cid = String(m[1] || "").trim();
+        if (cid) ids.push(cid);
+      }
+      return ids;
+    }
+    function pushCleanClaim(rawSegment) {
+      const cleanClaim = stripClientFootnotesPreservingBoundaries(rawSegment)
+        .replace(/^\\s*(?:[-*+]|\\d+[.)])\\s+(?:\\[[ xX]\\]\\s+)?/, "")
+        .replace(/\\s+/g, " ")
+        .trim();
+      if (cleanClaim && soleClaimLines.indexOf(cleanClaim) === -1) {
+        soleClaimLines.push(cleanClaim);
+      }
+    }
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (/^\\s*\\[\\^[^\\]]+\\]:/.test(trimmed)) continue;
+      const citedIds = extractCitedIds(trimmed);
+      if (citedIds.length === 0) continue;
+      let citesTargetCount = 0;
+      for (let j = 0; j < citedIds.length; j++) {
+        if (citedIds[j] === targetId) citesTargetCount++;
+      }
+      if (citesTargetCount === 0) continue;
+      mentionCount += citesTargetCount;
+      const remainingActive = citedIds.filter(function (id) {
+        return id !== targetId && !rejectedSet.has(id);
+      });
+      if (remainingActive.length === 0) {
+        pushCleanClaim(trimmed);
+      } else {
+        const subSegments =
+          trimmed.startsWith("|") && trimmed.endsWith("|")
+            ? trimmed
+                .split("|")
+                .map(function (s) {
+                  return s.trim();
+                })
+                .filter(Boolean)
+            : trimmed
+                .split(/(?<=[.?!](?:\\s*\\[\\^[^\\]]+\\])*)\\s+/)
+                .map(function (s) {
+                  return s.trim();
+                })
+                .filter(Boolean);
+        if (subSegments.length > 1) {
+          for (let sIdx = 0; sIdx < subSegments.length; sIdx++) {
+            const seg = subSegments[sIdx];
+            const segIds = extractCitedIds(seg);
+            if (segIds.indexOf(targetId) === -1) continue;
+            const segRemaining = segIds.filter(function (id) {
+              return id !== targetId && !rejectedSet.has(id);
+            });
+            if (segRemaining.length === 0) {
+              pushCleanClaim(seg);
+            }
+          }
+        }
+      }
+    }
+    return { mentionCount: mentionCount, soleClaimLines: soleClaimLines };
+  }
+
+  function updateSourcesBadgeInStudio(surface) {
+    if (!surface || !surface.dataModel) return;
+    const sources = resolvePointer(surface.dataModel, "/okf/sources") || [];
+    const rejected = resolvePointer(surface.dataModel, "/okf/rejectedSources") || [];
+    const rejSet = new Set(rejected.map(String));
+    const activeCount = sources.filter(function (s) {
+      return s && !rejSet.has(String(s.id));
+    }).length;
+    const isNo = isNorwegianSurface(surface);
+    const badgeText = activeCount + (isNo ? " verifiserte" + " kilder" : " verified sources");
+    setPointer(surface.dataModel, "/okf/sourcesBadge", badgeText);
+    if (
+      !surface.viewingStubConcept &&
+      !resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
+    ) {
+      setPointer(surface.dataModel, "/okf/primarySourcesBadge", badgeText);
+    }
+    if (
+      surface.components &&
+      surface.components["main_tabs"] &&
+      Array.isArray(surface.components["main_tabs"].tabs)
+    ) {
+      for (let i = 0; i < surface.components["main_tabs"].tabs.length; i++) {
+        const tab = surface.components["main_tabs"].tabs[i];
+        if (tab && tab.child === "tab_okf_markdown" && typeof tab.title === "string") {
+          tab.title = tab.title.replace(/\\(\\d+\\)\\s*$/, "(" + activeCount + ")");
+        }
+      }
+    }
+  }
+
+  function buildCurationPrompts(surface) {
+    if (!surface || !surface.dataModel) {
+      return { agyText: "", cliText: "" };
+    }
+    const isNo = isNorwegianSurface(surface);
+    const runId = String(resolvePointer(surface.dataModel, "/meta/runId") || "<runId>");
+    const rejectedRaw = (resolvePointer(surface.dataModel, "/okf/rejectedSources") || [])
+      .filter(Boolean)
+      .map(String);
+    const rejectedSet = new Set(rejectedRaw);
+    const addedRaw = (resolvePointer(surface.dataModel, "/okf/addedSources") || []).filter(function (a) {
+      return a && a.url;
+    });
+    const addedIdSet = new Set(
+      addedRaw
+        .map(function (a) {
+          return String(a.id || "");
+        })
+        .filter(Boolean)
+    );
+    const rejected = rejectedRaw.filter(function (id) {
+      return !addedIdSet.has(id);
+    });
+    const added = addedRaw.filter(function (a) {
+      return !a.id || !rejectedSet.has(String(a.id));
+    });
+    const byActor = isNo ? "human:styrer" : "human:reviewer";
+    const cliParts = ["npm run cli:verify -- " + runId];
+    if (rejected.length > 0) {
+      cliParts.push("--reject-source " + rejected.join(","));
+    }
+    for (let i = 0; i < added.length; i++) {
+      const item = added[i];
+      const spec =
+        item.title && item.title !== item.url ? item.url + "|" + item.title : item.url;
+      cliParts.push('--add-source "' + String(spec).replace(/"/g, '\\\\"') + '"');
+    }
+    cliParts.push("--by " + byActor);
+    const cliText = cliParts.join(" ");
+
+    let agyText = "";
+    if (rejected.length === 0 && added.length === 0) {
+      agyText = isNo
+        ? "Jeg har gjennomgått a2ui.html og godkjenner alle kildene — kjør " +
+          cliText +
+          " og gå videre til Stage 2."
+        : "I have reviewed a2ui.html and approve all sources — run " +
+          cliText +
+          " and proceed to Stage 2.";
+    } else {
+      const rejList = rejected.join(", ");
+      const addList = added
+        .map(function (a) {
+          return a.title && a.title !== a.url ? a.url + "|" + a.title : a.url;
+        })
+        .join(", ");
+      const segs = [];
+      if (isNo) {
+        if (rejected.length > 0) segs.push("Avvis kilder: [" + rejList + "].");
+        if (added.length > 0) segs.push("Legg til kilder: [" + addList + "].");
+        segs.push(
+          "Oppdater research_summary.md (flett inn nye kilder og fjern/erstatt påstander som kun hviler på avviste kilder), kjør " +
+            cliText +
+            " og gå videre til Stage 2."
+        );
+      } else {
+        if (rejected.length > 0) segs.push("Reject sources: [" + rejList + "].");
+        if (added.length > 0) segs.push("Add sources: [" + addList + "].");
+        segs.push(
+          "Update research_summary.md (weave added sources and remove/replace claims backed solely by rejected sources), run " +
+            cliText +
+            " and proceed to Stage 2."
+        );
+      }
+      agyText = segs.join(" ");
+    }
+
+    setPointer(surface.dataModel, "/okf/curationAgyText", agyText);
+    setPointer(surface.dataModel, "/okf/curationCliText", cliText);
+    return { agyText: agyText, cliText: cliText };
+  }
+
+  function slugifySourceIdInStudio(rawText, existingIds) {
+    const existingSet =
+      existingIds instanceof Set
+        ? existingIds
+        : new Set(Array.isArray(existingIds) ? existingIds.map(String) : []);
+    const base =
+      String(rawText || "")
+        .toLowerCase()
+        .replace(/æ/g, "ae")
+        .replace(/ø/g, "oe")
+        .replace(/å/g, "aa")
+        .replace(/^https?:\\/\\/(?:www\\.)?/i, "")
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 28)
+        .replace(/-+$/g, "") || "kilde";
+    let candidate = base;
+    let counter = 2;
+    while (existingSet.has(candidate)) {
+      candidate = base + "-" + counter;
+      counter++;
+    }
+    return candidate;
+  }
+
+  function toggleRejectSourceInStudio(surface, srcId) {
+    const cleanId = String(srcId || "").trim();
+    if (!surface || !surface.dataModel || !cleanId) return [];
+    const current = (resolvePointer(surface.dataModel, "/okf/rejectedSources") || []).slice();
+    const idx = current.indexOf(cleanId);
+    if (idx === -1) {
+      current.push(cleanId);
+    } else {
+      current.splice(idx, 1);
+    }
+    setPointer(surface.dataModel, "/okf/rejectedSources", current);
+
+    const bodyMd = String(resolvePointer(surface.dataModel, "/okf/body") || "");
+    const sources = resolvePointer(surface.dataModel, "/okf/sources") || [];
+    const statsMap = {};
+    for (let i = 0; i < sources.length; i++) {
+      const s = sources[i];
+      if (s && s.id) {
+        statsMap[s.id] = inspectSourceCitationsInBody(bodyMd, s.id, current);
+      }
+    }
+    setPointer(surface.dataModel, "/okf/sourceCitationStats", statsMap);
+    updateSourcesBadgeInStudio(surface);
+    buildCurationPrompts(surface);
+
+    if (
+      typeof renderSurface === "function" &&
+      typeof document !== "undefined" &&
+      document.getElementById &&
+      document.getElementById("a2ui-surface-root")
+    ) {
+      renderSurface();
+    }
+    return current;
+  }
+
+  function addSourceInStudio(surface, url, title) {
+    const cleanUrl = String(url || "").trim();
+    if (!surface || !surface.dataModel || !cleanUrl) return null;
+    const rawTitle = String(title || "").trim();
+    const cleanTitle = rawTitle || cleanUrl;
+    const sources = (resolvePointer(surface.dataModel, "/okf/sources") || []).slice();
+    const existingIds = new Set(
+      sources.map(function (s) {
+        return String((s && s.id) || "");
+      })
+    );
+    const id = slugifySourceIdInStudio(rawTitle || cleanUrl, existingIds);
+    const retrievedAt = new Date().toISOString().replace(/\\.\\d{3}Z$/, "Z");
+    const newSrc = {
+      id: id,
+      resource: cleanUrl,
+      url: cleanUrl,
+      title: cleanTitle,
+      retrieved_at: retrievedAt,
+      addedByHuman: true,
+    };
+    sources.push(newSrc);
+    setPointer(surface.dataModel, "/okf/sources", sources);
+
+    const added = (resolvePointer(surface.dataModel, "/okf/addedSources") || []).slice();
+    added.push({ id: id, url: cleanUrl, title: rawTitle });
+    setPointer(surface.dataModel, "/okf/addedSources", added);
+
+    const curBody = String(resolvePointer(surface.dataModel, "/okf/body") || "");
+    const updatedBody = curBody.replace(/\\s*$/, "") + "\\n[^" + id + "]: " + cleanTitle + "\\n";
+    setPointer(surface.dataModel, "/okf/body", updatedBody);
+    if (
+      !surface.viewingStubConcept &&
+      !resolvePointer(surface.dataModel, "/okf/viewingStubConcept")
+    ) {
+      setPointer(surface.dataModel, "/okf/primaryBody", updatedBody);
+      setPointer(surface.dataModel, "/okf/primarySources", sources);
+    }
+
+    updateSourcesBadgeInStudio(surface);
+    buildCurationPrompts(surface);
+
+    if (
+      typeof renderSurface === "function" &&
+      typeof document !== "undefined" &&
+      document.getElementById &&
+      document.getElementById("a2ui-surface-root")
+    ) {
+      renderSurface();
+    }
+    return newSrc;
+  }
+
   var payload = (typeof window !== "undefined" && window.A2UI_SURFACE_PAYLOAD) || {};
   var messages = payload.messages || [];
   var bundleGraph = payload.bundleGraph || { nodes: [], edges: [], bodies: {}, types: [], palette: {}, conceptMeta: {}, sourceNodeByFnId: {}, sourceNodeByAnyFnId: {} };
   var bundleRuns = Array.isArray(payload.bundleRuns) ? payload.bundleRuns : [];
+
+  // A2UI Client Surface State (Adjacency List + RFC 6901 JSON Pointer Data Model)
+  const surfaces = {};
+  const actionLog = [];
+  let activeSurfaceId = payload.surfaceId || "icm_run_studio";
+
+  function mountSurface(surface) {
+    if (surface && surface.surfaceId) {
+      surfaces[surface.surfaceId] = surface;
+      activeSurfaceId = surface.surfaceId;
+    }
+    return surface;
+  }
 
   if (typeof window !== "undefined" && window.__ICM_TEST_HOOKS__) {
     window.__ICM_TEST_HOOKS__.formatInlineLatexAndFootnotes = formatInlineLatexAndFootnotes;
@@ -10349,13 +11175,15 @@ const A2UI_STUDIO_JS = `
     window.__ICM_TEST_HOOKS__.navigateOkfMarkdownConcept = navigateOkfMarkdownConcept;
     window.__ICM_TEST_HOOKS__.syncChecklistToOkfBody = syncChecklistToOkfBody;
     window.__ICM_TEST_HOOKS__.syncOkfBodyToChecklist = syncOkfBodyToChecklist;
+    window.__ICM_TEST_HOOKS__.inspectSourceCitationsInBody = inspectSourceCitationsInBody;
+    window.__ICM_TEST_HOOKS__.buildCurationPrompts = buildCurationPrompts;
+    window.__ICM_TEST_HOOKS__.toggleRejectSourceInStudio = toggleRejectSourceInStudio;
+    window.__ICM_TEST_HOOKS__.addSourceInStudio = addSourceInStudio;
+    window.__ICM_TEST_HOOKS__.renderComponent = renderComponent;
+    window.__ICM_TEST_HOOKS__.renderSurface = renderSurface;
+    window.__ICM_TEST_HOOKS__.mountSurface = mountSurface;
     return;
   }
-
-  // A2UI Client Surface State (Adjacency List + RFC 6901 JSON Pointer Data Model)
-  const surfaces = {};
-  const actionLog = [];
-  let activeSurfaceId = payload.surfaceId || "icm_run_studio";
 
   function escapeHtml(str) {
     return String(str == null ? "" : str)
@@ -11025,7 +11853,7 @@ const A2UI_STUDIO_JS = `
     a.click();
   }
 
-  function formatInlineLatexAndFootnotes(md, sources) {
+  function formatInlineLatexAndFootnotes(md, sources, rejectedSourceIds) {
     const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", a: "ᵃ", b: "ᵇ", c: "ᶜ", d: "ᵈ", e: "ᵉ", f: "ᶠ", g: "ᵍ", h: "ʰ", i: "ⁱ", j: "ʲ", k: "ᵏ", l: "ˡ", m: "ᵐ", n: "ⁿ", o: "ᵒ", p: "ᵖ", r: "ʳ", s: "ˢ", t: "ᵗ", u: "ᵘ", v: "ᵛ", w: "ʷ", x: "ˣ", y: "ʸ", z: "ᶻ" };
     const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     let out = String(md || "");
@@ -11153,9 +11981,28 @@ const A2UI_STUDIO_JS = `
       return "<code>" + escapeHtml(cleaned) + "</code>";
     });
     out = out.replace(/\\x60(\\/[A-Za-z0-9_\\-\\/]+\\.md)\\x60/g, '<a href="$1"><code>$1</code></a>');
+    const rejectedFnSet = new Set(
+      Array.isArray(rejectedSourceIds)
+        ? rejectedSourceIds.map(function (r) {
+            return String(r || "").trim();
+          })
+        : []
+    );
     out = out.replace(/\\[\\^([^\\]]+)\\]/g, function (_, id) {
-      const safeId = escapeHtml(id);
-      return '<sup class="fn-ref"><a href="#okf-src-' + safeId + '" data-fn="' + safeId + '">[' + safeId + "]</a></sup>";
+      const cleanId = String(id || "").trim();
+      const safeId = escapeHtml(cleanId);
+      const isRej = rejectedFnSet.has(cleanId);
+      return (
+        '<sup class="fn-ref' +
+        (isRej ? " fn-rejected" : "") +
+        '"><a href="#okf-src-' +
+        safeId +
+        '" data-fn="' +
+        safeId +
+        '">[' +
+        safeId +
+        "]</a></sup>"
+      );
     });
     if (!window.marked) {
       out = out.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, '<a href="$2">$1</a>');
@@ -12023,15 +12870,145 @@ const A2UI_STUDIO_JS = `
 
     if (type === "OkfMarkdown") {
       const isNo = isNorwegianSurface(surface);
+      const outerWrap = document.createElement("div");
+      outerWrap.className = "okf-md-outer";
       const wrap = document.createElement("div");
-      wrap.className = "okf-md-container";
+      wrap.className = "okf-md-container okf-split";
       const bodyMd = String(resolveDynamic(comp.body, surface, scopeData) || "");
       const sources = resolveDynamic(comp.sources, surface, scopeData) || [];
       const trustTier = String(resolveDynamic(comp.trustTier, surface, scopeData) || "unverified");
+      const statusVal = String(resolvePointer(surface.dataModel, "/okf/status") || "draft");
       const isStale = Boolean(resolveDynamic(comp.isStale, surface, scopeData));
       const editModePath = "/okf/editMode";
       const isEditing = Boolean(resolvePointer(surface.dataModel, editModePath));
       const viewingStub = Boolean(resolvePointer(surface.dataModel, "/okf/viewingStubConcept"));
+      if (resolvePointer(surface.dataModel, "/okf/rejectedSources") === undefined) {
+        setPointer(surface.dataModel, "/okf/rejectedSources", []);
+      }
+      if (resolvePointer(surface.dataModel, "/okf/addedSources") === undefined) {
+        setPointer(surface.dataModel, "/okf/addedSources", []);
+      }
+      const rejectedSources = (resolvePointer(surface.dataModel, "/okf/rejectedSources") || []).map(String);
+      const rejectedSet = new Set(rejectedSources);
+      const addedSources = resolvePointer(surface.dataModel, "/okf/addedSources") || [];
+      const activeSourceCount = sources.filter(function (s) {
+        return s && !rejectedSet.has(String(s.id || ""));
+      }).length;
+      const curationPrompts = buildCurationPrompts(surface);
+
+      if (!viewingStub) {
+        const curationBanner = document.createElement("div");
+        curationBanner.className = "a2ui-card okf-curation-banner";
+        curationBanner.id = "okf-curation-banner";
+
+        const bannerTop = document.createElement("div");
+        bannerTop.className = "a2ui-row justify-between";
+        const bannerLeft = document.createElement("div");
+        bannerLeft.className = "a2ui-row";
+        const bannerTitle = document.createElement("strong");
+        bannerTitle.style.fontSize = "14px";
+        bannerTitle.textContent = isNo
+          ? "🛡️ Intermission Kildekuratering & Godkjenning (Stage 1 → Stage 2)"
+          : "🛡️ Intermission Source Curation & Sign-Off (Stage 1 → Stage 2)";
+        bannerLeft.appendChild(bannerTitle);
+
+        const statusChip = document.createElement("span");
+        statusChip.className = "a2ui-badge " + (statusVal === "stable" ? "success" : "warn");
+        statusChip.textContent = "status: " + statusVal;
+        bannerLeft.appendChild(statusChip);
+
+        const trustChip = document.createElement("span");
+        trustChip.className = "a2ui-badge " + (trustTier === "human-reviewed" ? "accent" : "primary");
+        trustChip.textContent = "trust: " + trustTier;
+        bannerLeft.appendChild(trustChip);
+
+        const activeChip = document.createElement("span");
+        activeChip.className = "a2ui-badge primary";
+        activeChip.textContent = isNo
+          ? "✅ " + activeSourceCount + " aktive kilder"
+          : "✅ " + activeSourceCount + " active sources";
+        bannerLeft.appendChild(activeChip);
+
+        if (rejectedSources.length > 0) {
+          const rejChip = document.createElement("span");
+          rejChip.className = "a2ui-badge danger";
+          rejChip.textContent = isNo
+            ? "🚫 " + rejectedSources.length + " avvist"
+            : "🚫 " + rejectedSources.length + " rejected";
+          bannerLeft.appendChild(rejChip);
+        }
+        if (addedSources.length > 0) {
+          const addChip = document.createElement("span");
+          addChip.className = "a2ui-badge success";
+          addChip.textContent = isNo
+            ? "➕ " + addedSources.length + " lagt til"
+            : "➕ " + addedSources.length + " added";
+          bannerLeft.appendChild(addChip);
+        }
+
+        const bannerRight = document.createElement("div");
+        bannerRight.className = "a2ui-row";
+
+        function bindCopyBtn(btn, getText, defaultLabel) {
+          btn.addEventListener("click", function () {
+            const txt = getText();
+            if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(txt).catch(function () {});
+            }
+            btn.textContent = isNo ? "✓ Kopiert!" : "✓ Copied!";
+            setTimeout(function () {
+              btn.textContent = defaultLabel;
+            }, 1800);
+          });
+        }
+
+        const copyAgyLabel = isNo ? "📋 Kopier svar til AGY" : "📋 Copy Reply for AGY";
+        const copyAgyBtn = document.createElement("button");
+        copyAgyBtn.className = "a2ui-btn primary";
+        copyAgyBtn.id = "okf-copy-agy-btn";
+        copyAgyBtn.textContent = copyAgyLabel;
+        bindCopyBtn(
+          copyAgyBtn,
+          function () {
+            return String(resolvePointer(surface.dataModel, "/okf/curationAgyText") || curationPrompts.agyText);
+          },
+          copyAgyLabel
+        );
+
+        const copyCliLabel = isNo ? "💻 Kopier CLI-kommando" : "💻 Copy CLI Command";
+        const copyCliBtn = document.createElement("button");
+        copyCliBtn.className = "a2ui-btn";
+        copyCliBtn.id = "okf-copy-cli-btn";
+        copyCliBtn.textContent = copyCliLabel;
+        bindCopyBtn(
+          copyCliBtn,
+          function () {
+            return String(resolvePointer(surface.dataModel, "/okf/curationCliText") || curationPrompts.cliText);
+          },
+          copyCliLabel
+        );
+
+        bannerRight.appendChild(copyAgyBtn);
+        bannerRight.appendChild(copyCliBtn);
+        bannerTop.appendChild(bannerLeft);
+        bannerTop.appendChild(bannerRight);
+        curationBanner.appendChild(bannerTop);
+
+        const agyBox = document.createElement("div");
+        agyBox.className = "okf-curation-prompt-box";
+        agyBox.id = "okf-curation-agy-text";
+        agyBox.textContent = curationPrompts.agyText;
+        curationBanner.appendChild(agyBox);
+
+        const cliBox = document.createElement("div");
+        cliBox.className = "okf-curation-prompt-box";
+        cliBox.id = "okf-curation-cli-text";
+        cliBox.style.opacity = "0.9";
+        cliBox.textContent = curationPrompts.cliText;
+        curationBanner.appendChild(cliBox);
+
+        outerWrap.appendChild(curationBanner);
+      }
 
       const mainCard = document.createElement("div");
       mainCard.className = "a2ui-card a2ui-col";
@@ -12131,7 +13108,7 @@ const A2UI_STUDIO_JS = `
       } else {
         const mdBody = document.createElement("div");
         mdBody.className = "okf-md-body";
-        const formatted = formatInlineLatexAndFootnotes(bodyMd, sources);
+        const formatted = formatInlineLatexAndFootnotes(bodyMd, sources, rejectedSources);
         mdBody.innerHTML = window.marked ? window.marked.parse(formatted) : formatted;
         // Wire internal /research/*.md concept links & [^id] footnote scroll/highlight
         mdBody.querySelectorAll("a[href]").forEach((a) => {
@@ -12171,16 +13148,87 @@ const A2UI_STUDIO_JS = `
       sideCard.className = "a2ui-card a2ui-col";
       const sHead = document.createElement("h3");
       sHead.className = "a2ui-h3";
+      const countDisplay =
+        rejectedSources.length > 0
+          ? activeSourceCount + " / " + sources.length
+          : String(sources.length);
       sHead.textContent = isNo
-        ? "Kilder & Sporbarhet (" + sources.length + ")"
-        : "Sources & Provenance (" + sources.length + ")";
+        ? "Kilder & Sporbarhet (" + countDisplay + ")"
+        : "Sources & Provenance (" + countDisplay + ")";
       sideCard.appendChild(sHead);
 
+      const stage1Trace = resolvePointer(surface.dataModel, "/okf/stage1Trace") || null;
+      const searchQueries =
+        stage1Trace && Array.isArray(stage1Trace.searchQueries)
+          ? stage1Trace.searchQueries
+          : [];
+      if (searchQueries.length > 0 && !viewingStub) {
+        const searchDetails = document.createElement("details");
+        searchDetails.className = "okf-search-log-details";
+        const searchSummary = document.createElement("summary");
+        searchSummary.textContent = isNo
+          ? "🔎 Stage 1 Google-søkelogg (" + searchQueries.length + " søk)"
+          : "🔎 Stage 1 Search Queries (" + searchQueries.length + " queries)";
+        searchDetails.appendChild(searchSummary);
+        const qList = document.createElement("ol");
+        qList.style.margin = "8px 0 0 18px";
+        qList.style.padding = "0";
+        searchQueries.forEach(function (q) {
+          const li = document.createElement("li");
+          li.style.marginBottom = "3px";
+          li.textContent = String(q);
+          qList.appendChild(li);
+        });
+        searchDetails.appendChild(qList);
+        sideCard.appendChild(searchDetails);
+      }
+
+      if (!viewingStub) {
+        const addBox = document.createElement("div");
+        addBox.className = "okf-add-source-box";
+        const addLabel = document.createElement("div");
+        addLabel.style.fontWeight = "600";
+        addLabel.style.fontSize = "12px";
+        addLabel.textContent = isNo
+          ? "➕ Legg til savnet kilde (f.eks. Lovdata / DSB / forskrift)"
+          : "➕ Add Missing Source (URL + optional title)";
+        const urlInput = document.createElement("input");
+        urlInput.type = "url";
+        urlInput.id = "okf-add-source-url";
+        urlInput.placeholder = isNo ? "https://lovdata.no/dokument/..." : "https://...";
+        const titleInput = document.createElement("input");
+        titleInput.type = "text";
+        titleInput.id = "okf-add-source-title";
+        titleInput.placeholder = isNo
+          ? "Valgfri tittel (f.eks. Brann- og eksplosjonsvernloven § 19)"
+          : "Optional title (e.g. Regulatory Standard § 12)";
+        const addBtn = document.createElement("button");
+        addBtn.className = "a2ui-btn primary";
+        addBtn.id = "okf-add-source-btn";
+        addBtn.textContent = isNo ? "➕ Legg til kilde" : "➕ Add Source";
+        addBtn.addEventListener("click", function () {
+          const u = (urlInput.value || "").trim();
+          const t = (titleInput.value || "").trim();
+          if (!u) return;
+          addSourceInStudio(surface, u, t);
+          urlInput.value = "";
+          titleInput.value = "";
+        });
+        addBox.appendChild(addLabel);
+        addBox.appendChild(urlInput);
+        addBox.appendChild(titleInput);
+        addBox.appendChild(addBtn);
+        sideCard.appendChild(addBox);
+      }
+
       const srcList = document.createElement("div");
+      const statsMap = {};
       sources.forEach((src) => {
         const sc = document.createElement("div");
-        sc.className = "okf-source-card";
-        const safeId = escapeHtml(src.id || "src");
+        const rawId = String(src.id || "src");
+        const isRej = rejectedSet.has(rawId);
+        sc.className = "okf-source-card" + (isRej ? " rejected" : "");
+        const safeId = escapeHtml(rawId);
         const rawUrl = src.url || src.resource || "";
         const safeTitle = escapeHtml(src.title || rawUrl || "");
         const safeUrl = rawUrl ? escapeHtml(rawUrl) : "";
@@ -12188,18 +13236,29 @@ const A2UI_STUDIO_JS = `
         const shortUrl = strippedUrl
           ? escapeHtml(strippedUrl.slice(0, 68) + (strippedUrl.length > 68 ? "…" : ""))
           : "";
-        sc.id = "okf-src-" + (src.id || "src");
-        sc.innerHTML =
-          "<div><strong>[^" +
+        const citeStats = inspectSourceCitationsInBody(bodyMd, rawId, rejectedSources);
+        statsMap[rawId] = citeStats;
+
+        sc.id = "okf-src-" + rawId;
+        const headerHtml =
+          '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">' +
+          '<div><strong>[^' +
           safeId +
           "]</strong> " +
           (safeUrl
-            ? '<a href="' +
+            ? '<a class="okf-src-title" href="' +
               safeUrl +
               '" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-weight:600;text-decoration:none">' +
               safeTitle +
               " ↗</a>"
-            : safeTitle) +
+            : '<span class="okf-src-title">' + safeTitle + "</span>") +
+          (isRej
+            ? ' <span class="src-chip rejected-badge">' + (isNo ? "🚫 AVVIST" : "🚫 REJECTED") + "</span>"
+            : "") +
+          (src.addedByHuman
+            ? ' <span class="src-chip added-badge">' + (isNo ? "➕ NY" : "➕ ADDED") + "</span>"
+            : "") +
+          "</div>" +
           "</div>" +
           (safeUrl
             ? '<div style="margin-top:2px;font-size:11px;word-break:break-all"><a href="' +
@@ -12209,16 +13268,82 @@ const A2UI_STUDIO_JS = `
               "</a></div>"
             : "") +
           "<div>" +
-          (src.retrieved_at ? '<span class="src-chip retrieved">retrieved: ' + escapeHtml(src.retrieved_at) + "</span>" : "") +
-          (src.last_modified ? '<span class="src-chip modified">modified: ' + escapeHtml(src.last_modified) + "</span>" : "") +
+          (src.retrieved_at
+            ? '<span class="src-chip retrieved">retrieved: ' + escapeHtml(src.retrieved_at) + "</span>"
+            : "") +
+          (src.last_modified
+            ? '<span class="src-chip modified">modified: ' + escapeHtml(src.last_modified) + "</span>"
+            : "") +
+          '<span class="src-chip citations">🔗 ' +
+          citeStats.mentionCount +
+          " " +
+          (isNo ? "siteringer" : "citations") +
+          "</span>" +
+          (citeStats.soleClaimLines.length > 0
+            ? '<span class="src-chip sole-warning">⚠️ ' +
+              (isNo
+                ? "Eneste kilde for " + citeStats.soleClaimLines.length + " punkt(er)"
+                : "Sole source for " + citeStats.soleClaimLines.length + " claim(s)") +
+              "</span>"
+            : "") +
           "</div>";
+        sc.innerHTML = headerHtml;
+
+        if (!viewingStub) {
+          const actionRow = document.createElement("div");
+          actionRow.style.marginTop = "6px";
+          actionRow.style.display = "flex";
+          actionRow.style.justifyContent = "flex-end";
+          const rejBtn = document.createElement("button");
+          rejBtn.className = "a2ui-btn okf-reject-btn" + (isRej ? "" : " danger");
+          rejBtn.setAttribute("data-src-id", rawId);
+          rejBtn.style.padding = "3px 8px";
+          rejBtn.style.fontSize = "11.5px";
+          rejBtn.textContent = isRej
+            ? isNo
+              ? "↩ Angre avvisning"
+              : "↩ Undo reject"
+            : isNo
+              ? "🚫 Avvis kilde"
+              : "🚫 Reject source";
+          rejBtn.addEventListener("click", function () {
+            toggleRejectSourceInStudio(surface, rawId);
+          });
+          actionRow.appendChild(rejBtn);
+          sc.appendChild(actionRow);
+        }
+
+        if (citeStats.soleClaimLines.length > 0) {
+          const soleDetails = document.createElement("details");
+          soleDetails.className = "okf-sole-claims-details";
+          const soleSummary = document.createElement("summary");
+          const openBracketCaret = "[" + "^";
+          soleSummary.textContent = isNo
+            ? "Vis " + citeStats.soleClaimLines.length + " påstand(er) som kun hviler på " + openBracketCaret + rawId + "]"
+            : "Show " + citeStats.soleClaimLines.length + " claim(s) backed solely by " + openBracketCaret + rawId + "]";
+          soleDetails.appendChild(soleSummary);
+          const soleUl = document.createElement("ul");
+          soleUl.style.margin = "5px 0 0 16px";
+          soleUl.style.padding = "0";
+          citeStats.soleClaimLines.forEach(function (cl) {
+            const li = document.createElement("li");
+            li.style.marginBottom = "3px";
+            li.textContent = cl;
+            soleUl.appendChild(li);
+          });
+          soleDetails.appendChild(soleUl);
+          sc.appendChild(soleDetails);
+        }
+
         srcList.appendChild(sc);
       });
+      setPointer(surface.dataModel, "/okf/sourceCitationStats", statsMap);
       sideCard.appendChild(srcList);
 
       wrap.appendChild(mainCard);
       wrap.appendChild(sideCard);
-      return wrap;
+      outerWrap.appendChild(wrap);
+      return outerWrap;
     }
 
     if (type === "OkfKnowledgeGraph") {
@@ -12801,6 +13926,105 @@ export function generateA2uiSurface(
       rawStage2 = null;
     }
   }
+  const isStage1Only = !(stage2OutputPath && fs.existsSync(stage2OutputPath) && rawStage2);
+
+  const extractStage1Trace = (runDir: string, runMeta: Record<string, any>) => {
+    const tel = (
+      runMeta && typeof runMeta.stage1Telemetry === 'object' && runMeta.stage1Telemetry
+        ? runMeta.stage1Telemetry
+        : {}
+    ) as Record<string, any>;
+    const tracePath = runDir
+      ? path.join(runDir, 'stages', '01_research', 'output', 'thinking_trace.md')
+      : '';
+    const thinkingTraceMarkdown =
+      tracePath && fs.existsSync(tracePath) ? fs.readFileSync(tracePath, 'utf-8') : '';
+    const rawQueries: string[] = Array.isArray(tel.searchQueries)
+      ? tel.searchQueries.map((q: unknown) => String(q || '').trim()).filter(Boolean)
+      : [];
+    if (rawQueries.length === 0 && thinkingTraceMarkdown) {
+      const sqSectionMatch = thinkingTraceMarkdown.match(
+        /##\s+Executed Google Search Queries[\s\S]*?(?=\n##\s+|\s*$)/i
+      );
+      if (sqSectionMatch) {
+        for (const line of sqSectionMatch[0].split(/\r?\n/)) {
+          const m = line.match(/^\s*(?:[-*+]|\d+\.)\s+`?([^`\r\n]+?)`?\s*$/);
+          if (m && m[1] && !/^\*?No search queries/i.test(m[1].trim())) {
+            rawQueries.push(m[1].trim());
+          }
+        }
+      }
+    }
+    return {
+      thinkingLevel: String(tel.thinkingLevel || 'HIGH'),
+      thoughtSteps: Number(tel.thoughtSteps || 0),
+      searchQueries: rawQueries,
+      inputTokens: Number(tel.inputTokens || 0),
+      thoughtsTokens: Number(tel.thoughtsTokens || 0),
+      outputTokens: Number(tel.outputTokens || 0),
+      totalTokens: Number(tel.totalTokens || 0),
+      durationMs: Number(tel.durationMs || 0),
+      thinkingTraceMarkdown,
+    };
+  };
+
+  const formatStage1TraceOverviewBody = (
+    trace: ReturnType<typeof extractStage1Trace>,
+    isNoLang: boolean,
+    fallbackDesc: string
+  ): string => {
+    const lines: string[] = [];
+    lines.push(
+      isNoLang
+        ? '### 📊 Stage 1 Telemetri & Grounding-statistikk'
+        : '### 📊 Stage 1 Telemetry & Grounding Metrics'
+    );
+    lines.push(
+      isNoLang
+        ? `- **Thinking Level:** \`${trace.thinkingLevel}\`  •  **Resonneringssteg:** ${trace.thoughtSteps}  •  **Google-søk utført:** ${trace.searchQueries.length}`
+        : `- **Thinking Level:** \`${trace.thinkingLevel}\`  •  **Reasoning Steps:** ${trace.thoughtSteps}  •  **Google Searches Executed:** ${trace.searchQueries.length}`
+    );
+    if (trace.totalTokens > 0 || trace.durationMs > 0) {
+      const sec = (trace.durationMs / 1000).toFixed(1);
+      lines.push(
+        isNoLang
+          ? `- **Tokens:** ${trace.totalTokens} totalt (input: ${trace.inputTokens}, thinking: ${trace.thoughtsTokens}, output: ${trace.outputTokens})  •  **Varighet:** ${sec}s`
+          : `- **Tokens:** ${trace.totalTokens} total (input: ${trace.inputTokens}, thinking: ${trace.thoughtsTokens}, output: ${trace.outputTokens})  •  **Duration:** ${sec}s`
+      );
+    }
+    lines.push('');
+    lines.push(
+      isNoLang
+        ? `### 🔎 Utførte Google-søk (${trace.searchQueries.length})`
+        : `### 🔎 Executed Google Search Queries (${trace.searchQueries.length})`
+    );
+    if (trace.searchQueries.length > 0) {
+      trace.searchQueries.forEach((q, idx) => {
+        lines.push(`${idx + 1}. \`${q}\``);
+      });
+    } else {
+      lines.push(
+        isNoLang
+          ? '*Ingen søkespørringer logget i meta.json.*'
+          : '*No search queries logged in meta.json.*'
+      );
+    }
+    if (trace.thinkingTraceMarkdown.trim()) {
+      lines.push('');
+      lines.push('---');
+      lines.push('');
+      const cleanedTrace = trace.thinkingTraceMarkdown
+        .replace(/^\s*#\s+[^\r\n]+\r?\n+/, '')
+        .trim();
+      lines.push(cleanedTrace);
+    } else if (fallbackDesc.trim()) {
+      lines.push('');
+      lines.push(fallbackDesc.trim());
+    }
+    return lines.join('\n');
+  };
+
+  const stage1Trace = extractStage1Trace(resolvedRunDir, meta);
 
   const fallbackTitle = String(
     okfDoc.frontmatter.title || meta.topic || resolvedRunId || 'ICM Studio Surface'
@@ -12849,12 +14073,15 @@ export function generateA2uiSurface(
   // Helper to build a run's dataModel and tabTitles for multi-run A2UI Studio switching
   const buildRunBundleEntry = (
     rId: string,
+    rDir: string,
     rMeta: Record<string, any>,
     rOkfDoc: OKFDocument,
     rRawStage2: Record<string, unknown> | null,
     graphNodeCount: number,
     runIndex = 0
   ): A2uiBundleRunEntry => {
+    const rIsStage1Only = !rRawStage2;
+    const rStage1Trace = extractStage1Trace(rDir, rMeta);
     const rFallbackTitle = String(
       rOkfDoc.frontmatter.title || rMeta.topic || rId || 'ICM Studio Surface'
     );
@@ -12914,11 +14141,34 @@ export function generateA2uiSurface(
       ? `Kurs ${runIndex + 1}: ${rShortTitle}`
       : `Run ${runIndex + 1}: ${rShortTitle}`;
 
+    const rOverviewBody = rIsStage1Only
+      ? formatStage1TraceOverviewBody(
+          rStage1Trace,
+          rIsNo,
+          String(rOkfDoc.frontmatter.description || '')
+        )
+      : rStage2Norm.scriptBody ||
+        String(rOkfDoc.frontmatter.description || '') ||
+        (rIsNo
+          ? 'Ingen Stage 2-manustekst generert ennå.'
+          : 'No Stage 2 synthesis text generated yet.');
+
+    const rOverviewHeading = rIsStage1Only
+      ? rIsNo
+        ? 'Stage 1 Google-søkelogg, Telemetri & Resonnering'
+        : 'Stage 1 Search Queries, Telemetry & Reasoning Trace'
+      : rIsNo
+        ? 'Stage 2 Syntese & Hovedbudskap'
+        : rIsAnalysis
+          ? 'Stage 2 Executive Synthesis & Thesis'
+          : 'Stage 2 Synthesis & Core Narrative';
+
     const rDataModel = {
       meta: {
         runId: rId || 'workspace',
         lang: rLang,
         domainMode: rDomainMode,
+        isStage1Only: rIsStage1Only,
         title: rStage2Norm.title,
         subtitle: rStage2Norm.subtitle,
         targetAudience: rStage2Norm.targetAudience,
@@ -12959,6 +14209,9 @@ export function generateA2uiSurface(
         freshnessBadge: rFreshnessBadge,
         sourcesBadge: rSourcesBadge,
         sources: rSources,
+        rejectedSources: [] as string[],
+        addedSources: [] as Array<{ id: string; url: string; title: string }>,
+        stage1Trace: rStage1Trace,
         body: rBody,
         editMode: false,
       },
@@ -12971,12 +14224,8 @@ export function generateA2uiSurface(
         summaryText: `${rCompletedChecklist} / ${rTotalChecklist} ${rIsNo ? 'fullført' : 'completed'} (${rChecklistPct}%)`,
       },
       stage2: {
-        scriptBody:
-          rStage2Norm.scriptBody ||
-          rOkfDoc.frontmatter.description ||
-          (rIsNo
-            ? 'Ingen Stage 2-manustekst generert ennå.'
-            : 'No Stage 2 synthesis text generated yet.'),
+        overviewHeading: rOverviewHeading,
+        scriptBody: rOverviewBody,
         spokenScript:
           rStage2Norm.spokenScript ||
           rStage2Norm.scriptBody ||
@@ -13000,12 +14249,22 @@ export function generateA2uiSurface(
     };
 
     const rTabTitles: Record<string, string> = {
-      tab_overview: rIsNo
-        ? '📋 Oversikt & Sammendrag'
-        : rIsAnalysis
-          ? '📋 Executive Summary'
-          : '📋 Overview & Summary',
-      tab_okf_markdown: rIsNo ? '📚 OKF v0.2 Kunnskapsgrunnlag' : '📚 OKF v0.2 Knowledge Base',
+      tab_overview: rIsStage1Only
+        ? rIsNo
+          ? `🔎 Søkelogg & Resonnering (${rStage1Trace.searchQueries.length} søk)`
+          : `🔎 Search & Grounding Trace (${rStage1Trace.searchQueries.length} queries)`
+        : rIsNo
+          ? '📋 Oversikt & Sammendrag'
+          : rIsAnalysis
+            ? '📋 Executive Summary'
+            : '📋 Overview & Summary',
+      tab_okf_markdown: rIsStage1Only
+        ? rIsNo
+          ? `📚 OKF v0.2 Kunnskapsgrunnlag & Kilder (${rSources.length})`
+          : `📚 OKF v0.2 Knowledge Base & Sources (${rSources.length})`
+        : rIsNo
+          ? '📚 OKF v0.2 Kunnskapsgrunnlag'
+          : '📚 OKF v0.2 Knowledge Base',
       tab_okf_graph: rIsNo
         ? `🕸️ OKF Kunnskapsgraf (${graphNodeCount})`
         : `🕸️ OKF Knowledge Graph (${graphNodeCount})`,
@@ -13042,6 +14301,7 @@ export function generateA2uiSurface(
       conceptId: rConceptId,
       title: rStage2Norm.title,
       shortLabel: rShortLabel,
+      isStage1Only: rIsStage1Only,
       status: rStatus,
       trustTier: rTrustTier,
       isStale: rStale,
@@ -13057,11 +14317,15 @@ export function generateA2uiSurface(
   };
 
   // Discover all runs in workspace/runs for multi-run switching in A2UI Studio
+  const hasStage1OrComplete = (dirPath: string): boolean =>
+    fs.existsSync(path.join(dirPath, 'stages', '01_research', 'output', 'research_summary.md')) ||
+    fs.existsSync(path.join(dirPath, 'stages', '02_script', 'output', 'script_draft.json'));
+
   const candidateRunDirs: Array<{
     name: string;
     fullPath: string;
     sortKey: number;
-    complete: boolean;
+    hasArtifact: boolean;
   }> = [];
   if (fs.existsSync(runsRoot)) {
     for (const d of fs.readdirSync(runsRoot, { withFileTypes: true })) {
@@ -13074,13 +14338,13 @@ export function generateA2uiSurface(
         name: d.name,
         fullPath,
         sortKey,
-        complete: isCompleteRunDir(fullPath),
+        hasArtifact: hasStage1OrComplete(fullPath),
       });
     }
   }
-  const hasAnyCompleteRun = candidateRunDirs.some((d) => d.complete);
+  const hasAnyArtifactRun = candidateRunDirs.some((d) => d.hasArtifact);
   const rawRunDirs: Array<{ name: string; fullPath: string; sortKey: number }> = (
-    hasAnyCompleteRun ? candidateRunDirs.filter((d) => d.complete) : candidateRunDirs
+    hasAnyArtifactRun ? candidateRunDirs.filter((d) => d.hasArtifact) : candidateRunDirs
   ).map(({ name, fullPath, sortKey }) => ({ name, fullPath, sortKey }));
 
   if (
@@ -13131,7 +14395,7 @@ export function generateA2uiSurface(
   for (let rIdx = 0; rIdx < rawRunDirs.length; rIdx++) {
     const rd = rawRunDirs[rIdx];
     if (resolvedRunDir && path.resolve(rd.fullPath) === path.resolve(resolvedRunDir)) {
-      bundleRuns.push(buildRunBundleEntry(rd.name, meta, okfDoc, rawStage2, 0, rIdx));
+      bundleRuns.push(buildRunBundleEntry(rd.name, rd.fullPath, meta, okfDoc, rawStage2, 0, rIdx));
       continue;
     }
     let rMeta: Record<string, any> = {};
@@ -13170,11 +14434,11 @@ export function generateA2uiSurface(
         rRawStage2 = null;
       }
     }
-    bundleRuns.push(buildRunBundleEntry(rd.name, rMeta, rOkfDoc, rRawStage2, 0, rIdx));
+    bundleRuns.push(buildRunBundleEntry(rd.name, rd.fullPath, rMeta, rOkfDoc, rRawStage2, 0, rIdx));
   }
   if (bundleRuns.length === 0) {
     bundleRuns.push(
-      buildRunBundleEntry(resolvedRunId || 'workspace', meta, okfDoc, rawStage2, 0, 0)
+      buildRunBundleEntry(resolvedRunId || 'workspace', resolvedRunDir, meta, okfDoc, rawStage2, 0, 0)
     );
   }
 
@@ -13479,6 +14743,38 @@ export function generateA2uiSurface(
         ? `🧪 Quiz (${br.quizCount})`
         : `🧪 Knowledge Check (${br.quizCount})`;
     }
+    if (br.isStage1Only) {
+      const brTabs: Array<{ title: string; child: string }> = [
+        { title: br.tabTitles.tab_okf_markdown, child: 'tab_okf_markdown' },
+        { title: br.tabTitles.tab_overview, child: 'tab_overview' },
+        { title: br.tabTitles.tab_okf_graph, child: 'tab_okf_graph' },
+      ];
+      if (br.checklistCount > 0 && br.tabTitles.tab_checklist) {
+        brTabs.push({ title: br.tabTitles.tab_checklist, child: 'tab_checklist' });
+      }
+      br.tabs = brTabs;
+    } else {
+      const brTabs: Array<{ title: string; child: string }> = [
+        { title: br.tabTitles.tab_overview, child: 'tab_overview' },
+      ];
+      if (anyRunHasChecklist && br.tabTitles.tab_checklist) {
+        brTabs.push({ title: br.tabTitles.tab_checklist, child: 'tab_checklist' });
+      }
+      if (anyRunHasModules && br.tabTitles.tab_modules) {
+        brTabs.push({ title: br.tabTitles.tab_modules, child: 'tab_modules' });
+      }
+      if (anyRunHasCases && br.tabTitles.tab_cases) {
+        brTabs.push({ title: br.tabTitles.tab_cases, child: 'tab_cases' });
+      }
+      if (anyRunHasQuiz && br.tabTitles.tab_quiz) {
+        brTabs.push({ title: br.tabTitles.tab_quiz, child: 'tab_quiz' });
+      }
+      brTabs.push(
+        { title: br.tabTitles.tab_okf_markdown, child: 'tab_okf_markdown' },
+        { title: br.tabTitles.tab_okf_graph, child: 'tab_okf_graph' }
+      );
+      br.tabs = brTabs;
+    }
   }
 
   const surfaceId =
@@ -13555,19 +14851,14 @@ export function generateA2uiSurface(
     }
   );
 
-  // Tab 1: Overview, TTS Narration, Highlights
-  tabs.push({
-    title: isNo
-      ? '📋 Oversikt & Sammendrag'
-      : isAnalysis
-        ? '📋 Executive Summary'
-        : '📋 Overview & Summary',
-    child: 'tab_overview',
-  });
+  // Overview / Search & Grounding Trace Component Tree
   const overviewChildren = ['overview_narration_card'];
-  if (anyRunHasHighlights) {
+  if (!isStage1Only && anyRunHasHighlights) {
     overviewChildren.push('overview_highlights_card');
   }
+  const overviewNarrationChildren = isStage1Only
+    ? ['overview_narration_heading', 'overview_narration_body']
+    : ['overview_narration_heading', 'overview_tts_player', 'overview_narration_body'];
   components.push(
     {
       id: 'tab_overview',
@@ -13582,17 +14873,13 @@ export function generateA2uiSurface(
     {
       id: 'overview_narration_col',
       component: 'Column',
-      children: ['overview_narration_heading', 'overview_tts_player', 'overview_narration_body'],
+      children: overviewNarrationChildren,
     },
     {
       id: 'overview_narration_heading',
       component: 'Text',
       variant: 'h2',
-      text: isNo
-        ? 'Stage 2 Syntese & Hovedbudskap'
-        : isAnalysis
-          ? 'Stage 2 Executive Synthesis & Thesis'
-          : 'Stage 2 Synthesis & Core Narrative',
+      text: { path: '/stage2/overviewHeading' },
     },
     {
       id: 'overview_tts_player',
@@ -13649,14 +14936,8 @@ export function generateA2uiSurface(
     );
   }
 
-  // Tab 2 (Conditional): Interactive Checklist if `- [ ]` items exist in OKF Markdown
+  // Register Conditional & Domain Components
   if (anyRunHasChecklist) {
-    tabs.push({
-      title: isNo
-        ? `✅ Interaktiv Sjekkliste (${totalChecklistItems})`
-        : `✅ Interactive Checklist (${totalChecklistItems})`,
-      child: 'tab_checklist',
-    });
     components.push({
       id: 'tab_checklist',
       component: 'InteractiveChecklist',
@@ -13667,18 +14948,7 @@ export function generateA2uiSurface(
     });
   }
 
-  // Tab 3 (Conditional): ModuleCarousel if Stage 2 has trainingModules / lessons / modules / pillars / slides
   if (anyRunHasModules) {
-    tabs.push({
-      title: isNo
-        ? isAnalysis
-          ? `📊 Analyse-pilarer (${stage2Norm.modules.length})`
-          : `🎓 Moduler (${stage2Norm.modules.length})`
-        : isAnalysis
-          ? `📊 Deep-Dive Pillars (${stage2Norm.modules.length})`
-          : `🎓 Modules (${stage2Norm.modules.length})`,
-      child: 'tab_modules',
-    });
     components.push({
       id: 'tab_modules',
       component: 'ModuleCarousel',
@@ -13692,16 +14962,7 @@ export function generateA2uiSurface(
     });
   }
 
-  // Tab 4 (Conditional): CaseSimulator if Stage 2 has cases / scenarios / stressTests / boardActionItems
   if (anyRunHasCases) {
-    tabs.push({
-      title: isNo
-        ? `⚖️ Case & Tiltak (${stage2Norm.cases.length})`
-        : isAnalysis
-          ? `⚖️ Scenario Simulator (${stage2Norm.cases.length})`
-          : `⚖️ Cases & Actions (${stage2Norm.cases.length})`,
-      child: 'tab_cases',
-    });
     components.push({
       id: 'tab_cases',
       component: 'CaseSimulator',
@@ -13715,14 +14976,7 @@ export function generateA2uiSurface(
     });
   }
 
-  // Tab 5 (Conditional): QuizRunner if Stage 2 has quiz questions
   if (anyRunHasQuiz) {
-    tabs.push({
-      title: isNo
-        ? `🧪 Quiz (${stage2Norm.quiz.length})`
-        : `🧪 Knowledge Check (${stage2Norm.quiz.length})`,
-      child: 'tab_quiz',
-    });
     components.push({
       id: 'tab_quiz',
       component: 'QuizRunner',
@@ -13732,33 +14986,113 @@ export function generateA2uiSurface(
     });
   }
 
-  // Tab 6: OKF v0.2 Knowledge Base (`OkfMarkdown`)
-  tabs.push({
-    title: isNo ? '📚 OKF v0.2 Kunnskapsgrunnlag' : '📚 OKF v0.2 Knowledge Base',
-    child: 'tab_okf_markdown',
-  });
-  components.push({
-    id: 'tab_okf_markdown',
-    component: 'OkfMarkdown',
-    title: { path: '/okf/title' },
-    body: { path: '/okf/body' },
-    sources: { path: '/okf/sources' },
-    trustTier: { path: '/okf/trustTier' },
-    isStale: { path: '/okf/isStale' },
-  });
+  components.push(
+    {
+      id: 'tab_okf_markdown',
+      component: 'OkfMarkdown',
+      title: { path: '/okf/title' },
+      body: { path: '/okf/body' },
+      sources: { path: '/okf/sources' },
+      trustTier: { path: '/okf/trustTier' },
+      isStale: { path: '/okf/isStale' },
+    },
+    {
+      id: 'tab_okf_graph',
+      component: 'OkfKnowledgeGraph',
+      title: isNo ? 'OKF v0.2 Kunnskapsgraf' : 'OKF v0.2 Knowledge Graph',
+    }
+  );
 
-  // Tab 7: OKF Knowledge Graph (`OkfKnowledgeGraph`)
-  tabs.push({
-    title: isNo
-      ? `🕸️ OKF Kunnskapsgraf (${graphNodes.length})`
-      : `🕸️ OKF Knowledge Graph (${graphNodes.length})`,
-    child: 'tab_okf_graph',
-  });
-  components.push({
-    id: 'tab_okf_graph',
-    component: 'OkfKnowledgeGraph',
-    title: isNo ? 'OKF v0.2 Kunnskapsgraf' : 'OKF v0.2 Knowledge Graph',
-  });
+  // Assemble `tabs` order based on `isStage1Only` vs Full Studio Mode
+  if (isStage1Only) {
+    tabs.push(
+      {
+        title: isNo
+          ? `📚 OKF v0.2 Kunnskapsgrunnlag & Kilder (${okfSources.length})`
+          : `📚 OKF v0.2 Knowledge Base & Sources (${okfSources.length})`,
+        child: 'tab_okf_markdown',
+      },
+      {
+        title: isNo
+          ? `🔎 Søkelogg & Resonnering (${stage1Trace.searchQueries.length} søk)`
+          : `🔎 Search & Grounding Trace (${stage1Trace.searchQueries.length} queries)`,
+        child: 'tab_overview',
+      },
+      {
+        title: isNo
+          ? `🕸️ OKF Kunnskapsgraf (${graphNodes.length})`
+          : `🕸️ OKF Knowledge Graph (${graphNodes.length})`,
+        child: 'tab_okf_graph',
+      }
+    );
+    if (totalChecklistItems > 0) {
+      tabs.push({
+        title: isNo
+          ? `✅ Interaktiv Sjekkliste (${totalChecklistItems})`
+          : `✅ Interactive Checklist (${totalChecklistItems})`,
+        child: 'tab_checklist',
+      });
+    }
+  } else {
+    tabs.push({
+      title: isNo
+        ? '📋 Oversikt & Sammendrag'
+        : isAnalysis
+          ? '📋 Executive Summary'
+          : '📋 Overview & Summary',
+      child: 'tab_overview',
+    });
+    if (anyRunHasChecklist) {
+      tabs.push({
+        title: isNo
+          ? `✅ Interaktiv Sjekkliste (${totalChecklistItems})`
+          : `✅ Interactive Checklist (${totalChecklistItems})`,
+        child: 'tab_checklist',
+      });
+    }
+    if (anyRunHasModules) {
+      tabs.push({
+        title: isNo
+          ? isAnalysis
+            ? `📊 Analyse-pilarer (${stage2Norm.modules.length})`
+            : `🎓 Moduler (${stage2Norm.modules.length})`
+          : isAnalysis
+            ? `📊 Deep-Dive Pillars (${stage2Norm.modules.length})`
+            : `🎓 Modules (${stage2Norm.modules.length})`,
+        child: 'tab_modules',
+      });
+    }
+    if (anyRunHasCases) {
+      tabs.push({
+        title: isNo
+          ? `⚖️ Case & Tiltak (${stage2Norm.cases.length})`
+          : isAnalysis
+            ? `⚖️ Scenario Simulator (${stage2Norm.cases.length})`
+            : `⚖️ Cases & Actions (${stage2Norm.cases.length})`,
+        child: 'tab_cases',
+      });
+    }
+    if (anyRunHasQuiz) {
+      tabs.push({
+        title: isNo
+          ? `🧪 Quiz (${stage2Norm.quiz.length})`
+          : `🧪 Knowledge Check (${stage2Norm.quiz.length})`,
+        child: 'tab_quiz',
+      });
+    }
+    tabs.push(
+      {
+        title: isNo ? '📚 OKF v0.2 Kunnskapsgrunnlag' : '📚 OKF v0.2 Knowledge Base',
+        child: 'tab_okf_markdown',
+      },
+      {
+        title: isNo
+          ? `🕸️ OKF Kunnskapsgraf (${graphNodes.length})`
+          : `🕸️ OKF Knowledge Graph (${graphNodes.length})`,
+        child: 'tab_okf_graph',
+      }
+    );
+  }
 
   // Root & Main Tabs Component
   components.push(
@@ -13799,11 +15133,34 @@ export function generateA2uiSurface(
     ? `${okfSources.length} verifiserte kilder`
     : `${okfSources.length} verified sources`;
 
+  const activeOverviewBody = isStage1Only
+    ? formatStage1TraceOverviewBody(
+        stage1Trace,
+        isNo,
+        String(okfDoc.frontmatter.description || '')
+      )
+    : stage2Norm.scriptBody ||
+      String(okfDoc.frontmatter.description || '') ||
+      (isNo
+        ? 'Ingen Stage 2-manustekst generert ennå.'
+        : 'No Stage 2 synthesis text generated yet.');
+
+  const activeOverviewHeading = isStage1Only
+    ? isNo
+      ? 'Stage 1 Google-søkelogg, Telemetri & Resonnering'
+      : 'Stage 1 Search Queries, Telemetry & Reasoning Trace'
+    : isNo
+      ? 'Stage 2 Syntese & Hovedbudskap'
+      : isAnalysis
+        ? 'Stage 2 Executive Synthesis & Thesis'
+        : 'Stage 2 Synthesis & Core Narrative';
+
   const dataModel = {
     meta: {
       runId: resolvedRunId || 'workspace',
       lang: surfaceLang,
       domainMode,
+      isStage1Only,
       title: stage2Norm.title,
       subtitle: stage2Norm.subtitle,
       targetAudience: stage2Norm.targetAudience,
@@ -13844,6 +15201,9 @@ export function generateA2uiSurface(
       freshnessBadge: primaryFreshnessBadgeStr,
       sourcesBadge: primarySourcesBadgeStr,
       sources: okfSources,
+      rejectedSources: [] as string[],
+      addedSources: [] as Array<{ id: string; url: string; title: string }>,
+      stage1Trace,
       body: primaryBodyStr,
       editMode: false,
     },
@@ -13856,12 +15216,8 @@ export function generateA2uiSurface(
       summaryText: `${completedChecklistCount} / ${totalChecklistItems} ${isNo ? 'fullført' : 'completed'} (${checklistPct}%)`,
     },
     stage2: {
-      scriptBody:
-        stage2Norm.scriptBody ||
-        okfDoc.frontmatter.description ||
-        (isNo
-          ? 'Ingen Stage 2-manustekst generert ennå.'
-          : 'No Stage 2 synthesis text generated yet.'),
+      overviewHeading: activeOverviewHeading,
+      scriptBody: activeOverviewBody,
       spokenScript:
         stage2Norm.spokenScript ||
         stage2Norm.scriptBody ||
@@ -13923,16 +15279,19 @@ export function generateA2uiSurface(
   const baseOutDir = options.outputDir
     ? path.resolve(options.outputDir)
     : resolvedRunDir || workspaceRoot;
-  const stage2OutDir = options.outputDir
-    ? path.join(baseOutDir, 'stages', '02_script', 'output')
+  const stageSubDir = isStage1Only
+    ? path.join('stages', '01_research', 'output')
+    : path.join('stages', '02_script', 'output');
+  const stageOutDir = options.outputDir
+    ? path.join(baseOutDir, stageSubDir)
     : resolvedRunDir
-      ? path.join(resolvedRunDir, 'stages', '02_script', 'output')
+      ? path.join(resolvedRunDir, stageSubDir)
       : path.join(workspaceRoot, 'bundle');
 
-  fs.mkdirSync(stage2OutDir, { recursive: true });
+  fs.mkdirSync(stageOutDir, { recursive: true });
 
-  const surfaceJsonPath = path.join(stage2OutDir, 'a2ui_surface.json');
-  const surfaceJsonlPath = path.join(stage2OutDir, 'a2ui_surface.jsonl');
+  const surfaceJsonPath = path.join(stageOutDir, 'a2ui_surface.json');
+  const surfaceJsonlPath = path.join(stageOutDir, 'a2ui_surface.jsonl');
   const htmlOutputPath = options.outputHtmlPath
     ? path.resolve(options.outputHtmlPath)
     : path.join(baseOutDir, 'a2ui.html');
@@ -14031,7 +15390,8 @@ ${A2UI_STUDIO_JS}
   let bundleVizPath: string | undefined;
   const shouldMirrorBundle =
     options.mirrorBundleHtml !== undefined ? options.mirrorBundleHtml : !options.outputDir;
-  if (shouldMirrorBundle && fs.existsSync(bundleRoot)) {
+  if (shouldMirrorBundle) {
+    fs.mkdirSync(bundleRoot, { recursive: true });
     bundleHtmlPath = path.join(bundleRoot, 'a2ui.html');
     fs.writeFileSync(bundleHtmlPath, html, 'utf-8');
     try {
@@ -14042,13 +15402,13 @@ ${A2UI_STUDIO_JS}
     }
   }
 
-  // Also refresh sibling completed runs' a2ui.html so every run has the full multi-run switcher and unified bundle graph
+  // Also refresh sibling runs' a2ui.html so every run has the full multi-run switcher and unified bundle graph
   if (shouldMirrorBundle && bundleRuns.length > 1) {
     const activeRunKey = resolvedRunId || 'workspace';
     for (const br of bundleRuns) {
       if (!br.runId || br.runId === activeRunKey || br.runId === 'workspace') continue;
       const siblingRunDir = path.join(runsRoot, br.runId);
-      if (!fs.existsSync(siblingRunDir) || !isCompleteRunDir(siblingRunDir)) continue;
+      if (!fs.existsSync(siblingRunDir) || !hasStage1OrComplete(siblingRunDir)) continue;
       const siblingHtmlPath = path.join(siblingRunDir, 'a2ui.html');
       if (path.resolve(siblingHtmlPath) === path.resolve(htmlOutputPath)) continue;
       const siblingSurfaceId = `icm_${br.runId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
@@ -14064,13 +15424,32 @@ ${A2UI_STUDIO_JS}
         if (comp.id === 'badge_freshness') {
           return { ...comp, tone: br.isStale ? 'danger' : 'success' };
         }
+        if (comp.id === 'tab_overview') {
+          return {
+            ...comp,
+            children:
+              !br.isStage1Only && anyRunHasHighlights
+                ? ['overview_narration_card', 'overview_highlights_card']
+                : ['overview_narration_card'],
+          };
+        }
+        if (comp.id === 'overview_narration_col') {
+          return {
+            ...comp,
+            children: br.isStage1Only
+              ? ['overview_narration_heading', 'overview_narration_body']
+              : ['overview_narration_heading', 'overview_tts_player', 'overview_narration_body'],
+          };
+        }
         if (comp.id === 'main_tabs' && Array.isArray((comp as any).tabs)) {
           return {
             ...comp,
-            tabs: (comp as any).tabs.map((t: { title: string; child: string }) => ({
-              ...t,
-              title: br.tabTitles?.[t.child] || t.title,
-            })),
+            tabs: Array.isArray(br.tabs) && br.tabs.length > 0
+              ? br.tabs
+              : (comp as any).tabs.map((t: { title: string; child: string }) => ({
+                  ...t,
+                  title: br.tabTitles?.[t.child] || t.title,
+                })),
           };
         }
         return comp;
@@ -14125,6 +15504,7 @@ ${A2UI_STUDIO_JS}
     runId: resolvedRunId || 'workspace',
     surfaceId,
     catalogId: A2UI_ICM_CATALOG_ID,
+    isStage1Only,
     componentCount: components.length,
     tabCount: tabs.length,
     checklistItemCount: totalChecklistItems,
@@ -16086,6 +17466,596 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     fs.rmSync(tmpMultiRunDir, { recursive: true, force: true });
   }
 
+  // Stage-1 Intermission A2UI Review Mode & Interactive Source Curation Suite Self-Tests
+  const tmpStage1ReviewDir = path.resolve(`./workspace/runs/_stage1_curation_test_${Date.now()}`);
+  fs.mkdirSync(tmpStage1ReviewDir, { recursive: true });
+  try {
+    const s1RunId = 'brannvern-stage1-review-1775500000000';
+    const s1RunDir = path.join(tmpStage1ReviewDir, 'runs', s1RunId);
+    const s1OutDir = path.join(s1RunDir, 'stages', '01_research', 'output');
+    const s1BundleDir = path.join(tmpStage1ReviewDir, 'bundle');
+    const s1BundleResearchDir = path.join(s1BundleDir, 'research');
+    fs.mkdirSync(s1OutDir, { recursive: true });
+    fs.mkdirSync(s1BundleResearchDir, { recursive: true });
+
+    const s1InitialMd = [
+      '---',
+      'type: Research Concept',
+      'title: "Brannvern i barnehager — Modul 1"',
+      'description: "Stage 1 kunnskapsgrunnlag for brannvern i barnehager."',
+      'tags:',
+      '  - brannvern',
+      '  - barnehage',
+      'status: draft',
+      'generated:',
+      '  at: 2026-11-02T10:00:00Z',
+      `  by: model:${GEMINI_4_ARGON_MODEL}`,
+      'stale_after: 2027-05-02T00:00:00Z',
+      'sources:',
+      '  - id: lovdata-internkontroll',
+      '    title: "Internkontrollforskriften § 5 — Lovdata"',
+      '    url: https://lovdata.no/dokument/SF/forskrift/1996-12-06-1127',
+      '    retrieved_at: 2026-11-02T10:00:00Z',
+      '  - id: svak-blogg-kilde',
+      '    title: "Uoffisiell blogg om brannvern"',
+      '    url: https://example.com/blogg/brannvern-tips',
+      '    retrieved_at: 2026-11-02T10:00:00Z',
+      '---',
+      '# Brannvern i barnehager — Modul 1',
+      '',
+      'Styrer skal dokumentere systematisk HMS-arbeid og brannvern i barnehagen[^lovdata-internkontroll].',
+      '',
+      'Uverifisert påstand om at brannøvelse kun trengs hvert tredje år[^svak-blogg-kilde].',
+      '',
+      '## Sjekkliste',
+      '- [ ] Gjennomfør risikovurdering for barnehagen[^lovdata-internkontroll]',
+      '',
+      '[^lovdata-internkontroll]: Internkontrollforskriften § 5 — Lovdata',
+      '[^svak-blogg-kilde]: Uoffisiell blogg om brannvern',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(s1OutDir, 'research_summary.md'), s1InitialMd, 'utf-8');
+    fs.writeFileSync(
+      path.join(s1BundleResearchDir, 'brannvern-i-barnehager-modul-1.md'),
+      s1InitialMd,
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(s1OutDir, 'thinking_trace.md'),
+      [
+        '# Stage 1 Thinking & Search Trace',
+        '',
+        '## Executed Google Search Queries',
+        '1. `forskrift om brannforebygging barnehage lovdata`',
+        '2. `internkontrollforskriften styrer ansvar barnehage`',
+        '',
+        '## Reasoning Steps',
+        'Verified statutory obligations for kindergarten fire safety.',
+      ].join('\n'),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(s1RunDir, 'meta.json'),
+      JSON.stringify(
+        {
+          runId: s1RunId,
+          topic: 'Brannvern i barnehager — Modul 1',
+          model: GEMINI_4_ARGON_MODEL,
+          status: 'stage1_completed',
+          stage1Telemetry: {
+            thinkingLevel: 'HIGH',
+            thoughtSteps: 4,
+            searchQueries: [
+              'forskrift om brannforebygging barnehage lovdata',
+              'internkontrollforskriften styrer ansvar barnehage',
+            ],
+            inputTokens: 1200,
+            thoughtsTokens: 800,
+            outputTokens: 950,
+            totalTokens: 2950,
+            durationMs: 14200,
+          },
+          okf: {
+            bundleConceptId: 'research/brannvern-i-barnehager-modul-1',
+            trustTier: 'auto',
+            isStale: false,
+          },
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+
+    // 1. Verify generateA2uiSurface() in Stage-1 Intermission Review Mode (`isStage1Only === true`)
+    const s1A2uiRes = generateA2uiSurface({
+      workspaceRoot: tmpStage1ReviewDir,
+      runId: s1RunId,
+    });
+    const s1Html = fs.readFileSync(s1A2uiRes.htmlOutputPath, 'utf-8');
+    const s1UpdateCompsMsg = s1A2uiRes.messages.find(
+      (m): m is A2uiUpdateComponentsMessage => 'updateComponents' in m
+    );
+    const s1MainTabsComp = s1UpdateCompsMsg?.updateComponents.components.find(
+      (c) => c.id === 'main_tabs'
+    );
+    const s1UpdateDataMsg = s1A2uiRes.messages.find(
+      (m): m is A2uiUpdateDataModelMessage => 'updateDataModel' in m
+    );
+    const s1DataModel = (s1UpdateDataMsg?.updateDataModel.value || {}) as Record<string, any>;
+    assert(
+      s1A2uiRes.isStage1Only === true &&
+        s1A2uiRes.tabCount === 4 &&
+        Array.isArray(s1MainTabsComp?.tabs) &&
+        s1MainTabsComp!.tabs[0].child === 'tab_okf_markdown' &&
+        s1MainTabsComp!.tabs[0].title.includes('(2)') &&
+        s1MainTabsComp!.tabs[1].child === 'tab_overview' &&
+        s1MainTabsComp!.tabs[1].title.includes('2 søk') &&
+        s1MainTabsComp!.tabs[2].child === 'tab_okf_graph' &&
+        s1MainTabsComp!.tabs[3].child === 'tab_checklist' &&
+        s1A2uiRes.surfaceJsonPath.replace(/\\/g, '/').includes('stages/01_research/output/a2ui_surface.json') &&
+        !fs.existsSync(path.join(s1RunDir, 'stages', '02_script', 'output')) &&
+        Array.isArray(s1DataModel?.okf?.stage1Trace?.searchQueries) &&
+        s1DataModel.okf.stage1Trace.searchQueries.length === 2 &&
+        s1Html.includes('okf-curation-banner') &&
+        s1Html.includes('toggleRejectSourceInStudio') &&
+        s1Html.includes('addSourceInStudio'),
+      `generateA2uiSurface in Stage-1 Intermission Review Mode places tab_okf_markdown first, populates stage1Trace, and writes a2ui_surface.json to stages/01_research/output/ without creating stages/02_script/output`
+    );
+
+    // 2. Verify A2UI_STUDIO_JS interactive source curation hooks (inspectSourceCitationsInBody, toggleRejectSourceInStudio, addSourceInStudio, buildCurationPrompts)
+    const s1PayloadMatch = s1Html.match(
+      /window\.A2UI_SURFACE_PAYLOAD\s*=\s*(\{[\s\S]*?\});\s*<\/script>/
+    );
+    const s1ParsedPayload = s1PayloadMatch ? JSON.parse(s1PayloadMatch[1]) : {};
+    const s1Hooks: Record<string, any> = {};
+    // eslint-disable-next-line no-new-func
+    new Function('window', A2UI_STUDIO_JS)({
+      A2UI_SURFACE_PAYLOAD: s1ParsedPayload,
+      __ICM_TEST_HOOKS__: s1Hooks,
+    });
+    const s1SimSurface: Record<string, any> = {
+      surfaceId: s1A2uiRes.surfaceId,
+      activeRunId: s1RunId,
+      components: {},
+      dataModel: JSON.parse(JSON.stringify(s1DataModel)),
+    };
+
+    const initialPrompts = s1Hooks.buildCurationPrompts(s1SimSurface);
+    assert(
+      initialPrompts.agyText.includes('godkjenner alle kildene') &&
+        initialPrompts.cliText === `npm run cli:verify -- ${s1RunId} --by human:styrer`,
+      `buildCurationPrompts generates clean sign-off prompt when 0 sources are rejected or added (got: ${JSON.stringify(initialPrompts)})`
+    );
+
+    const afterReject = s1Hooks.toggleRejectSourceInStudio(s1SimSurface, 'svak-blogg-kilde');
+    const rejStats = s1SimSurface.dataModel.okf.sourceCitationStats?.['svak-blogg-kilde'];
+    const formattedWithRejected = s1Hooks.formatInlineLatexAndFootnotes(
+      s1SimSurface.dataModel.okf.body,
+      s1SimSurface.dataModel.okf.sources,
+      s1SimSurface.dataModel.okf.rejectedSources
+    );
+    assert(
+      Array.isArray(afterReject) &&
+        afterReject.includes('svak-blogg-kilde') &&
+        s1SimSurface.dataModel.okf.sourcesBadge === '1 verifiserte kilder' &&
+        rejStats &&
+        rejStats.mentionCount === 1 &&
+        Array.isArray(rejStats.soleClaimLines) &&
+        rejStats.soleClaimLines.length === 1 &&
+        rejStats.soleClaimLines[0].includes('hvert tredje år') &&
+        formattedWithRejected.includes('class="fn-ref fn-rejected"') &&
+        String(s1SimSurface.dataModel.okf.curationCliText).includes('--reject-source svak-blogg-kilde'),
+      `toggleRejectSourceInStudio marks source rejected, updates active sourcesBadge, computes soleClaimLines, styles inline footnote as fn-rejected, and updates CLI curation command`
+    );
+
+    const addedSrcObj = s1Hooks.addSourceInStudio(
+      s1SimSurface,
+      'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710',
+      'Forskrift om brannforebygging §§ 11–13'
+    );
+    assert(
+      Boolean(addedSrcObj) &&
+        addedSrcObj.id.startsWith('forskrift-om-brannforebyggin') &&
+        s1SimSurface.dataModel.okf.sources.length === 3 &&
+        s1SimSurface.dataModel.okf.addedSources.length === 1 &&
+        s1SimSurface.dataModel.okf.sourcesBadge === '2 verifiserte kilder' &&
+        String(s1SimSurface.dataModel.okf.body).includes(`[^${addedSrcObj.id}]: Forskrift om brannforebygging §§ 11–13`) &&
+        String(s1SimSurface.dataModel.okf.curationAgyText).includes('Avvis kilder: [svak-blogg-kilde].') &&
+        String(s1SimSurface.dataModel.okf.curationAgyText).includes('Legg til kilder: [https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710|Forskrift om brannforebygging §§ 11–13].') &&
+        String(s1SimSurface.dataModel.okf.curationCliText).includes('--reject-source svak-blogg-kilde') &&
+        String(s1SimSurface.dataModel.okf.curationCliText).includes('--add-source "https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710|Forskrift om brannforebygging §§ 11–13"'),
+      `addSourceInStudio appends human source to /okf/sources, /okf/addedSources, and /okf/body and generates full AGY + CLI curation commands`
+    );
+
+    // 3. Verify curateOkfSources() and verifyOkfConcept() with rejectSourceIds + addSources (3-way footnote parity & auto-refresh of a2ui.html)
+    const verifyCuratedRes = verifyOkfConcept(s1RunId, {
+      workspaceRoot: tmpStage1ReviewDir,
+      by: 'human:styrer',
+      rejectSourceIds: ['svak-blogg-kilde'],
+      addSources: [
+        {
+          url: 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710',
+          title: 'Forskrift om brannforebygging §§ 11–13',
+        },
+      ],
+    });
+    const postVerifyRunMd = fs.readFileSync(path.join(s1OutDir, 'research_summary.md'), 'utf-8');
+    const postVerifyBundleMd = fs.readFileSync(
+      path.join(s1BundleResearchDir, 'brannvern-i-barnehager-modul-1.md'),
+      'utf-8'
+    );
+    const postVerifyDoc = parseOkfDocument(postVerifyRunMd);
+    const postVerifySourceIds = (postVerifyDoc.frontmatter.sources || []).map((s) => s.id);
+    const postVerifyA2uiHtml = fs.readFileSync(path.join(s1RunDir, 'a2ui.html'), 'utf-8');
+    assert(
+      verifyCuratedRes.status === 'stable' &&
+        verifyCuratedRes.trust_tier === 'human-reviewed' &&
+        Array.isArray(verifyCuratedRes.rejectedIds) &&
+        verifyCuratedRes.rejectedIds.includes('svak-blogg-kilde') &&
+        Array.isArray(verifyCuratedRes.addedSources) &&
+        verifyCuratedRes.addedSources.length === 1 &&
+        Array.isArray(verifyCuratedRes.orphanClaimLines) &&
+        verifyCuratedRes.orphanClaimLines.length === 1 &&
+        verifyCuratedRes.orphanClaimLines[0].includes('hvert tredje år') &&
+        !postVerifySourceIds.includes('svak-blogg-kilde') &&
+        !postVerifyRunMd.includes('svak-blogg-kilde') &&
+        !postVerifyBundleMd.includes('svak-blogg-kilde') &&
+        postVerifyRunMd.includes('Forskrift om brannforebygging §§ 11–13') &&
+        postVerifyBundleMd.includes('Forskrift om brannforebygging §§ 11–13') &&
+        postVerifyRunMd.includes(`[^${verifyCuratedRes.addedSources[0].id}]`) &&
+        postVerifyRunMd.includes(`[^${verifyCuratedRes.addedSources[0].id}]:`) &&
+        postVerifyA2uiHtml.includes('trust: human-reviewed') &&
+        !postVerifyA2uiHtml.includes('svak-blogg-kilde'),
+      `verifyOkfConcept with rejectSourceIds and addSources enforces 3-way OKF v0.2 footnote parity, reports orphanClaimLines, syncs bundle without re-merging rejected sources, and refreshes a2ui.html`
+    );
+
+    // 4. Edge cases: un-reject toggle in Studio, rejecting a human-added source, prefix-overlapping source IDs (lovdata-2 vs lovdata-20), table cells, multi-sentence orphan claims, and duplicate canonical URLs in curateOkfSources
+    const afterUnreject = s1Hooks.toggleRejectSourceInStudio(s1SimSurface, 'svak-blogg-kilde');
+    assert(
+      Array.isArray(afterUnreject) &&
+        !afterUnreject.includes('svak-blogg-kilde') &&
+        s1SimSurface.dataModel.okf.sourcesBadge === '3 verifiserte kilder' &&
+        !String(s1SimSurface.dataModel.okf.curationCliText).includes('--reject-source'),
+      `toggleRejectSourceInStudio un-rejects a previously rejected source and restores active source count`
+    );
+
+    // Rejecting a human-added source in Studio should cancel its addition rather than emitting both --reject-source and --add-source
+    s1Hooks.toggleRejectSourceInStudio(s1SimSurface, addedSrcObj.id);
+    assert(
+      !String(s1SimSurface.dataModel.okf.curationCliText).includes('--reject-source') &&
+        !String(s1SimSurface.dataModel.okf.curationCliText).includes('--add-source'),
+      `Rejecting a human-added source in Studio cancels its pending --add-source without emitting a contradictory --reject-source`
+    );
+    // Un-reject the human-added source and re-reject svak-blogg-kilde for subsequent checks
+    s1Hooks.toggleRejectSourceInStudio(s1SimSurface, addedSrcObj.id);
+    s1Hooks.toggleRejectSourceInStudio(s1SimSurface, 'svak-blogg-kilde');
+
+    // 5. Execute OkfMarkdown DOM rendering via renderComponent with a lightweight mock document
+    const createMockElement = (tag: string): any => {
+      const el: any = {
+        tagName: String(tag || 'div').toUpperCase(),
+        id: '',
+        className: '',
+        textContent: '',
+        innerHTML: '',
+        type: '',
+        placeholder: '',
+        value: '',
+        rows: 0,
+        style: {},
+        attributes: {} as Record<string, string>,
+        children: [] as any[],
+        listeners: {} as Record<string, Function[]>,
+        appendChild(child: any) {
+          if (child) this.children.push(child);
+          return child;
+        },
+        setAttribute(k: string, v: string) {
+          this.attributes[k] = String(v);
+          if (k === 'id') this.id = String(v);
+          if (k === 'class') this.className = String(v);
+        },
+        getAttribute(k: string) {
+          return this.attributes[k] || '';
+        },
+        addEventListener(ev: string, fn: Function) {
+          this.listeners[ev] = this.listeners[ev] || [];
+          this.listeners[ev].push(fn);
+        },
+        querySelector() {
+          return null;
+        },
+        querySelectorAll() {
+          return [];
+        },
+      };
+      return el;
+    };
+    const findInMockDom = (root: any, predicate: (node: any) => boolean): any => {
+      if (!root) return null;
+      if (predicate(root)) return root;
+      for (const ch of root.children || []) {
+        const found = findInMockDom(ch, predicate);
+        if (found) return found;
+      }
+      return null;
+    };
+    const prevGlobalDoc = (globalThis as any).document;
+    try {
+      (globalThis as any).document = {
+        createElement: createMockElement,
+        getElementById: () => null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+      };
+      const okfMdComp = s1UpdateCompsMsg?.updateComponents.components.find(
+        (c) => c.id === 'tab_okf_markdown'
+      );
+      s1Hooks.mountSurface(s1SimSurface);
+      const renderedOkfDom = s1Hooks.renderComponent(s1SimSurface, okfMdComp);
+      const bannerNode = findInMockDom(renderedOkfDom, (n) => n.id === 'okf-curation-banner');
+      const agyTextNode = findInMockDom(renderedOkfDom, (n) => n.id === 'okf-curation-agy-text');
+      const cliTextNode = findInMockDom(renderedOkfDom, (n) => n.id === 'okf-curation-cli-text');
+      const addUrlNode = findInMockDom(renderedOkfDom, (n) => n.id === 'okf-add-source-url');
+      const addBtnNode = findInMockDom(renderedOkfDom, (n) => n.id === 'okf-add-source-btn');
+      const rejBtnNode = findInMockDom(
+        renderedOkfDom,
+        (n) => typeof n.className === 'string' && n.className.includes('okf-reject-btn')
+      );
+      assert(
+        Boolean(bannerNode) &&
+          Boolean(agyTextNode) &&
+          String(agyTextNode.textContent).includes('Avvis kilder: [svak-blogg-kilde]') &&
+          Boolean(cliTextNode) &&
+          String(cliTextNode.textContent).includes('--reject-source svak-blogg-kilde') &&
+          Boolean(addUrlNode) &&
+          Boolean(addBtnNode) &&
+          Boolean(rejBtnNode),
+        `OkfMarkdown renderComponent builds #okf-curation-banner, #okf-curation-agy-text, #okf-curation-cli-text, #okf-add-source-url, and .okf-reject-btn DOM nodes`
+      );
+    } finally {
+      if (prevGlobalDoc === undefined) {
+        delete (globalThis as any).document;
+      } else {
+        (globalThis as any).document = prevGlobalDoc;
+      }
+    }
+
+    // 6. Verify curateOkfSources with table cells, multi-sentence orphan claims, stacked footnotes, code fences, and lastModified preservation
+    const overlapMd = [
+      '---',
+      'type: Research Concept',
+      'title: "Overlap Test"',
+      'description: "Prefix overlap test"',
+      'status: draft',
+      'sources:',
+      '  - id: lovdata-2',
+      '    title: "Lovdata Kort ID"',
+      '    url: https://lovdata.no/kort',
+      '    retrieved_at: 2026-11-02T10:00:00Z',
+      '  - id: lovdata-20',
+      '    title: "Lovdata Lang ID"',
+      '    url: https://lovdata.no/lang',
+      '    retrieved_at: 2026-11-02T10:00:00Z',
+      '---',
+      '# Overlap Test',
+      '',
+      '```markdown',
+      'Kodeblokk som ikke skal få fotnote.',
+      '```',
+      '',
+      'Kort påstand[^lovdata-2] og lang påstand[^lovdata-20].',
+      '',
+      'Første setning er dokumentert[^lovdata-20]. Andre setning hviler kun på kort kilde[^lovdata-2].',
+      '',
+      '| Krav | Hjemmel |',
+      '| --- | --- |',
+      '| Internkontroll | [^lovdata-20] |',
+      '| Svakt krav | Hjemmel [^lovdata-2] |',
+      '',
+      '[^lovdata-2]: Lovdata Kort ID',
+      '[^lovdata-20]: Lovdata Lang ID',
+      '',
+    ].join('\n');
+    const overlapCurated = curateOkfSources(overlapMd, {
+      rejectSourceIds: ['[^lovdata-2]'],
+      addSources: [
+        // Duplicate canonical URL (differing only by www. and trailing slash) should be deduplicated
+        { url: 'https://www.lovdata.no/lang/#section1', title: 'Duplicate Lang' },
+        // New source with lastModified (camelCase) and last_modified (snake_case) support
+        {
+          url: 'https://www.dsb.no/veiledninger/brannvern',
+          title: 'DSB Veiledning om brannvern',
+          lastModified: '2026-05-01T00:00:00Z',
+        },
+      ],
+    });
+    const overlapDoc = parseOkfDocument(overlapCurated.markdown);
+    const dsbSrc = (overlapDoc.frontmatter.sources || []).find((s) =>
+      String(s.resource || s.url || '').includes('dsb.no')
+    );
+    assert(
+      overlapCurated.rejectedIds.length === 1 &&
+        overlapCurated.rejectedIds[0] === 'lovdata-2' &&
+        overlapCurated.addedSources.length === 1 &&
+        Boolean(dsbSrc) &&
+        dsbSrc?.last_modified === '2026-05-01T00:00:00Z' &&
+        overlapCurated.orphanClaimLines.some((l) => l.includes('Andre setning hviler kun på kort kilde')) &&
+        overlapCurated.orphanClaimLines.some((l) => l.includes('Svakt krav')) &&
+        overlapDoc.frontmatter.sources?.length === 2 &&
+        !overlapCurated.markdown.includes('[^lovdata-2]') &&
+        overlapCurated.markdown.includes('[^lovdata-20]') &&
+        overlapCurated.markdown.includes('| Internkontroll | [^lovdata-20] |') &&
+        overlapCurated.markdown.includes('| Svakt krav | Hjemmel |') &&
+        !overlapCurated.markdown.includes('Kodeblokk som ikke skal få fotnote[^') &&
+        overlapCurated.markdown.includes(`Kort påstand og lang påstand[^lovdata-20] [^${dsbSrc?.id}].`),
+      `curateOkfSources strips exact rejected footnote [^lovdata-2], preserves table cell spacing, detects sentence-level and table-row orphan claims, skips code fences when weaving citations, and preserves last_modified`
+    );
+
+    // 7. Verify multi-run Stage-1-only + completed Stage 1+2 run coexistence, bullet search query fallback parsing, and one-off edit before cli:verify
+    const s2RunId = 'brannvern-modul-2-1775500000100';
+    const s2RunDir = path.join(tmpStage1ReviewDir, 'runs', s2RunId);
+    const s2Stage1Out = path.join(s2RunDir, 'stages', '01_research', 'output');
+    const s2Stage2Out = path.join(s2RunDir, 'stages', '02_script', 'output');
+    fs.mkdirSync(s2Stage1Out, { recursive: true });
+    fs.mkdirSync(s2Stage2Out, { recursive: true });
+    fs.writeFileSync(
+      path.join(s2Stage1Out, 'research_summary.md'),
+      [
+        '---',
+        'type: Research Concept',
+        'title: "Brannvern Modul 2"',
+        'description: "Evakueringsrutiner"',
+        'status: stable',
+        'verified:',
+        '  - by: human:styrer',
+        '    at: 2026-11-02T11:00:00Z',
+        'sources:',
+        '  - id: dsb-evakuering',
+        '    title: "DSB Evakueringsveileder"',
+        '    url: https://www.dsb.no/evakuering',
+        '    retrieved_at: 2026-11-02T10:00:00Z',
+        '---',
+        '# Brannvern Modul 2',
+        '',
+        'Evakueringsplan skal øves jevnlig[^dsb-evakuering].',
+        '',
+        '[^dsb-evakuering]: DSB Evakueringsveileder',
+        '',
+      ].join('\n'),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(s2Stage1Out, 'thinking_trace.md'),
+      [
+        '# Stage 1 Thinking & Search Trace (`brannvern-modul-2`)',
+        '',
+        '## Executed Google Search Queries',
+        '- `dsb evakueringsplan barnehage`',
+        '- `brannøvelse barnehage krav`',
+        '',
+        '## Model Thinking & Reasoning Process',
+        'Checked DSB guidance.',
+      ].join('\n'),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(s2Stage2Out, 'script_draft.json'),
+      JSON.stringify(
+        {
+          title: 'Brannvern Modul 2 — Kurs',
+          targetAudience: 'Ansatte i barnehage',
+          estimatedDuration: '10 min',
+          scriptBody: 'Dette er hovedmanuset for modul 2.',
+          highlights: ['Kjenn rømningsveiene', 'Tell barna på møteplass'],
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(s2RunDir, 'meta.json'),
+      JSON.stringify(
+        {
+          runId: s2RunId,
+          topic: 'Brannvern Modul 2',
+          model: GEMINI_4_ARGON_MODEL,
+          status: 'completed',
+          stage1Telemetry: {
+            thinkingLevel: 'HIGH',
+            thoughtSteps: 2,
+            searchQueries: [], // empty in meta.json to test fallback parsing from `- \`...\`` bullets in thinking_trace.md
+          },
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+
+    // Re-generate A2UI surface from a Stage-1-only run while a completed Stage 1+2 sibling run exists
+    const s1UnverifiedRunId = 'brannvern-modul-3-1775500000200';
+    const s1UnverifiedDir = path.join(tmpStage1ReviewDir, 'runs', s1UnverifiedRunId);
+    const s1UnverifiedOut = path.join(s1UnverifiedDir, 'stages', '01_research', 'output');
+    fs.mkdirSync(s1UnverifiedOut, { recursive: true });
+    fs.writeFileSync(path.join(s1UnverifiedOut, 'research_summary.md'), s1InitialMd, 'utf-8');
+    fs.writeFileSync(
+      path.join(s1BundleResearchDir, 'brannvern-modul-3.md'),
+      s1InitialMd,
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(s1UnverifiedDir, 'meta.json'),
+      JSON.stringify(
+        {
+          runId: s1UnverifiedRunId,
+          topic: 'Brannvern Modul 3',
+          model: GEMINI_4_ARGON_MODEL,
+          status: 'stage1_completed',
+          okf: { bundleConceptId: 'research/brannvern-modul-3' },
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+
+    const multiRunRes = generateA2uiSurface({
+      workspaceRoot: tmpStage1ReviewDir,
+      runId: s1UnverifiedRunId,
+    });
+    const s2SiblingHtml = fs.readFileSync(path.join(s2RunDir, 'a2ui.html'), 'utf-8');
+    const s2SiblingMatch = s2SiblingHtml.match(
+      /window\.A2UI_SURFACE_PAYLOAD\s*=\s*(\{[\s\S]*?\});\s*<\/script>/
+    );
+    const s2SiblingPayload = s2SiblingMatch ? JSON.parse(s2SiblingMatch[1]) : {};
+    const s2SiblingComps =
+      s2SiblingPayload.messages?.find((m: any) => 'updateComponents' in m)?.updateComponents
+        ?.components || [];
+    const s2SiblingTabsComp = s2SiblingComps.find((c: any) => c.id === 'main_tabs');
+    const s2SiblingOverviewCol = s2SiblingComps.find((c: any) => c.id === 'overview_narration_col');
+    const s2SiblingBundleEntry = (s2SiblingPayload.bundleRuns || []).find(
+      (r: any) => r.runId === s2RunId
+    );
+    assert(
+      multiRunRes.isStage1Only === true &&
+        s2SiblingTabsComp?.tabs?.[0]?.child === 'tab_overview' &&
+        Array.isArray(s2SiblingOverviewCol?.children) &&
+        s2SiblingOverviewCol.children.includes('overview_tts_player') &&
+        s2SiblingBundleEntry?.dataModel?.okf?.stage1Trace?.searchQueries?.length === 2 &&
+        s2SiblingBundleEntry?.dataModel?.stage2?.overviewHeading?.includes('Stage 2'),
+      `generateA2uiSurface preserves Stage 2 overview tabs/TTS/heading on completed sibling runs and parses bullet searchQueries from thinking_trace.md`
+    );
+
+    // Verify one-off manual edit to research_summary.md before verifyOkfConcept does NOT resurrect rejected source from bundle draft
+    const manuallyEditedMd = curateOkfSources(s1InitialMd, {
+      rejectSourceIds: ['svak-blogg-kilde'],
+    }).markdown.replace(
+      'Uverifisert påstand om at brannøvelse kun trengs hvert tredje år.',
+      ''
+    );
+    fs.writeFileSync(path.join(s1UnverifiedOut, 'research_summary.md'), manuallyEditedMd, 'utf-8');
+    const verifyAfterManualEdit = verifyOkfConcept(s1UnverifiedRunId, {
+      workspaceRoot: tmpStage1ReviewDir,
+      by: 'human:styrer',
+      rejectSourceIds: ['svak-blogg-kilde'],
+    });
+    const bundleAfterManualEdit = fs.readFileSync(
+      path.join(s1BundleResearchDir, 'brannvern-modul-3.md'),
+      'utf-8'
+    );
+    assert(
+      verifyAfterManualEdit.rejectedIds.includes('svak-blogg-kilde') &&
+        !bundleAfterManualEdit.includes('svak-blogg-kilde'),
+      `verifyOkfConcept overwrites bundle draft without resurrecting sources that were manually edited out of research_summary.md before cli:verify`
+    );
+  } finally {
+    fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
+  }
+
   console.log(`[ICM Self-Test] ✅ All ${assertions} assertions passed (0 tokens, including tsc --noEmit).`);
   return { passed: assertions };
 }
@@ -16164,13 +18134,68 @@ if (
       return;
     }
 
+    const rejectSourceIdsCli: string[] = [];
+    const rawAddSourceSpecsCli: string[] = [];
+    for (let i = 0; i < process.argv.length; i++) {
+      if (process.argv[i] === '--reject-source' && process.argv[i + 1]) {
+        const parts = process.argv[i + 1]
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        rejectSourceIdsCli.push(...parts);
+        i++;
+      } else if (process.argv[i] === '--add-source' && process.argv[i + 1]) {
+        const specs = process.argv[i + 1]
+          .split(';')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        rawAddSourceSpecsCli.push(...specs);
+        i++;
+      }
+    }
+
+    const resolveCliAddedSources = async (
+      specs: string[]
+    ): Promise<Array<{ url: string; title?: string; id?: string; lastModified?: string; last_modified?: string }>> => {
+      const resolvedList: Array<{ url: string; title?: string; id?: string; lastModified?: string; last_modified?: string }> = [];
+      for (const spec of specs) {
+        const pipeIdx = spec.indexOf('|');
+        const rawUrl = (pipeIdx !== -1 ? spec.slice(0, pipeIdx) : spec).trim();
+        const explicitTitle = pipeIdx !== -1 ? spec.slice(pipeIdx + 1).trim() : '';
+        if (!rawUrl) continue;
+        let finalUrl = rawUrl;
+        let lastModified: string | undefined;
+        let fetchedTitle: string | undefined;
+        if (/^https?:\/\//i.test(rawUrl)) {
+          try {
+            const info = await resolveRedirect(rawUrl);
+            if (info.url) finalUrl = info.url;
+            if (info.lastModified) lastModified = info.lastModified;
+            if (info.pageTitle) fetchedTitle = info.pageTitle;
+          } catch {
+            // Non-fatal if offline
+          }
+        }
+        resolvedList.push({
+          url: finalUrl,
+          title: explicitTitle || fetchedTitle || undefined,
+          ...(lastModified ? { lastModified, last_modified: lastModified } : {}),
+        });
+      }
+      return resolvedList;
+    };
+
     // Standalone `--verify` execution
     if (hasVerify && !isStage1Only && !isStage2Only && !isFullCli) {
       const verifyIdx = process.argv.indexOf('--verify');
       const rawArgs = process.argv.slice(verifyIdx + 1);
       const filteredArgs: string[] = [];
       for (let i = 0; i < rawArgs.length; i++) {
-        if (rawArgs[i] === '--by') {
+        if (
+          rawArgs[i] === '--by' ||
+          rawArgs[i] === '--reject-source' ||
+          rawArgs[i] === '--add-source'
+        ) {
           i++;
           continue;
         }
@@ -16179,12 +18204,17 @@ if (
       }
       const target = filteredArgs[0];
       if (!target) {
-        console.error('Usage: npm run cli:verify -- <runIdOrConceptPath> [--by human:<reviewer>]');
+        console.error(
+          'Usage: npm run cli:verify -- <runIdOrConceptPath> [--reject-source id1,id2] [--add-source "<url>[|<title>]"] [--by human:<reviewer>]'
+        );
         process.exit(1);
       }
+      const addSourcesResolved = await resolveCliAddedSources(rawAddSourceSpecsCli);
       const verifyResult = verifyOkfConcept(target, {
         workspaceRoot: './workspace',
         by: verifierBy,
+        rejectSourceIds: rejectSourceIdsCli,
+        addSources: addSourcesResolved,
       });
       if (hasViz) {
         const vizResult = generateBundleVisualization('./workspace/bundle');
@@ -16204,7 +18234,11 @@ if (
     const cleanedPositional: string[] = [];
     for (let i = 0; i < tailArgs.length; i++) {
       const token = tailArgs[i];
-      if (token === '--by') {
+      if (
+        token === '--by' ||
+        token === '--reject-source' ||
+        token === '--add-source'
+      ) {
         i++;
         continue;
       }
@@ -16233,9 +18267,12 @@ if (
 
     if (isStage2Only) {
       if (hasVerify) {
+        const addSourcesResolved = await resolveCliAddedSources(rawAddSourceSpecsCli);
         verifyOkfConcept(argValue, {
           workspaceRoot: './workspace',
           by: verifierBy,
+          rejectSourceIds: rejectSourceIdsCli,
+          addSources: addSourcesResolved,
         });
       }
       const runDir = path.resolve('./workspace/runs', argValue);
@@ -16314,9 +18351,12 @@ if (
             fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
           }
           if (hasVerify) {
+            const addSourcesResolved = await resolveCliAddedSources(rawAddSourceSpecsCli);
             verifyOkfConcept(runId, {
               workspaceRoot: './workspace',
               by: verifierBy,
+              rejectSourceIds: rejectSourceIdsCli,
+              addSources: addSourcesResolved,
             });
           }
         }
@@ -16341,9 +18381,12 @@ if (
           thinkingLevel: 'HIGH',
         });
         if (hasVerify) {
+          const addSourcesResolved = await resolveCliAddedSources(rawAddSourceSpecsCli);
           verifyOkfConcept(runId, {
             workspaceRoot: './workspace',
             by: verifierBy,
+            rejectSourceIds: rejectSourceIdsCli,
+            addSources: addSourcesResolved,
           });
         }
         const stage2Result = await runStage2Flow({
