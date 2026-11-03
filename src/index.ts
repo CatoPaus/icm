@@ -2815,15 +2815,32 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
       } else {
         proseText = removeSpecificFootnotePreservingBoundary(proseText, fnId);
         proseText = proseText.replace(
-          /(?<=[\p{L}\p{N})”"»'])[ \t]+(\[\^[A-Za-z0-9_\-]+\])/gu,
+          /(?<=[\p{L}\p{N})*_`”"»'])[ \t]+(\[\^[A-Za-z0-9_\-]+\])/gu,
           '$1'
         );
-        proseText = proseText.replace(/[ \t]+([.,;!?])/g, '$1');
+        proseText = proseText.replace(
+          /(?<=[\p{L}\p{N})*_`\]”"»'])[ \t]+([.,;!?]|:(?!-))/gu,
+          '$1'
+        );
         proseText = proseText.replace(/(?<=\S)[ \t]{2,}/g, ' ');
         proseText = proseText.replace(/[ \t]+$/gm, '');
       }
       modified = true;
     }
+  }
+
+  // Snap any stray space between bold/word/quote and inline footnote (`**word** [^id]` -> `**word**[^id]`) or before clause punctuation (`[^id] :` -> `[^id]:`)
+  const beforeSpaceSnap = proseText;
+  proseText = proseText.replace(
+    /(?<=[\p{L}\p{N})*_`”"»'])[ \t]+(\[\^[A-Za-z0-9_\-]+\])/gu,
+    '$1'
+  );
+  proseText = proseText.replace(
+    /(?<=[\p{L}\p{N})*_`\]”"»'])[ \t]+([.,;!?]|:(?!-))/gu,
+    '$1'
+  );
+  if (proseText !== beforeSpaceSnap) {
+    modified = true;
   }
 
   // Normalize trailing sentence & clause punctuation (`word.[^id]` -> `word[^id].`, `word:[^id]` -> `word[^id]:`, and `[^a].[^b]` -> `[^a] [^b].`) before collapsing duplicates
@@ -3057,10 +3074,13 @@ export function curateOkfSources(
   for (const rejId of normalizedRejectIds) {
     proseText = removeSpecificFootnotePreservingBoundary(proseText, rejId);
     proseText = proseText.replace(
-      /(?<=[\p{L}\p{N})”"»'])[ \t]+(\[\^[A-Za-z0-9_\-]+\])/gu,
+      /(?<=[\p{L}\p{N})*_`”"»'])[ \t]+(\[\^[A-Za-z0-9_\-]+\])/gu,
       '$1'
     );
-    proseText = proseText.replace(/[ \t]+([.,;!?])/g, '$1');
+    proseText = proseText.replace(
+      /(?<=[\p{L}\p{N})*_`\]”"»'])[ \t]+([.,;!?]|:(?!-))/gu,
+      '$1'
+    );
     proseText = proseText.replace(/(?<=\S)[ \t]{2,}/g, ' ');
     proseText = proseText.replace(/[ \t]+$/gm, '');
   }
@@ -5106,6 +5126,21 @@ export function appendBundleLog(
   const lines = existing.split(/\r?\n/);
   const todayHeadingIdx = lines.findIndex((l) => l.trim() === `## ${today}`);
   if (todayHeadingIdx !== -1) {
+    const sameActionPrefix = `* **${action}**: [`;
+    const sameConceptLink = `](/${cleanCid}.md)`;
+    let nextSectionIdx = lines.findIndex(
+      (l, idx) => idx > todayHeadingIdx && /^##\s+\d{4}-\d{2}-\d{2}/.test(l.trim())
+    );
+    if (nextSectionIdx === -1) nextSectionIdx = lines.length;
+    for (let idx = nextSectionIdx - 1; idx > todayHeadingIdx; idx--) {
+      const lineTrim = lines[idx].trim();
+      if (
+        lineTrim === entryBullet ||
+        (lineTrim.startsWith(sameActionPrefix) && lineTrim.includes(sameConceptLink))
+      ) {
+        lines.splice(idx, 1);
+      }
+    }
     lines.splice(todayHeadingIdx + 1, 0, entryBullet);
     fs.writeFileSync(logPath, lines.join('\n').trimEnd() + '\n', 'utf-8');
     return logPath;
@@ -6189,7 +6224,11 @@ export function verifyOkfConcept(
     };
   }
 
-  const existingVerified = normalizeVerified(doc.frontmatter);
+  const defaultPlaceholders = new Set(['human:styrer', 'human:reviewer']);
+  let existingVerified = normalizeVerified(doc.frontmatter);
+  if (!defaultPlaceholders.has(actor)) {
+    existingVerified = existingVerified.filter((v) => !defaultPlaceholders.has(v.by));
+  }
   const existingActorIdx = existingVerified.findIndex((v) => v.by === actor);
   if (existingActorIdx >= 0) {
     existingVerified[existingActorIdx] = { by: actor, at: atIso };
@@ -10950,6 +10989,10 @@ const A2UI_STUDIO_JS = `
       return { agyText: "", cliText: "" };
     }
     const isNo = isNorwegianSurface(surface);
+    const isStage1Only = Boolean(
+      resolvePointer(surface.dataModel, "/stage1/isStage1Only") ||
+        resolvePointer(surface.dataModel, "/meta/isStage1Only")
+    );
     const runId = String(resolvePointer(surface.dataModel, "/meta/runId") || "<runId>");
     const rejectedRaw = (resolvePointer(surface.dataModel, "/okf/rejectedSources") || [])
       .filter(Boolean)
@@ -10971,7 +11014,29 @@ const A2UI_STUDIO_JS = `
     const added = addedRaw.filter(function (a) {
       return !a.id || !rejectedSet.has(String(a.id));
     });
-    const byActor = isNo ? "human:styrer" : "human:reviewer";
+    let byActor = String(resolvePointer(surface.dataModel, "/okf/verifierActor") || "").trim();
+    if (!byActor || byActor === "human:styrer" || byActor === "human:reviewer") {
+      try {
+        const savedActor =
+          typeof localStorage !== "undefined"
+            ? String(localStorage.getItem("icm_a2ui_verifier_actor") || "").trim()
+            : "";
+        if (savedActor) byActor = savedActor;
+      } catch (_e) {}
+    }
+    if (!byActor) {
+      byActor = isNo ? "human:styrer" : "human:reviewer";
+    } else if (
+      byActor.indexOf("human:") !== 0 &&
+      byActor.indexOf("process:") !== 0 &&
+      byActor.indexOf("/") === -1
+    ) {
+      byActor = "human:" + byActor;
+    }
+    const byFlagPart = /\\s/.test(byActor)
+      ? '--by "' + byActor.replace(/"/g, '\\\\"') + '"'
+      : "--by " + byActor;
+
     const cliParts = ["npm run cli:verify -- " + runId];
     if (rejected.length > 0) {
       cliParts.push("--reject-source " + rejected.join(","));
@@ -10982,18 +11047,28 @@ const A2UI_STUDIO_JS = `
         item.title && item.title !== item.url ? item.url + "|" + item.title : item.url;
       cliParts.push('--add-source "' + String(spec).replace(/"/g, '\\\\"') + '"');
     }
-    cliParts.push("--by " + byActor);
+    cliParts.push(byFlagPart);
     const cliText = cliParts.join(" ");
 
     let agyText = "";
     if (rejected.length === 0 && added.length === 0) {
-      agyText = isNo
-        ? "Jeg har gjennomgått a2ui.html og godkjenner alle kildene — kjør " +
-          cliText +
-          " og gå videre til Stage 2."
-        : "I have reviewed a2ui.html and approve all sources — run " +
-          cliText +
-          " and proceed to Stage 2.";
+      if (isStage1Only) {
+        agyText = isNo
+          ? "Jeg har gjennomgått a2ui.html og godkjenner alle kildene — kjør " +
+            cliText +
+            " og gå videre til Stage 2."
+          : "I have reviewed a2ui.html and approve all sources — run " +
+            cliText +
+            " and proceed to Stage 2.";
+      } else {
+        agyText = isNo
+          ? "Jeg har gjennomgått a2ui.html og godkjenner alle kildene — kjør " +
+            cliText +
+            " og oppdater A2UI-studioet."
+          : "I have reviewed a2ui.html and approve all sources — run " +
+            cliText +
+            " and refresh the A2UI studio.";
+      }
     } else {
       const rejList = rejected.join(", ");
       const addList = added
@@ -11006,17 +11081,25 @@ const A2UI_STUDIO_JS = `
         if (rejected.length > 0) segs.push("Avvis kilder: [" + rejList + "].");
         if (added.length > 0) segs.push("Legg til kilder: [" + addList + "].");
         segs.push(
-          "Oppdater research_summary.md (flett inn nye kilder og fjern/erstatt påstander som kun hviler på avviste kilder), kjør " +
-            cliText +
-            " og gå videre til Stage 2."
+          isStage1Only
+            ? "Oppdater research_summary.md (flett inn nye kilder og fjern/erstatt påstander som kun hviler på avviste kilder), kjør " +
+                cliText +
+                " og gå videre til Stage 2."
+            : "Oppdater research_summary.md (flett inn nye kilder og fjern/erstatt påstander som kun hviler på avviste kilder) og kjør " +
+                cliText +
+                " for å oppdatere kunnskapsgrunnlaget og A2UI-studioet (uten å kjøre Stage 2 på nytt med mindre påstander i kurset må endres)."
         );
       } else {
         if (rejected.length > 0) segs.push("Reject sources: [" + rejList + "].");
         if (added.length > 0) segs.push("Add sources: [" + addList + "].");
         segs.push(
-          "Update research_summary.md (weave added sources and remove/replace claims backed solely by rejected sources), run " +
-            cliText +
-            " and proceed to Stage 2."
+          isStage1Only
+            ? "Update research_summary.md (weave added sources and remove/replace claims backed solely by rejected sources), run " +
+                cliText +
+                " and proceed to Stage 2."
+            : "Update research_summary.md (weave added sources and remove/replace claims backed solely by rejected sources) and run " +
+                cliText +
+                " to refresh the knowledge base and A2UI studio (without re-running Stage 2 unless course claims changed)."
         );
       }
       agyText = segs.join(" ");
@@ -12905,11 +12988,19 @@ const A2UI_STUDIO_JS = `
         bannerTop.className = "a2ui-row justify-between";
         const bannerLeft = document.createElement("div");
         bannerLeft.className = "a2ui-row";
+        const isStage1OnlyBanner = Boolean(
+          resolvePointer(surface.dataModel, "/stage1/isStage1Only") ||
+            resolvePointer(surface.dataModel, "/meta/isStage1Only")
+        );
         const bannerTitle = document.createElement("strong");
         bannerTitle.style.fontSize = "14px";
-        bannerTitle.textContent = isNo
-          ? "🛡️ Intermission Kildekuratering & Godkjenning (Stage 1 → Stage 2)"
-          : "🛡️ Intermission Source Curation & Sign-Off (Stage 1 → Stage 2)";
+        bannerTitle.textContent = isStage1OnlyBanner
+          ? isNo
+            ? "🛡️ Intermission Kildekuratering & Godkjenning (Stage 1 → Stage 2)"
+            : "🛡️ Intermission Source Curation & Sign-Off (Stage 1 → Stage 2)"
+          : isNo
+            ? "🛡️ OKF v0.2 Kildekuratering & Verifisering"
+            : "🛡️ OKF v0.2 Source Curation & Verification";
         bannerLeft.appendChild(bannerTitle);
 
         const statusChip = document.createElement("span");
@@ -12948,6 +13039,52 @@ const A2UI_STUDIO_JS = `
 
         const bannerRight = document.createElement("div");
         bannerRight.className = "a2ui-row";
+
+        const verifierWrap = document.createElement("label");
+        verifierWrap.className = "a2ui-row";
+        verifierWrap.style.gap = "6px";
+        verifierWrap.style.fontSize = "12px";
+        verifierWrap.style.color = "var(--text-muted)";
+        verifierWrap.textContent = isNo ? "Godkjent av:" : "Verifier:";
+        const verifierInput = document.createElement("input");
+        verifierInput.type = "text";
+        verifierInput.className = "a2ui-input";
+        verifierInput.id = "okf-verifier-actor-input";
+        verifierInput.style.width = "175px";
+        verifierInput.style.padding = "4px 8px";
+        verifierInput.style.fontSize = "12px";
+        let initialVerifier = String(resolvePointer(surface.dataModel, "/okf/verifierActor") || "").trim();
+        if (
+          !initialVerifier ||
+          initialVerifier === "human:styrer" ||
+          initialVerifier === "human:reviewer"
+        ) {
+          try {
+            const savedV =
+              typeof localStorage !== "undefined"
+                ? String(localStorage.getItem("icm_a2ui_verifier_actor") || "").trim()
+                : "";
+            if (savedV) initialVerifier = savedV;
+          } catch (_e) {}
+        }
+        verifierInput.value = initialVerifier || (isNo ? "human:styrer" : "human:reviewer");
+        verifierInput.placeholder = isNo ? "human:Navn eller rolle" : "human:Name or role";
+        verifierInput.addEventListener("input", function () {
+          const val = String(verifierInput.value || "").trim();
+          setPointer(surface.dataModel, "/okf/verifierActor", val);
+          try {
+            if (typeof localStorage !== "undefined" && val) {
+              localStorage.setItem("icm_a2ui_verifier_actor", val);
+            }
+          } catch (_e) {}
+          const updated = buildCurationPrompts(surface);
+          const agyEl = document.getElementById("okf-curation-agy-text");
+          if (agyEl) agyEl.textContent = updated.agyText;
+          const cliEl = document.getElementById("okf-curation-cli-text");
+          if (cliEl) cliEl.textContent = updated.cliText;
+        });
+        verifierWrap.appendChild(verifierInput);
+        bannerRight.appendChild(verifierWrap);
 
         function bindCopyBtn(btn, getText, defaultLabel) {
           btn.addEventListener("click", function () {
@@ -14119,6 +14256,14 @@ export function generateA2uiSurface(
     const rStatus = String(rOkfDoc.frontmatter.status || 'draft');
     const rTrustTier = getOkfTrustTier(rOkfDoc.frontmatter);
     const rStale = isOkfStale(rOkfDoc.frontmatter);
+    const rVerifiedList = normalizeVerified(rOkfDoc.frontmatter);
+    const rNonDefaultVerifier = [...rVerifiedList]
+      .reverse()
+      .find((v) => v.by && v.by !== 'human:styrer' && v.by !== 'human:reviewer');
+    const rVerifierActor =
+      rNonDefaultVerifier?.by ||
+      rVerifiedList[rVerifiedList.length - 1]?.by ||
+      (rIsNo ? 'human:styrer' : 'human:reviewer');
     const rSources = Array.isArray(rOkfDoc.frontmatter.sources)
       ? rOkfDoc.frontmatter.sources
       : [];
@@ -14209,6 +14354,7 @@ export function generateA2uiSurface(
         freshnessBadge: rFreshnessBadge,
         sourcesBadge: rSourcesBadge,
         sources: rSources,
+        verifierActor: rVerifierActor,
         rejectedSources: [] as string[],
         addedSources: [] as Array<{ id: string; url: string; title: string }>,
         stage1Trace: rStage1Trace,
@@ -18052,6 +18198,59 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         !bundleAfterManualEdit.includes('svak-blogg-kilde'),
       `verifyOkfConcept overwrites bundle draft without resurrecting sources that were manually edited out of research_summary.md before cli:verify`
     );
+
+    // Verify named verifier replaces default placeholder (`human:styrer`), deduplicates same-day Verification log entry, and populates `/okf/verifierActor`
+    const verifyNamedActor = verifyOkfConcept(s1UnverifiedRunId, {
+      workspaceRoot: tmpStage1ReviewDir,
+      by: 'Cato Paus Skrede',
+    });
+    const logAfterTwoVerifies = fs.readFileSync(
+      path.join(tmpStage1ReviewDir, 'bundle', 'log.md'),
+      'utf-8'
+    );
+    const mod3VerifyLines = logAfterTwoVerifies
+      .split(/\r?\n/)
+      .filter((l) => l.includes('* **Verification**:') && l.includes('/research/brannvern-modul-3.md'));
+    const s1UpdatedHtml = fs.readFileSync(path.join(s1UnverifiedDir, 'a2ui.html'), 'utf-8');
+    assert(
+      verifyNamedActor.verified.length === 1 &&
+        verifyNamedActor.verified[0].by === 'human:Cato Paus Skrede' &&
+        mod3VerifyLines.length === 1 &&
+        s1UpdatedHtml.includes('okf-verifier-actor-input') &&
+        s1UpdatedHtml.includes('human:Cato Paus Skrede') &&
+        s1UpdatedHtml.includes('uten å kjøre Stage 2 på nytt'),
+      `verifyOkfConcept replaces default placeholder with named human verifier, deduplicates same-day Verification log bullets, and embeds verifier input + stage-aware curation prompt in a2ui.html`
+    );
+
+    // Verify curateOkfSources snaps spaces after bold (`**word** [^id]`) and before colons (`[^id] :`) when stripping rejected footnotes
+    const boldColonMd = [
+      '---',
+      'type: Research Concept',
+      'title: Bold & Colon Test',
+      'status: draft',
+      'sources:',
+      '  - id: keep-a',
+      '    title: Keep A',
+      '    resource: https://example.com/a',
+      '  - id: rej-b',
+      '    title: Reject B',
+      '    resource: https://example.com/b',
+      '---',
+      'Barnehager i **risikoklasse 3**[^rej-b] [^keep-a] må oppfylle følgende krav[^keep-a] [^rej-b]:',
+      '',
+      '[^keep-a]: Keep A',
+      '[^rej-b]: Reject B',
+      '',
+    ].join('\n');
+    const curatedBoldColon = curateOkfSources(boldColonMd, {
+      rejectSourceIds: ['rej-b'],
+    });
+    assert(
+      curatedBoldColon.markdown.includes('**risikoklasse 3**[^keep-a] må oppfylle følgende krav[^keep-a]:') &&
+        !curatedBoldColon.markdown.includes('**risikoklasse 3** [^keep-a]') &&
+        !curatedBoldColon.markdown.includes('[^keep-a] :'),
+      `curateOkfSources snaps spaces after bold markers and before colons when stripping adjacent rejected footnotes`
+    );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
   }
@@ -18084,11 +18283,28 @@ if (
     const hasA2ui = process.argv.includes('--a2ui');
     const isDryRun = process.argv.includes('--dry-run');
 
+    const extractCliByTokens = (
+      argv: string[],
+      byIdx: number
+    ): { value?: string; count: number } => {
+      if (byIdx === -1 || byIdx + 1 >= argv.length || argv[byIdx + 1].startsWith('--')) {
+        return { value: undefined, count: 0 };
+      }
+      const tokens: string[] = [argv[byIdx + 1]];
+      let k = byIdx + 2;
+      while (k < argv.length) {
+        const tok = argv[k];
+        if (tok.startsWith('--')) break;
+        if (/\d{10,}$|[\/\\]|\.md$/i.test(tok)) break;
+        tokens.push(tok);
+        k++;
+      }
+      return { value: tokens.join(' ').trim(), count: tokens.length };
+    };
+
     const byFlagIdx = process.argv.indexOf('--by');
-    const verifierBy =
-      byFlagIdx !== -1 && process.argv[byFlagIdx + 1] && !process.argv[byFlagIdx + 1].startsWith('--')
-        ? process.argv[byFlagIdx + 1]
-        : undefined;
+    const byParsed = extractCliByTokens(process.argv, byFlagIdx);
+    const verifierBy = byParsed.value;
 
     // Standalone `--a2ui` execution
     if (hasA2ui && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify) {
@@ -18191,11 +18407,11 @@ if (
       const rawArgs = process.argv.slice(verifyIdx + 1);
       const filteredArgs: string[] = [];
       for (let i = 0; i < rawArgs.length; i++) {
-        if (
-          rawArgs[i] === '--by' ||
-          rawArgs[i] === '--reject-source' ||
-          rawArgs[i] === '--add-source'
-        ) {
+        if (rawArgs[i] === '--by') {
+          i += Math.max(1, extractCliByTokens(rawArgs, i).count);
+          continue;
+        }
+        if (rawArgs[i] === '--reject-source' || rawArgs[i] === '--add-source') {
           i++;
           continue;
         }
@@ -18234,11 +18450,11 @@ if (
     const cleanedPositional: string[] = [];
     for (let i = 0; i < tailArgs.length; i++) {
       const token = tailArgs[i];
-      if (
-        token === '--by' ||
-        token === '--reject-source' ||
-        token === '--add-source'
-      ) {
+      if (token === '--by') {
+        i += Math.max(1, extractCliByTokens(tailArgs, i).count);
+        continue;
+      }
+      if (token === '--reject-source' || token === '--add-source') {
         i++;
         continue;
       }
