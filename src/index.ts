@@ -9678,6 +9678,73 @@ export function setJsonPointer(rootModel: Record<string, any>, pointer: string, 
   }
 }
 
+let cachedCatalogReqs: Map<string, { required: string[]; properties: Set<string> }> | null = null;
+
+/**
+ * Loads and merges Tier 1 (`specification/v0_9_1/catalogs/basic/catalog.json`) and
+ * Tier 2 (`specification/v0_9_1/catalogs/icm-okf-v0.2/catalog.json`) A2UI component schemas.
+ */
+export function loadA2uiCatalogComponentRequirements(): Map<
+  string,
+  { required: string[]; properties: Set<string> }
+> {
+  if (cachedCatalogReqs) return cachedCatalogReqs;
+  const map = new Map<string, { required: string[]; properties: Set<string> }>();
+  const specRootCandidates = [
+    path.resolve(process.cwd(), 'specification', 'v0_9_1', 'catalogs'),
+    path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', 'specification', 'v0_9_1', 'catalogs'),
+  ];
+  const specCatalogDir = specRootCandidates.find((d) => fs.existsSync(d));
+
+  const parseCatalogFile = (filePath: string) => {
+    if (!fs.existsSync(filePath)) return;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      const comps = parsed?.components;
+      if (!comps || typeof comps !== 'object') return;
+      for (const [compName, compDef] of Object.entries<any>(comps)) {
+        const reqSet = new Set<string>(['id', 'component']);
+        const propSet = new Set<string>(['id', 'component', 'weight', 'accessibility']);
+        const branches = Array.isArray(compDef?.allOf) ? compDef.allOf : [compDef];
+        for (const b of branches) {
+          if (Array.isArray(b?.required)) {
+            for (const r of b.required) reqSet.add(String(r));
+          }
+          if (b?.properties && typeof b.properties === 'object') {
+            for (const p of Object.keys(b.properties)) propSet.add(p);
+          }
+        }
+        map.set(compName, { required: Array.from(reqSet), properties: propSet });
+      }
+    } catch {
+      // Fallback handled below
+    }
+  };
+
+  if (specCatalogDir) {
+    parseCatalogFile(path.join(specCatalogDir, 'basic', 'catalog.json'));
+    parseCatalogFile(path.join(specCatalogDir, 'icm-okf-v0.2', 'catalog.json'));
+  }
+
+  // Ensure fallback entries if run outside repo root
+  for (const t1 of A2UI_ICM_CATALOG_SCHEMA.tier1BasicComponents) {
+    if (!map.has(t1)) {
+      map.set(t1, { required: ['id', 'component'], properties: new Set(['id', 'component']) });
+    }
+  }
+  for (const [t2Name, t2Def] of Object.entries(A2UI_ICM_CATALOG_SCHEMA.tier2DomainComponents)) {
+    if (!map.has(t2Name)) {
+      map.set(t2Name, {
+        required: ['id', 'component'],
+        properties: new Set(['id', 'component', ...t2Def.properties]),
+      });
+    }
+  }
+
+  cachedCatalogReqs = map;
+  return map;
+}
+
 /**
  * Validates an array of A2UI v0.9.1 server-to-client messages for protocol structural integrity:
  * - Envelope version === 'v0.9.1'
@@ -9685,7 +9752,9 @@ export function setJsonPointer(rootModel: Record<string, any>, pointer: string, 
  * - `createSurface` precedes `updateComponents`, `updateDataModel`, and `deleteSurface` for the same `surfaceId`,
  *   and duplicate `createSurface` without an intervening `deleteSurface` is rejected
  * - Component adjacency list contains a `root` component (`id: "root"`), no duplicate IDs,
- *   all child component ID references exist, and there are no circular parent-child references.
+ *   all component types and required properties match the merged Tier 1 (`basic/catalog.json`) +
+ *   Tier 2 (`icm-okf-v0.2/catalog.json`) schemas, all child component ID references exist,
+ *   and there are no circular parent-child references.
  */
 export function validateA2uiSurfaceMessages(messages: A2uiEnvelopeMessage[]): {
   valid: boolean;
@@ -9693,6 +9762,7 @@ export function validateA2uiSurfaceMessages(messages: A2uiEnvelopeMessage[]): {
 } {
   const errors: string[] = [];
   const createdSurfaces = new Set<string>();
+  const catalogReqs = loadA2uiCatalogComponentRequirements();
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -9758,6 +9828,21 @@ export function validateA2uiSurfaceMessages(messages: A2uiEnvelopeMessage[]): {
         }
         if (!comp.component || typeof comp.component !== 'string') {
           errors.push(`Component "${comp.id}" missing component type name`);
+        } else {
+          const schemaEntry = catalogReqs.get(comp.component);
+          if (!schemaEntry) {
+            errors.push(
+              `Component "${comp.id}" uses unknown component type "${comp.component}" not present in Basic or ICM/OKF catalog`
+            );
+          } else {
+            for (const reqProp of schemaEntry.required) {
+              if (!(reqProp in comp) || comp[reqProp] === undefined) {
+                errors.push(
+                  `Component "${comp.id}" (${comp.component}) missing required catalog property "${reqProp}"`
+                );
+              }
+            }
+          }
         }
         if (byId.has(comp.id)) {
           errors.push(`Duplicate component id "${comp.id}" in surface "${surfaceId}"`);
@@ -16459,6 +16544,49 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     },
   ]);
   assert(invalidRes.valid === false && invalidRes.errors.length > 0, 'Missing root component is rejected by validator');
+
+  // Verify Tier 2 ICM/OKF catalog JSON Schema on disk (`specification/v0_9_1/catalogs/icm-okf-v0.2/catalog.json`) and catalog property validation
+  const icmCatalogDiskPath = path.resolve(
+    process.cwd(),
+    'specification',
+    'v0_9_1',
+    'catalogs',
+    'icm-okf-v0.2',
+    'catalog.json'
+  );
+  const icmCatalogDiskJson = JSON.parse(fs.readFileSync(icmCatalogDiskPath, 'utf-8'));
+  const invalidSchemaRes = validateA2uiSurfaceMessages([
+    {
+      version: 'v0.9.1',
+      createSurface: { surfaceId: 'schema_test', catalogId: A2UI_ICM_CATALOG_ID },
+    },
+    {
+      version: 'v0.9.1',
+      updateComponents: {
+        surfaceId: 'schema_test',
+        components: [
+          { id: 'root', component: 'Column', children: ['bad_widget', 'missing_prop_chk'] },
+          { id: 'bad_widget', component: 'NonExistentWidget' },
+          { id: 'missing_prop_chk', component: 'InteractiveChecklist', title: 'Missing groupsPath' },
+        ],
+      },
+    },
+  ]);
+  assert(
+    icmCatalogDiskJson.catalogId === A2UI_ICM_CATALOG_ID &&
+      icmCatalogDiskJson.extendsCatalogId === A2UI_BASIC_CATALOG_ID &&
+      Boolean(icmCatalogDiskJson.components?.OkfMarkdown) &&
+      Boolean(icmCatalogDiskJson.components?.OkfKnowledgeGraph) &&
+      Boolean(icmCatalogDiskJson.components?.InteractiveChecklist) &&
+      Boolean(icmCatalogDiskJson.components?.ModuleCarousel) &&
+      Boolean(icmCatalogDiskJson.components?.QuizRunner) &&
+      Boolean(icmCatalogDiskJson.components?.CaseSimulator) &&
+      Boolean(icmCatalogDiskJson.components?.Badge) &&
+      invalidSchemaRes.valid === false &&
+      invalidSchemaRes.errors.some((e) => e.includes('NonExistentWidget')) &&
+      invalidSchemaRes.errors.some((e) => e.includes('missing required catalog property "groupsPath"')),
+    `specification/v0_9_1/catalogs/icm-okf-v0.2/catalog.json defines all Tier 2 components and validateA2uiSurfaceMessages enforces component types and required schema properties`
+  );
 
   // Verify embedded A2UI_STUDIO_JS and OKF_VIZ_JS have zero JavaScript syntax errors and test their runtime formatting hooks
   let studioJsSyntaxValid = false;
