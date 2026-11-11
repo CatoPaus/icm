@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 
 /**
  * Lightweight, zero-dependency `.env.local` / `.env` loader.
@@ -2778,6 +2778,25 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
 
   let proseText = proseLines.join('\n');
 
+  // Expand comma/semicolon-separated multi-footnote brackets (`[^id1, ^id2]` or `[^id1,[^id1] 4]`) into separate `[^id1] [^id2]` tags
+  proseText = proseText.replace(
+    /\[\^([A-Za-z0-9_\-]+)\s*,\s*\[\^([A-Za-z0-9_\-]+)\]\s*([0-9A-Za-z_\-]+)\]/g,
+    (_m, id1: string, id2: string, tail: string) => {
+      const reconstructed = /^\d+$/.test(tail) ? `${id2.replace(/\d+$/, '')}${tail}` : `${id2}${tail}`;
+      return `[^${id1}] [^${reconstructed}]`;
+    }
+  );
+  proseText = proseText.replace(
+    /\[\^([A-Za-z0-9_\-]+(?:\s*[,;]\s*(?:\[\^|\^)?[A-Za-z0-9_\-]+\]?)+)\]/g,
+    (_m, inner: string) =>
+      inner
+        .split(/\s*[,;]\s*/)
+        .map((part) => part.replace(/^\[?\^?/, '').replace(/\]$/, '').trim())
+        .filter(Boolean)
+        .map((id) => `[^${id}]`)
+        .join(' ')
+  );
+
   // Snap footnotes out of slash-joined words (`overtredelser[^id]/avvik` -> `overtredelser/avvik[^id]`)
   proseText = proseText.replace(
     /([\p{L}\p{N}_\-]+)(\[\^[A-Za-z0-9_\-]+\](?:[ \t]*\[\^[A-Za-z0-9_\-]+\])*)((?:\/[\p{L}\p{N}_\-]+)+)/gu,
@@ -3881,6 +3900,16 @@ export async function cleanGroundingLinks(
       const closingMatch = afterStr.match(/^[*_`)\]]+/);
       if (closingMatch) {
         idx += Buffer.byteLength(closingMatch[0], 'utf8');
+        beforeStr = buf.subarray(lineStart, idx).toString('utf8');
+        afterStr = buf.subarray(idx, lineEnd).toString('utf8');
+      }
+
+      // If `idx` landed inside an unclosed footnote bracket (`[^id1, ^id2]`), advance to its closing `]`
+      if (/\[\^[^\]]*$/.test(beforeStr)) {
+        const bracketRest = afterStr.match(/^[^\]]*\]/);
+        if (bracketRest) {
+          idx += Buffer.byteLength(bracketRest[0], 'utf8');
+        }
       }
 
       return idx;
@@ -4162,6 +4191,25 @@ export async function cleanGroundingLinks(
   }
   orderedSources.length = 0;
   orderedSources.push(...dedupedSources);
+
+  // Expand comma/semicolon-separated multi-footnote brackets (`[^id1, ^id2]` or `[^id1,[^id1] 4]`) into separate `[^id1] [^id2]` tags before bare-caret and alias rewriting
+  bodyText = bodyText.replace(
+    /\[\^([A-Za-z0-9_\-]+)\s*,\s*\[\^([A-Za-z0-9_\-]+)\]\s*([0-9A-Za-z_\-]+)\]/g,
+    (_m, id1: string, id2: string, tail: string) => {
+      const reconstructed = /^\d+$/.test(tail) ? `${id2.replace(/\d+$/, '')}${tail}` : `${id2}${tail}`;
+      return `[^${id1}] [^${reconstructed}]`;
+    }
+  );
+  bodyText = bodyText.replace(
+    /\[\^([A-Za-z0-9_\-]+(?:\s*[,;]\s*(?:\[\^|\^)?[A-Za-z0-9_\-]+\]?)+)\]/g,
+    (_m, inner: string) =>
+      inner
+        .split(/\s*[,;]\s*/)
+        .map((part) => part.replace(/^\[?\^?/, '').replace(/\]$/, '').trim())
+        .filter(Boolean)
+        .map((id) => `[^${id}]`)
+        .join(' ')
+  );
 
   // Strip redundant carets before `[^id]` (`^[^id]` -> `[^id]`) and convert bare `.^id` typos (`/\.\^([a-z0-9]+(?:-[a-z0-9]+)+)/g`) to `.[^$1]` before alias rewriting
   bodyText = bodyText.replace(/\^+(\[\^[A-Za-z0-9_\-]+\])/g, '$1');
@@ -6624,6 +6672,15 @@ export async function runStage2Flow(input: {
     durationMs,
   });
 
+  try {
+    const a2uiRes = generateA2uiSurface(input.runId, { workspaceRoot: workspacePath });
+    console.log(
+      `[Stage 2 A2UI Studio]: ${a2uiRes.htmlOutputPath}${a2uiRes.bundleHtmlPath ? ` (bundle mirror: ${a2uiRes.bundleHtmlPath})` : ''}`
+    );
+  } catch (err: any) {
+    console.warn(`[Stage 2 A2UI Warning]: ${err?.message || String(err)}`);
+  }
+
   return {
     success: true,
     outputPath: scriptOutputTarget,
@@ -8420,6 +8477,8 @@ export interface A2uiSurfaceGenerationOptions {
   outputHtmlPath?: string;
   mirrorBundleHtml?: boolean;
   outputDir?: string;
+  artifactDir?: string;
+  openBrowser?: boolean;
 }
 
 export interface A2uiBundleRunEntry {
@@ -8459,8 +8518,115 @@ export interface A2uiSurfaceGenerationResult {
   htmlOutputPath: string;
   bundleHtmlPath?: string;
   bundleVizPath?: string;
+  artifactHtmlPath?: string;
+  artifactVizPath?: string;
+  browserOpened?: boolean;
   messages: A2uiEnvelopeMessage[];
   bundleRuns?: A2uiBundleRunEntry[];
+}
+
+/**
+ * Opens a generated HTML file (`a2ui.html` or `viz.html`) in the system browser
+ * (`Start-Process` / `cmd /c start` on Windows, `open` on macOS, `xdg-open` on Linux).
+ * Suppressed automatically during `--test` and `CI=true`.
+ */
+export function openFileInSystemBrowser(filePath: string): boolean {
+  if (!filePath || !fs.existsSync(filePath)) return false;
+  if (process.argv.includes('--test') || process.env.CI === 'true') return false;
+  try {
+    const absPath = path.resolve(filePath);
+    if (process.platform === 'win32') {
+      const child = spawn('cmd.exe', ['/c', 'start', '""', absPath], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.unref();
+    } else if (process.platform === 'darwin') {
+      const child = spawn('open', [absPath], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+    } else {
+      const child = spawn('xdg-open', [absPath], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Copies `a2ui.html` and `viz.html` into an Antigravity 2.0 conversation Artifact Directory
+ * (`<appDataDir>/brain/<conversation-id>/`) along with `.metadata.json` descriptors so the
+ * HTML Auxiliary Pane can render the live interactive studio without reading/echoing ~500 KB of HTML.
+ */
+export function syncA2uiToArtifactDir(input: {
+  artifactDir?: string;
+  htmlOutputPath: string;
+  bundleVizPath?: string;
+  runId?: string;
+  title?: string;
+  isStage1Only?: boolean;
+}): { artifactHtmlPath?: string; artifactVizPath?: string } {
+  const rawDir = (input.artifactDir || process.env.AGY_ARTIFACT_DIR || '').trim();
+  if (!rawDir) return {};
+  try {
+    const resolvedDir = path.resolve(rawDir);
+    fs.mkdirSync(resolvedDir, { recursive: true });
+    let artifactHtmlPath: string | undefined;
+    let artifactVizPath: string | undefined;
+    const nowIso = new Date().toISOString();
+    const labelTitle = input.title || input.runId || 'ICM Run';
+    const stageDesc = input.isStage1Only
+      ? 'Stage 1 Intermission OKF v0.2 Source Curation & Review Studio'
+      : 'Full Stage 1 + Stage 2 A2UI v0.9.1 Interactive Surface Studio';
+
+    if (input.htmlOutputPath && fs.existsSync(input.htmlOutputPath)) {
+      artifactHtmlPath = path.join(resolvedDir, 'a2ui_studio.html');
+      fs.copyFileSync(input.htmlOutputPath, artifactHtmlPath);
+      fs.writeFileSync(
+        `${artifactHtmlPath}.metadata.json`,
+        JSON.stringify(
+          {
+            summary: `${labelTitle} — ${stageDesc} (run: ${input.runId || 'workspace'}).`,
+            updatedAt: nowIso,
+            userFacing: true,
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
+    }
+
+    if (input.bundleVizPath && fs.existsSync(input.bundleVizPath)) {
+      artifactVizPath = path.join(resolvedDir, 'okf_viz_studio.html');
+      fs.copyFileSync(input.bundleVizPath, artifactVizPath);
+      fs.writeFileSync(
+        `${artifactVizPath}.metadata.json`,
+        JSON.stringify(
+          {
+            summary: `${labelTitle} — OKF v0.2 Interactive Knowledge Graph & Provenance Explorer (run: ${input.runId || 'workspace'}).`,
+            updatedAt: nowIso,
+            userFacing: true,
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
+    }
+
+    return { artifactHtmlPath, artifactVizPath };
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -15731,6 +15897,21 @@ ${A2UI_STUDIO_JS}
     }
   }
 
+  const artifactSynced = syncA2uiToArtifactDir({
+    artifactDir: options.artifactDir,
+    htmlOutputPath,
+    bundleVizPath,
+    runId: resolvedRunId || 'workspace',
+    title: stage2Norm.title,
+    isStage1Only,
+  });
+
+  const shouldOpenBrowser =
+    Boolean(options.openBrowser) ||
+    process.argv.includes('--open') ||
+    process.env.ICM_OPEN_A2UI === '1';
+  const browserOpened = shouldOpenBrowser ? openFileInSystemBrowser(htmlOutputPath) : false;
+
   return {
     runId: resolvedRunId || 'workspace',
     surfaceId,
@@ -15748,6 +15929,9 @@ ${A2UI_STUDIO_JS}
     htmlOutputPath,
     bundleHtmlPath,
     bundleVizPath,
+    artifactHtmlPath: artifactSynced.artifactHtmlPath,
+    artifactVizPath: artifactSynced.artifactVizPath,
+    browserOpened,
     messages,
     bundleRuns,
   };
@@ -18379,6 +18563,49 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         !curatedBoldColon.markdown.includes('[^keep-a] :'),
       `curateOkfSources snaps spaces after bold markers and before colons when stripping adjacent rejected footnotes`
     );
+
+    // Verify comma/semicolon-separated footnote brackets (`[^id1, ^id2]` and `[^id1,[^id2] 4]`) expand to `[^id1][^id2]` and syncA2uiToArtifactDir mirrors artifacts
+    const multiFnDoc = parseOkfDocument(
+      [
+        '---',
+        'type: Research Concept',
+        'title: Multi Footnote Test',
+        'status: draft',
+        'sources:',
+        '  - id: dibk-tek17-11-1',
+        '    title: TEK17 § 11-1',
+        '    resource: https://example.com/11-1',
+        '  - id: dibk-tek17-11-2',
+        '    title: TEK17 § 11-2',
+        '    resource: https://example.com/11-2',
+        '  - id: dibk-tek17-11-4',
+        '    title: TEK17 § 11-4',
+        '    resource: https://example.com/11-4',
+        '---',
+        'Krav til konstruksjon og bæreevne[^dibk-tek17-11-1, ^dibk-tek17-11-2] samt brannmotstand[^dibk-tek17-11-1,[^dibk-tek17-11-1] 4] gjelder for barnehager.',
+        '',
+      ].join('\n')
+    );
+    const multiFnHealed = healOrphanOkfFootnotes(multiFnDoc);
+    assert(
+      multiFnHealed &&
+        multiFnDoc.body.includes('bæreevne[^dibk-tek17-11-1] [^dibk-tek17-11-2]') &&
+        multiFnDoc.body.includes('brannmotstand[^dibk-tek17-11-1] [^dibk-tek17-11-4]'),
+      `healOrphanOkfFootnotes expands comma-separated [^id1, ^id2] and woven [^id1,[^id1] 4] into separate [^id1] [^id2] footnotes`
+    );
+
+    const tmpArtifactDir = path.join(tmpStage1ReviewDir, 'agy_brain_artifacts');
+    const syncedArtifacts = generateA2uiSurface(s1UnverifiedRunId, {
+      workspaceRoot: tmpStage1ReviewDir,
+      artifactDir: tmpArtifactDir,
+    });
+    assert(
+      Boolean(syncedArtifacts.artifactHtmlPath && fs.existsSync(syncedArtifacts.artifactHtmlPath)) &&
+        fs.existsSync(`${syncedArtifacts.artifactHtmlPath}.metadata.json`) &&
+        Boolean(syncedArtifacts.artifactVizPath && fs.existsSync(syncedArtifacts.artifactVizPath)) &&
+        fs.existsSync(`${syncedArtifacts.artifactVizPath}.metadata.json`),
+      `generateA2uiSurface with artifactDir copies a2ui_studio.html + okf_viz_studio.html and writes userFacing .metadata.json descriptors`
+    );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
   }
@@ -18410,6 +18637,16 @@ if (
     const hasViz = process.argv.includes('--viz');
     const hasA2ui = process.argv.includes('--a2ui');
     const isDryRun = process.argv.includes('--dry-run');
+    const hasOpen = process.argv.includes('--open');
+
+    const artifactDirFlagIdx = process.argv.indexOf('--artifact-dir');
+    if (
+      artifactDirFlagIdx !== -1 &&
+      process.argv[artifactDirFlagIdx + 1] &&
+      !process.argv[artifactDirFlagIdx + 1].startsWith('--')
+    ) {
+      process.env.AGY_ARTIFACT_DIR = process.argv[artifactDirFlagIdx + 1];
+    }
 
     const extractCliByTokens = (
       argv: string[],
@@ -18437,15 +18674,23 @@ if (
     // Standalone `--a2ui` execution
     if (hasA2ui && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify) {
       const a2uiIdx = process.argv.indexOf('--a2ui');
-      const a2uiArgs = process.argv
-        .slice(a2uiIdx + 1)
-        .filter((a) => !a.startsWith('--'));
+      const rawA2uiTail = process.argv.slice(a2uiIdx + 1);
+      const a2uiArgs: string[] = [];
+      for (let i = 0; i < rawA2uiTail.length; i++) {
+        if (rawA2uiTail[i] === '--artifact-dir') {
+          i++;
+          continue;
+        }
+        if (rawA2uiTail[i].startsWith('--')) continue;
+        a2uiArgs.push(rawA2uiTail[i]);
+      }
       const targetRunOrPath = a2uiArgs[0];
       const customHtmlOut = a2uiArgs[1];
       const a2uiResult = generateA2uiSurface({
         workspaceRoot: './workspace',
         runId: targetRunOrPath,
         outputHtmlPath: customHtmlOut,
+        openBrowser: hasOpen,
       });
       console.log('A2UI v0.9.1 Surface & Studio Generated:', {
         runId: a2uiResult.runId,
@@ -18461,6 +18706,9 @@ if (
         htmlOutputPath: a2uiResult.htmlOutputPath,
         bundleHtmlPath: a2uiResult.bundleHtmlPath,
         bundleVizPath: a2uiResult.bundleVizPath,
+        artifactHtmlPath: a2uiResult.artifactHtmlPath,
+        artifactVizPath: a2uiResult.artifactVizPath,
+        browserOpened: a2uiResult.browserOpened,
       });
       return;
     }
@@ -18468,12 +18716,22 @@ if (
     // Standalone `--viz` execution
     if (hasViz && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify) {
       const vizIdx = process.argv.indexOf('--viz');
-      const vizArgs = process.argv
-        .slice(vizIdx + 1)
-        .filter((a) => !a.startsWith('--'));
+      const rawVizTail = process.argv.slice(vizIdx + 1);
+      const vizArgs: string[] = [];
+      for (let i = 0; i < rawVizTail.length; i++) {
+        if (rawVizTail[i] === '--artifact-dir') {
+          i++;
+          continue;
+        }
+        if (rawVizTail[i].startsWith('--')) continue;
+        vizArgs.push(rawVizTail[i]);
+      }
       const bundleDir = vizArgs[0] || './workspace/bundle';
       const outPath = vizArgs[1] || path.join(bundleDir, 'viz.html');
       const vizResult = generateBundleVisualization(bundleDir, outPath);
+      if (hasOpen) {
+        openFileInSystemBrowser(vizResult.outputPath);
+      }
       console.log('OKF Bundle Visualization Generated:', vizResult);
       return;
     }
@@ -18539,7 +18797,11 @@ if (
           i += Math.max(1, extractCliByTokens(rawArgs, i).count);
           continue;
         }
-        if (rawArgs[i] === '--reject-source' || rawArgs[i] === '--add-source') {
+        if (
+          rawArgs[i] === '--reject-source' ||
+          rawArgs[i] === '--add-source' ||
+          rawArgs[i] === '--artifact-dir'
+        ) {
           i++;
           continue;
         }
@@ -18549,7 +18811,7 @@ if (
       const target = filteredArgs[0];
       if (!target) {
         console.error(
-          'Usage: npm run cli:verify -- <runIdOrConceptPath> [--reject-source id1,id2] [--add-source "<url>[|<title>]"] [--by human:<reviewer>]'
+          'Usage: npm run cli:verify -- <runIdOrConceptPath> [--reject-source id1,id2] [--add-source "<url>[|<title>]"] [--by human:<reviewer>] [--open] [--artifact-dir <dir>]'
         );
         process.exit(1);
       }
@@ -18582,7 +18844,11 @@ if (
         i += Math.max(1, extractCliByTokens(tailArgs, i).count);
         continue;
       }
-      if (token === '--reject-source' || token === '--add-source') {
+      if (
+        token === '--reject-source' ||
+        token === '--add-source' ||
+        token === '--artifact-dir'
+      ) {
         i++;
         continue;
       }
@@ -18590,7 +18856,8 @@ if (
         token === '--dry-run' ||
         token === '--verify' ||
         token === '--viz' ||
-        token === '--a2ui'
+        token === '--a2ui' ||
+        token === '--open'
       ) {
         continue;
       }
@@ -18601,10 +18868,10 @@ if (
     if (!argValue) {
       console.error(
         isStage2Only
-          ? 'Usage: npm run cli:stage2 -- [--dry-run] [--verify] [--by human:<id>] [--a2ui] <runId>'
+          ? 'Usage: npm run cli:stage2 -- [--dry-run] [--verify] [--by human:<id>] [--a2ui] [--open] [--artifact-dir <dir>] <runId>'
           : isStage1Only
-            ? 'Usage: npm run cli:stage1 -- [--dry-run] [--viz] [--a2ui] "<Research Topic>"'
-            : 'Usage: npm run cli -- [--dry-run] [--verify] [--viz] [--a2ui] "<Research Topic>"'
+            ? 'Usage: npm run cli:stage1 -- [--dry-run] [--viz] [--a2ui] [--open] [--artifact-dir <dir>] "<Research Topic>"'
+            : 'Usage: npm run cli -- [--dry-run] [--verify] [--viz] [--a2ui] [--open] [--artifact-dir <dir>] "<Research Topic>"'
       );
       process.exit(1);
     }
