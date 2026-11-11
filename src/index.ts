@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as http from 'http';
+import * as os from 'os';
 import { execFileSync, spawn } from 'child_process';
 
 /**
@@ -8479,6 +8481,7 @@ export interface A2uiSurfaceGenerationOptions {
   outputDir?: string;
   artifactDir?: string;
   openBrowser?: boolean;
+  enablePingPong?: boolean;
 }
 
 export interface A2uiBundleRunEntry {
@@ -8627,6 +8630,186 @@ export function syncA2uiToArtifactDir(input: {
   } catch {
     return {};
   }
+}
+
+export const A2UI_PING_PONG_DEFAULT_PORT = 44820;
+
+/**
+ * Detects whether the user has Antigravity 2.0 installed with `/browser` capabilities
+ * (`~/.gemini/antigravity/browser_recordings`, `~/.gemini/antigravity/html_artifacts`, or
+ * `~/.gemini/config/plugins/chrome-devtools-plugin` alongside `~/.gemini/antigravity/brain`).
+ * Can also be explicitly overridden via `options.enablePingPong` or `AGY_PING_PONG=1|0`.
+ */
+export function hasAntigravityBrowserCapability(options?: {
+  artifactDir?: string;
+  enablePingPong?: boolean;
+  homeDir?: string;
+}): boolean {
+  if (options?.enablePingPong === false || process.env.AGY_PING_PONG === '0') {
+    return false;
+  }
+  if (
+    options?.enablePingPong === true ||
+    process.env.AGY_PING_PONG === '1' ||
+    process.argv.includes('--ping-pong')
+  ) {
+    return true;
+  }
+  try {
+    const baseHome = options?.homeDir || os.homedir();
+    if (!baseHome) return false;
+    const agyDir = path.join(baseHome, '.gemini', 'antigravity');
+    const brainDir = path.join(agyDir, 'brain');
+    if (!fs.existsSync(agyDir) || !fs.existsSync(brainDir)) {
+      return false;
+    }
+    const browserRecordingsDir = path.join(agyDir, 'browser_recordings');
+    const htmlArtifactsDir = path.join(agyDir, 'html_artifacts');
+    const chromeDevtoolsPluginDir = path.join(
+      baseHome,
+      '.gemini',
+      'config',
+      'plugins',
+      'chrome-devtools-plugin'
+    );
+    return (
+      fs.existsSync(browserRecordingsDir) ||
+      fs.existsSync(htmlArtifactsDir) ||
+      fs.existsSync(chromeDevtoolsPluginDir)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Starts a zero-dependency one-shot HTTP loopback listener (`127.0.0.1:44820` by default)
+ * for Antigravity 2.0's Reactive Wakeup ("Ping-Pong") workflow.
+ * Only activates if Antigravity 2.0 with `/browser` capability is installed (or `force: true` in tests).
+ * When the user clicks `🚀 Godkjenn & Send til AGY` in `a2ui.html` / `a2ui_studio.html`, the listener
+ * receives the JSON curation payload, logs it to stdout, closes the server, and resolves so the
+ * background CLI process exits `0` and wakes up the active Antigravity 2.0 chat.
+ */
+export function startA2uiPingPongListener(options?: {
+  port?: number;
+  workspaceRoot?: string;
+  runId?: string;
+  htmlPath?: string;
+  force?: boolean;
+}): Promise<{
+  skipped?: boolean;
+  port: number;
+  payload: Record<string, any>;
+}> {
+  if (
+    !options?.force &&
+    !hasAntigravityBrowserCapability({ enablePingPong: options?.force })
+  ) {
+    console.log(
+      '[A2UI Ping-Pong]: Skipped (Antigravity 2.0 /browser capability not detected on this system).'
+    );
+    return Promise.resolve({ skipped: true, port: 0, payload: {} });
+  }
+
+  const requestedPort =
+    options?.port !== undefined ? options.port : A2UI_PING_PONG_DEFAULT_PORT;
+  const workspaceRoot = path.resolve(options?.workspaceRoot || './workspace');
+  let resolvedHtmlPath = options?.htmlPath ? path.resolve(options.htmlPath) : '';
+  if (!resolvedHtmlPath && options?.runId) {
+    const candidate = path.join(workspaceRoot, 'runs', options.runId, 'a2ui.html');
+    if (fs.existsSync(candidate)) resolvedHtmlPath = candidate;
+  }
+  if (!resolvedHtmlPath) {
+    const bundleHtml = path.join(workspaceRoot, 'bundle', 'a2ui.html');
+    if (fs.existsSync(bundleHtml)) resolvedHtmlPath = bundleHtml;
+  }
+
+  return new Promise((resolve, reject) => {
+    let handled = false;
+    const server = http.createServer((req, res) => {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+
+      const actualAddress = server.address();
+      const boundPort =
+        typeof actualAddress === 'object' && actualAddress
+          ? actualAddress.port
+          : requestedPort;
+      const parsedUrl = new URL(req.url || '/', `http://127.0.0.1:${boundPort}`);
+
+      if (parsedUrl.pathname === '/' && req.method === 'GET') {
+        if (resolvedHtmlPath && fs.existsSync(resolvedHtmlPath)) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(fs.readFileSync(resolvedHtmlPath, 'utf-8'));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'waiting_for_ping_pong', port: boundPort }));
+        }
+        return;
+      }
+
+      if (parsedUrl.pathname === '/ping-pong') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString('utf-8');
+        });
+        req.on('end', () => {
+          if (handled) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, duplicate: true }));
+            return;
+          }
+          handled = true;
+          const rawPayload = parsedUrl.searchParams.get('payload') || body || '{}';
+          let parsed: Record<string, any> = {};
+          try {
+            parsed = JSON.parse(rawPayload);
+          } catch {
+            parsed = { raw: rawPayload };
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, received: parsed }));
+
+          console.log('\n=== [AGY PING-PONG REACTIVE WAKEUP TRIGGERED] ===');
+          console.log(JSON.stringify(parsed, null, 2));
+          server.close(() => {
+            resolve({ port: boundPort, payload: parsed });
+          });
+        });
+        return;
+      }
+
+      res.writeHead(404);
+      res.end('Not found');
+    });
+
+    server.on('error', (err: any) => {
+      if (err?.code === 'EADDRINUSE' && requestedPort !== 0) {
+        console.log(
+          `[A2UI Ping-Pong]: Port ${requestedPort} is already active; reusing existing listener.`
+        );
+        resolve({ skipped: true, port: requestedPort, payload: {} });
+        return;
+      }
+      reject(err);
+    });
+
+    server.listen(requestedPort, '127.0.0.1', () => {
+      const addr = server.address();
+      const boundPort =
+        typeof addr === 'object' && addr ? addr.port : requestedPort;
+      console.log(
+        `[A2UI Ping-Pong Listener]: Waiting for button click on http://127.0.0.1:${boundPort}/ping-pong ...`
+      );
+    });
+  });
 }
 
 /**
@@ -13350,9 +13533,76 @@ const A2UI_STUDIO_JS = `
           });
         }
 
+        const canPingPong = Boolean(resolvePointer(surface.dataModel, "/meta/canPingPong"));
+        if (canPingPong) {
+          const pingPongLabel = isNo ? "🚀 Godkjenn & Send til AGY" : "🚀 Approve & Send to AGY";
+          const pingPongBtn = document.createElement("button");
+          pingPongBtn.className = "a2ui-btn primary";
+          pingPongBtn.id = "okf-pingpong-agy-btn";
+          pingPongBtn.style.background = "linear-gradient(135deg, #059669, #10b981)";
+          pingPongBtn.style.borderColor = "#059669";
+          pingPongBtn.textContent = pingPongLabel;
+          pingPongBtn.addEventListener("click", function () {
+            const currentPrompts = buildCurationPrompts(surface);
+            const payloadObj = {
+              runId: String(resolvePointer(surface.dataModel, "/meta/runId") || ""),
+              verifierActor: String(
+                resolvePointer(surface.dataModel, "/okf/verifierActor") || verifierInput.value || ""
+              ).trim(),
+              rejectedSources: (resolvePointer(surface.dataModel, "/okf/rejectedSources") || []).map(String),
+              addedSources: resolvePointer(surface.dataModel, "/okf/addedSources") || [],
+              agyText: currentPrompts.agyText,
+              cliText: currentPrompts.cliText,
+              timestamp: new Date().toISOString(),
+            };
+            const jsonStr = JSON.stringify(payloadObj);
+            const url =
+              "http://127.0.0.1:44820/ping-pong?payload=" + encodeURIComponent(jsonStr);
+            if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(currentPrompts.agyText).catch(function () {});
+            }
+            pingPongBtn.textContent = isNo ? "⏳ Sender til AGY..." : "⏳ Sending to AGY...";
+            let sentOk = false;
+            fetch(url, {
+              method: "POST",
+              mode: "no-cors",
+              headers: { "Content-Type": "text/plain;charset=utf-8" },
+              body: jsonStr,
+            })
+              .then(function () {
+                sentOk = true;
+                pingPongBtn.textContent = isNo
+                  ? "✅ Sendt til AGY! (Sjekk chatten)"
+                  : "✅ Sent to AGY! (Check chat)";
+              })
+              .catch(function () {
+                try {
+                  const img = new Image();
+                  img.src = url;
+                  pingPongBtn.textContent = isNo
+                    ? "✅ Sendt via beacon! (Sjekk chatten)"
+                    : "✅ Sent via beacon! (Check chat)";
+                } catch (_e) {
+                  pingPongBtn.textContent = isNo
+                    ? "📋 Kopiert (lim inn i AGY)"
+                    : "📋 Copied (paste in AGY)";
+                }
+              });
+            setTimeout(function () {
+              if (!sentOk) {
+                try {
+                  const img = new Image();
+                  img.src = url;
+                } catch (_e) {}
+              }
+            }, 400);
+          });
+          bannerRight.appendChild(pingPongBtn);
+        }
+
         const copyAgyLabel = isNo ? "📋 Kopier svar til AGY" : "📋 Copy Reply for AGY";
         const copyAgyBtn = document.createElement("button");
-        copyAgyBtn.className = "a2ui-btn primary";
+        copyAgyBtn.className = canPingPong ? "a2ui-btn" : "a2ui-btn primary";
         copyAgyBtn.id = "okf-copy-agy-btn";
         copyAgyBtn.textContent = copyAgyLabel;
         bindCopyBtn(
@@ -14559,12 +14809,17 @@ export function generateA2uiSurface(
           ? 'Stage 2 Executive Synthesis & Thesis'
           : 'Stage 2 Synthesis & Core Narrative';
 
+    const canPingPongRun = hasAntigravityBrowserCapability({
+      artifactDir: options.artifactDir,
+      enablePingPong: options.enablePingPong,
+    });
     const rDataModel = {
       meta: {
         runId: rId || 'workspace',
         lang: rLang,
         domainMode: rDomainMode,
         isStage1Only: rIsStage1Only,
+        canPingPong: canPingPongRun,
         title: rStage2Norm.title,
         subtitle: rStage2Norm.subtitle,
         targetAudience: rStage2Norm.targetAudience,
@@ -15552,12 +15807,17 @@ export function generateA2uiSurface(
         ? 'Stage 2 Executive Synthesis & Thesis'
         : 'Stage 2 Synthesis & Core Narrative';
 
+  const canPingPongMain = hasAntigravityBrowserCapability({
+    artifactDir: options.artifactDir,
+    enablePingPong: options.enablePingPong,
+  });
   const dataModel = {
     meta: {
       runId: resolvedRunId || 'workspace',
       lang: surfaceLang,
       domainMode,
       isStage1Only,
+      canPingPong: canPingPongMain,
       title: stage2Norm.title,
       subtitle: stage2Norm.subtitle,
       targetAudience: stage2Norm.targetAudience,
@@ -18598,13 +18858,36 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     const syncedArtifacts = generateA2uiSurface(s1UnverifiedRunId, {
       workspaceRoot: tmpStage1ReviewDir,
       artifactDir: tmpArtifactDir,
+      enablePingPong: true,
     });
+    const htmlWithPingPong = fs.readFileSync(syncedArtifacts.htmlOutputPath, 'utf-8');
+    const surfaceWithoutPingPong = generateA2uiSurface(s1UnverifiedRunId, {
+      workspaceRoot: tmpStage1ReviewDir,
+      enablePingPong: false,
+    });
+    const htmlWithoutPingPong = fs.readFileSync(surfaceWithoutPingPong.htmlOutputPath, 'utf-8');
     assert(
       Boolean(syncedArtifacts.artifactHtmlPath && fs.existsSync(syncedArtifacts.artifactHtmlPath)) &&
         fs.existsSync(`${syncedArtifacts.artifactHtmlPath}.metadata.json`) &&
         Boolean(syncedArtifacts.artifactVizPath && fs.existsSync(syncedArtifacts.artifactVizPath)) &&
-        fs.existsSync(`${syncedArtifacts.artifactVizPath}.metadata.json`),
-      `generateA2uiSurface with artifactDir copies a2ui_studio.html + okf_viz_studio.html and writes userFacing .metadata.json descriptors`
+        fs.existsSync(`${syncedArtifacts.artifactVizPath}.metadata.json`) &&
+        /"canPingPong":\s*true/.test(htmlWithPingPong) &&
+        htmlWithPingPong.includes('okf-pingpong-agy-btn') &&
+        /"canPingPong":\s*false/.test(htmlWithoutPingPong),
+      `generateA2uiSurface with artifactDir copies a2ui_studio.html + okf_viz_studio.html, writes .metadata.json descriptors, and gates canPingPong on Antigravity 2.0 /browser capability`
+    );
+
+    const emptyHomeDir = path.join(tmpStage1ReviewDir, 'empty_home');
+    fs.mkdirSync(emptyHomeDir, { recursive: true });
+    const mockAgyHomeDir = path.join(tmpStage1ReviewDir, 'mock_agy_home');
+    fs.mkdirSync(path.join(mockAgyHomeDir, '.gemini', 'antigravity', 'brain'), { recursive: true });
+    fs.mkdirSync(path.join(mockAgyHomeDir, '.gemini', 'antigravity', 'browser_recordings'), {
+      recursive: true,
+    });
+    assert(
+      hasAntigravityBrowserCapability({ homeDir: emptyHomeDir }) === false &&
+        hasAntigravityBrowserCapability({ homeDir: mockAgyHomeDir }) === true,
+      `hasAntigravityBrowserCapability returns true only when Antigravity 2.0 and /browser capabilities are installed`
     );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
@@ -18622,7 +18905,8 @@ if (
   process.argv.includes('--stage2') ||
   process.argv.includes('--verify') ||
   process.argv.includes('--viz') ||
-  process.argv.includes('--a2ui')
+  process.argv.includes('--a2ui') ||
+  process.argv.includes('--ping-pong')
 ) {
   (async () => {
     if (process.argv.includes('--test')) {
@@ -18636,6 +18920,7 @@ if (
     const hasVerify = process.argv.includes('--verify');
     const hasViz = process.argv.includes('--viz');
     const hasA2ui = process.argv.includes('--a2ui');
+    const hasPingPong = process.argv.includes('--ping-pong');
     const isDryRun = process.argv.includes('--dry-run');
     const hasOpen = process.argv.includes('--open');
 
@@ -18646,6 +18931,20 @@ if (
       !process.argv[artifactDirFlagIdx + 1].startsWith('--')
     ) {
       process.env.AGY_ARTIFACT_DIR = process.argv[artifactDirFlagIdx + 1];
+    }
+
+    // Standalone `--ping-pong` listener for Antigravity 2.0 Reactive Wakeup
+    if (hasPingPong && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify && !hasA2ui && !hasViz) {
+      const ppIdx = process.argv.indexOf('--ping-pong');
+      const ppArgs = process.argv
+        .slice(ppIdx + 1)
+        .filter((a) => !a.startsWith('--'));
+      const targetRunId = ppArgs[0];
+      await startA2uiPingPongListener({
+        workspaceRoot: './workspace',
+        runId: targetRunId,
+      });
+      return;
     }
 
     const extractCliByTokens = (

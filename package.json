@@ -9,6 +9,7 @@
     "cli:verify": "npx tsx --env-file-if-exists=.env.local src/index.ts --verify",
     "cli:viz": "npx tsx --env-file-if-exists=.env.local src/index.ts --viz",
     "cli:a2ui": "npx tsx --env-file-if-exists=.env.local src/index.ts --a2ui",
+    "cli:ping-pong": "npx tsx --env-file-if-exists=.env.local src/index.ts --ping-pong",
     "test": "npx tsx src/index.ts --test",
     "typecheck": "npx tsc --noEmit",
     "clean": "node scripts/cleanup.js"
