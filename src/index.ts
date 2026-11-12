@@ -9061,6 +9061,7 @@ export function startA2uiPingPongListener(options?: {
 
   return new Promise((resolve, reject) => {
     let handled = false;
+    let retriedSupersede = false;
     const server = http.createServer((req, res) => {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -9087,6 +9088,19 @@ export function startA2uiPingPongListener(options?: {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ status: 'waiting_for_ping_pong', port: boundPort }));
         }
+        return;
+      }
+
+      if (parsedUrl.pathname === '/supersede') {
+        handled = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, superseded: true }));
+        console.log(
+          `[A2UI Ping-Pong]: Port ${boundPort} superseded by a newer Ping-Pong listener; closing stale listener.`
+        );
+        server.close(() => {
+          resolve({ skipped: true, port: boundPort, payload: { superseded: true } });
+        });
         return;
       }
 
@@ -9125,8 +9139,43 @@ export function startA2uiPingPongListener(options?: {
       res.end('Not found');
     });
 
+    const onListenReady = () => {
+      const addr = server.address();
+      const boundPort =
+        typeof addr === 'object' && addr ? addr.port : requestedPort;
+      console.log(
+        `[A2UI Ping-Pong Listener]: Waiting for button click on http://127.0.0.1:${boundPort}/ping-pong ...`
+      );
+    };
+
     server.on('error', (err: any) => {
       if (err?.code === 'EADDRINUSE' && requestedPort !== 0) {
+        if (!retriedSupersede) {
+          retriedSupersede = true;
+          const supReq = http.request(
+            {
+              hostname: '127.0.0.1',
+              port: requestedPort,
+              path: '/supersede',
+              method: 'POST',
+              timeout: 500,
+            },
+            (supRes) => {
+              supRes.resume();
+              supRes.on('end', () => {
+                setTimeout(() => server.listen(requestedPort, '127.0.0.1', onListenReady), 120);
+              });
+            }
+          );
+          supReq.on('error', () => {
+            console.log(
+              `[A2UI Ping-Pong]: Port ${requestedPort} is already active; reusing existing listener.`
+            );
+            resolve({ skipped: true, port: requestedPort, payload: {} });
+          });
+          supReq.end();
+          return;
+        }
         console.log(
           `[A2UI Ping-Pong]: Port ${requestedPort} is already active; reusing existing listener.`
         );
@@ -9136,14 +9185,7 @@ export function startA2uiPingPongListener(options?: {
       reject(err);
     });
 
-    server.listen(requestedPort, '127.0.0.1', () => {
-      const addr = server.address();
-      const boundPort =
-        typeof addr === 'object' && addr ? addr.port : requestedPort;
-      console.log(
-        `[A2UI Ping-Pong Listener]: Waiting for button click on http://127.0.0.1:${boundPort}/ping-pong ...`
-      );
-    });
+    server.listen(requestedPort, '127.0.0.1', onListenReady);
   });
 }
 
@@ -9545,16 +9587,17 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
   const groups: A2uiChecklistGroup[] = [];
   let currentHeading = defaultHeading;
   const categoryStack: Array<{ indent: number; title: string }> = [];
-  let sectionHasSubgroups = false;
+  let sectionGroupStartIdx = 0;
   let itemCounter = 0;
 
   const getOrCreateGroup = (title: string): A2uiChecklistGroup => {
     const cleanTitle =
       cleanChecklistLabel(title.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/:+\s*$/, '')) ||
       defaultGroupFallback;
-    const lastGroup = groups[groups.length - 1];
-    if (lastGroup && lastGroup.title === cleanTitle) {
-      return lastGroup;
+    for (let gIdx = groups.length - 1; gIdx >= sectionGroupStartIdx; gIdx--) {
+      if (groups[gIdx].title === cleanTitle) {
+        return groups[gIdx];
+      }
     }
     const created: A2uiChecklistGroup = {
       id: `chk_grp_${groups.length + 1}`,
@@ -9571,7 +9614,7 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
     if (headingMatch) {
       currentHeading = headingMatch[2].replace(/^\d+(\.\d+)*\.?\s*/, '').trim();
       categoryStack.length = 0;
-      sectionHasSubgroups = false;
+      sectionGroupStartIdx = groups.length;
       continue;
     }
 
@@ -9608,13 +9651,12 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
       );
       if (headerTitle) {
         categoryStack.push({ indent, title: headerTitle });
-        sectionHasSubgroups = true;
       }
       continue;
     }
 
     let groupTitle = currentHeading;
-    let rawItemText = rawContent;
+    const rawItemText = rawContent;
 
     if (categoryStack.length > 0) {
       const stackTitle = categoryStack.map((c) => c.title).join(' — ');
@@ -9624,16 +9666,6 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
         !stackTitle.startsWith(currentHeading)
           ? `${currentHeading} — ${stackTitle}`
           : stackTitle;
-    } else if (sectionHasSubgroups) {
-      const leadBoldMatch = rawContent.match(/^\*\*([^*]+)\*\*:\s*(.+)$/);
-      if (leadBoldMatch) {
-        const subCategory = cleanChecklistLabel(leadBoldMatch[1]);
-        groupTitle =
-          currentHeading && currentHeading !== defaultHeading
-            ? `${currentHeading} — ${subCategory}`
-            : subCategory;
-        rawItemText = leadBoldMatch[2];
-      }
     }
 
     const cleanedLabel = cleanChecklistLabel(rawItemText);
@@ -12698,15 +12730,16 @@ const A2UI_STUDIO_JS = `
     const groups = [];
     let currentHeading = defaultHeading;
     const categoryStack = [];
-    let sectionHasSubgroups = false;
+    let sectionGroupStartIdx = 0;
     let itemCounter = 0;
 
     function getOrCreateGroup(title) {
       const cleanTitle =
         cleanClientChecklistLabel(title.replace(/\\*\\*([^*]+)\\*\\*/g, "$1").replace(/:+\\s*$/, "")) || defaultFallback;
-      const lastGroup = groups[groups.length - 1];
-      if (lastGroup && lastGroup.title === cleanTitle) {
-        return lastGroup;
+      for (let gIdx = groups.length - 1; gIdx >= sectionGroupStartIdx; gIdx--) {
+        if (groups[gIdx].title === cleanTitle) {
+          return groups[gIdx];
+        }
       }
       const created = {
         id: "chk_grp_" + (groups.length + 1),
@@ -12723,7 +12756,7 @@ const A2UI_STUDIO_JS = `
       if (headingMatch) {
         currentHeading = headingMatch[2].replace(/^\\d+(\\.\\d+)*\\.?\\s*/, "").trim();
         categoryStack.length = 0;
-        sectionHasSubgroups = false;
+        sectionGroupStartIdx = groups.length;
         continue;
       }
       const checkboxMatch = line.match(/^(\\s*)(?:[-*+]|\\d+[.)])\\s+\\[([ xX])\\]\\s+(.+?)\\s*$/);
@@ -12757,13 +12790,12 @@ const A2UI_STUDIO_JS = `
         );
         if (headerTitle) {
           categoryStack.push({ indent: indent, title: headerTitle });
-          sectionHasSubgroups = true;
         }
         continue;
       }
 
       let groupTitle = currentHeading;
-      let rawItemText = rawContent;
+      const rawItemText = rawContent;
 
       if (categoryStack.length > 0) {
         const stackTitle = categoryStack.map((c) => c.title).join(" — ");
@@ -12773,16 +12805,6 @@ const A2UI_STUDIO_JS = `
           !stackTitle.startsWith(currentHeading)
             ? currentHeading + " — " + stackTitle
             : stackTitle;
-      } else if (sectionHasSubgroups) {
-        const leadBoldMatch = rawContent.match(/^\\*\\*([^*]+)\\*\\*:\\s*(.+)$/);
-        if (leadBoldMatch) {
-          const subCategory = cleanClientChecklistLabel(leadBoldMatch[1]);
-          groupTitle =
-            currentHeading && currentHeading !== defaultHeading
-              ? currentHeading + " — " + subCategory
-              : subCategory;
-          rawItemText = leadBoldMatch[2];
-        }
       }
 
       const cleanedLabel = cleanClientChecklistLabel(rawItemText);
@@ -12813,9 +12835,17 @@ const A2UI_STUDIO_JS = `
     if (typeof body !== "string" || !body) return;
     const groups = resolvePointer(surface.dataModel, "/checklist/groups") || [];
     const flatChecked = [];
+    const checkedByLeafNum = {};
+    let hasLeafIds = false;
     for (const g of groups) {
       for (const it of g.items || []) {
-        flatChecked.push(Boolean(it.checked));
+        const val = Boolean(it.checked);
+        flatChecked.push(val);
+        const idMatch = String(it.id || "").match(/^chk_item_(\\d+)$/);
+        if (idMatch) {
+          checkedByLeafNum[Number(idMatch[1])] = val;
+          hasLeafIds = true;
+        }
       }
     }
     if (flatChecked.length === 0) return;
@@ -12842,7 +12872,11 @@ const A2UI_STUDIO_JS = `
       if (isBoldColonHeader || hasIndentedSubItems) {
         continue;
       }
-      if (leafIdx < flatChecked.length) {
+      const leafNum = leafIdx + 1;
+      if (hasLeafIds && Object.prototype.hasOwnProperty.call(checkedByLeafNum, leafNum)) {
+        lines[i] = m[1] + (checkedByLeafNum[leafNum] ? "x" : " ") + m[3] + m[4];
+        leafIdx++;
+      } else if (leafIdx < flatChecked.length) {
         lines[i] = m[1] + (flatChecked[leafIdx] ? "x" : " ") + m[3] + m[4];
         leafIdx++;
       }
@@ -15310,13 +15344,20 @@ export function generateA2uiSurface(
       );
     }
     if (trace.thinkingTraceMarkdown.trim()) {
-      lines.push('');
-      lines.push('---');
-      lines.push('');
       const cleanedTrace = trace.thinkingTraceMarkdown
-        .replace(/^\s*#\s+[^\r\n]+\r?\n+/, '')
+        .replace(/^\s*#\s+[^\r\n]*(?:\r?\n|$)/, '')
+        .replace(
+          /^\s*(?:[-*+]\s+\*\*(?:Model|Thinking Level|Duration|Input Tokens|Thinking Tokens|Output Tokens|Total Tokens):\*\*[^\r\n]*(?:\r?\n|$))+\s*/i,
+          ''
+        )
+        .replace(/(?:^|\r?\n)##\s+Executed Google Search Queries\b[\s\S]*?(?=\r?\n##\s+|$)/i, '')
         .trim();
-      lines.push(cleanedTrace);
+      if (cleanedTrace) {
+        lines.push('');
+        lines.push('---');
+        lines.push('');
+        lines.push(cleanedTrace);
+      }
     } else if (fallbackDesc.trim()) {
       lines.push('');
       lines.push(fallbackDesc.trim());
@@ -17427,6 +17468,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     '- [ ] **Manuelt slokkeutstyr**:',
     '  - [ ] Kontroller manometer på håndslokkere.',
     '- [ ] **Tekniske rom og tavlerom**: Kontroller at elektro- og ventilasjonsrom ikke brukes som lager.',
+    '- [ ] **Beredskapssekk**: Sjekk lommelykt og varmetepper.',
     '### 4.3 Halvårlig og årlig kontroll',
     '- [ ] **Brannøvelse (`FOB § 12`)**:',
     '  - [ ] Er årlig evakueringsøvelse gjennomført?',
@@ -17436,16 +17478,23 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   ].join('\n');
   const chkGroups = extractChecklistGroupsFromMarkdown(sampleChecklistMd);
   assert(
-    chkGroups.length === 6 &&
+    chkGroups.length === 5 &&
       chkGroups[0].title === 'Daglig og ukentlig kontroll' &&
       chkGroups[1].title === 'Månedlig og kvartalsvis kontroll' &&
+      chkGroups[1].items.length === 3 &&
+      chkGroups[1].items[0]?.id === 'chk_item_2' &&
+      chkGroups[1].items[1]?.id === 'chk_item_4' &&
+      chkGroups[1].items[1]?.label.startsWith('Tekniske rom og tavlerom:') &&
+      chkGroups[1].items[2]?.id === 'chk_item_5' &&
+      chkGroups[1].items[2]?.label.startsWith('Beredskapssekk:') &&
       chkGroups[2].title === 'Månedlig og kvartalsvis kontroll — Manuelt slokkeutstyr' &&
-      chkGroups[3].title === 'Månedlig og kvartalsvis kontroll — Tekniske rom og tavlerom' &&
-      chkGroups[4].title === 'Halvårlig og årlig kontroll — Brannøvelse (FOB § 12)' &&
-      chkGroups[5].title ===
+      chkGroups[2].items.length === 1 &&
+      chkGroups[2].items[0]?.id === 'chk_item_3' &&
+      chkGroups[3].title === 'Halvårlig og årlig kontroll — Brannøvelse (FOB § 12)' &&
+      chkGroups[4].title ===
         'Halvårlig og årlig kontroll — Tekniske anlegg — Brannalarmanlegg (NS 3960)' &&
-      chkGroups[5].items[0]?.label === 'Foreligger årsrapport uten åpne avvik?',
-    `extractChecklistGroupsFromMarkdown preserves currentHeading prefix, 3-level hierarchy, and exact document order (got: ${chkGroups.map((g) => g.title).join(' | ')})`
+      chkGroups[4].items[0]?.label === 'Foreligger årsrapport uten åpne avvik?',
+    `extractChecklistGroupsFromMarkdown reunites post-subgroup top-level bullets into their parent section group without 1-item fragmentation and preserves 3-level hierarchy (got: ${chkGroups.map((g) => `${g.title}[${g.items.length}]`).join(' | ')})`
   );
 
   const stage2Norm = normalizeStage2ForA2ui(
@@ -18913,6 +18962,14 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       [
         '# Stage 1 Thinking & Search Trace',
         '',
+        `- **Model:** \`${GEMINI_4_ARGON_MODEL}\``,
+        '- **Thinking Level:** `HIGH`',
+        '- **Duration:** 14.2s',
+        '- **Input Tokens:** 1200',
+        '- **Thinking Tokens:** 800',
+        '- **Output Tokens:** 950',
+        '- **Total Tokens:** 2950',
+        '',
         '## Executed Google Search Queries',
         '1. `forskrift om brannforebygging barnehage lovdata`',
         '2. `internkontrollforskriften styrer ansvar barnehage`',
@@ -18991,6 +19048,16 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       `generateA2uiSurface in Stage-1 Intermission Review Mode places tab_okf_markdown first, populates stage1Trace, and writes a2ui_surface.json to stages/01_research/output/ without creating stages/02_script/output`
     );
 
+    const s1TraceBody = String(s1DataModel?.stage2?.scriptBody || '');
+    assert(
+      s1TraceBody.includes('### 📊 Stage 1 Telemetri & Grounding-statistikk') &&
+        s1TraceBody.includes('### 🔎 Utførte Google-søk (2)') &&
+        !s1TraceBody.includes('- **Total Tokens:**') &&
+        !s1TraceBody.includes('## Executed Google Search Queries') &&
+        s1TraceBody.includes('## Reasoning Steps'),
+      `formatStage1TraceOverviewBody deduplicates top telemetry bullets and Executed Google Search Queries header from thinking_trace.md while preserving ## Reasoning Steps (got: ${JSON.stringify(s1TraceBody)})`
+    );
+
     // 2. Verify A2UI_STUDIO_JS interactive source curation hooks (inspectSourceCitationsInBody, toggleRejectSourceInStudio, addSourceInStudio, buildCurationPrompts)
     const s1PayloadMatch = s1Html.match(
       /window\.A2UI_SURFACE_PAYLOAD\s*=\s*(\{[\s\S]*?\});\s*<\/script>/
@@ -19002,6 +19069,26 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       A2UI_SURFACE_PAYLOAD: s1ParsedPayload,
       __ICM_TEST_HOOKS__: s1Hooks,
     });
+    const clientChkGroups = s1Hooks.extractChecklistGroupsClient(sampleChecklistMd);
+    const chkSyncSim: Record<string, any> = {
+      surfaceId: 'chk-sync-test',
+      components: {},
+      dataModel: {
+        okf: { body: sampleChecklistMd, primaryBody: sampleChecklistMd, viewingStubConcept: false },
+        checklist: { fromStage2: false, groups: JSON.parse(JSON.stringify(clientChkGroups)) },
+      },
+    };
+    chkSyncSim.dataModel.checklist.groups[1].items[1].checked = true; // chk_item_4 (post-subgroup top-level item)
+    s1Hooks.syncChecklistToOkfBody(chkSyncSim);
+    assert(
+      clientChkGroups.length === 5 &&
+        clientChkGroups[1].items.length === 3 &&
+        clientChkGroups[1].items[1].id === 'chk_item_4' &&
+        chkSyncSim.dataModel.okf.body.includes('- [x] **Tekniske rom og tavlerom**:') &&
+        chkSyncSim.dataModel.okf.body.includes('  - [ ] Kontroller manometer på håndslokkere.'),
+      `extractChecklistGroupsClient matches server subgroup reunion and syncChecklistToOkfBody maps chk_item_<N> to exact leaf line in okf/body`
+    );
+
     const s1SimSurface: Record<string, any> = {
       surfaceId: s1A2uiRes.surfaceId,
       activeRunId: s1RunId,
