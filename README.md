@@ -116,6 +116,7 @@ The workspace layout maps abstract context layers directly to disk directories:
 ```
 .
 ├── .gitattributes               # Enforces clean LF line endings across Windows, macOS, and Linux
+├── LICENSE                      # MIT License
 ├── GEMINI.md                    # Antigravity 2.0 Main Agent Rules (ICM Co-Architect)
 ├── SPEC.md                      # Open Knowledge Format (OKF v0.2) Upstream Specification
 ├── .agents/                     # Antigravity 2.0 Workspace Customizations
@@ -213,7 +214,7 @@ Because the ICM state lives in plain Markdown and JSON files on disk (`workspace
    ```bash
    npm run cli:a2ui -- <runId>
    ```
-   *(Compiles the run's Stage 1 OKF v0.2 Markdown, Stage 2 JSON, and OKF Bundle into declarative **A2UI v0.9.1** surface artifacts (`workspace/runs/<runId>/stages/02_script/output/a2ui_surface.json` and `a2ui_surface.jsonl` with `createSurface`, `updateComponents`, and `updateDataModel` bound via RFC 6901 JSON Pointers) plus a self-contained **A2UI Studio HTML app** (`workspace/runs/<runId>/a2ui.html` and `workspace/bundle/a2ui.html`) implementing both **Tier 1 Basic Catalog Primitives** (`Tabs`, `Card`, `Row`, `Column`, `List`, `Text`, `CheckBox`, `ChoicePicker`, `TextField`, `Button`, `AudioPlayer`, `Video`, `Image`, `Icon`, `Divider`, `Modal`, `Badge`) and **Tier 2 ICM + OKF Domain Components** (`OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`). See [`A2UI_SPEC.md`](file:///c:/lab/jolly-hertz/A2UI_SPEC.md) for the upstream A2UI v0.9.1 protocol specification.)*
+   *(Compiles the run's Stage 1 OKF v0.2 Markdown, Stage 2 JSON, and OKF Bundle into declarative **A2UI v0.9.1** surface artifacts (`workspace/runs/<runId>/stages/02_script/output/a2ui_surface.json` and `a2ui_surface.jsonl` with `createSurface`, `updateComponents`, and `updateDataModel` bound via RFC 6901 JSON Pointers) plus a self-contained **A2UI Studio HTML app** (`workspace/runs/<runId>/a2ui.html` and `workspace/bundle/a2ui.html`) implementing both **Tier 1 Basic Catalog Primitives** (`Tabs`, `Card`, `Row`, `Column`, `List`, `Text`, `CheckBox`, `ChoicePicker`, `TextField`, `Button`, `AudioPlayer`, `Video`, `Image`, `Icon`, `Divider`, `Modal`, `Badge`) and **Tier 2 ICM + OKF Domain Components** (`OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`). See [`A2UI_SPEC.md`](./A2UI_SPEC.md) for the upstream A2UI v0.9.1 protocol specification.)*
 7. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
    ```bash
    npm run cli -- "Cloud Native Architecture in 2026"
@@ -254,3 +255,10 @@ To clean up and reset the workspace (deleting all active stage outputs and cache
 ```bash
 npm run clean
 ```
+
+---
+
+## License
+
+Released under the [MIT License](./LICENSE).
+

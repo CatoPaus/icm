@@ -1,6 +1,7 @@
 {
   "name": "icm-gemini-4-argon",
   "version": "2.0.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "cli": "npx tsx --env-file-if-exists=.env.local src/index.ts --cli",
