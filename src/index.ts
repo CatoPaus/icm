@@ -3385,7 +3385,7 @@ export function inspectSourceDomainProvenance(source: {
   }
   // Ignore lowercase phrases (unless domain-like), section/chapter/date markers, or generic subtitle words
   if (
-    (/^[a-zæøåäö]/.test(candidatePub) && !/\.[a-z]{2,}$/i.test(candidatePub)) ||
+    (/^\p{Ll}/u.test(candidatePub) && !/\.[a-z]{2,}$/i.test(candidatePub)) ||
     /^(?:§+|kap(?:ittel|\.)?\s*\d|del\s+\d|part\s+\d|ch(?:apter|\.)\s*\d|sec(?:tion\b|\.\s*\d|\s+\d)|mod(?:ul|ule|\.)\s*\d|steg\s+\d|step\s+\d|fase\s+\d|phase\s+\d|tabell\b|table\b|figur\b|figure\b|vedlegg\b|appendix\b|rev(?:ision\b|\.\s*\d|\s+\d)|v\d|\d{4}\b|q[1-4]\b)/i.test(
       candidatePub
     ) ||
@@ -3397,6 +3397,11 @@ export function inspectSourceDomainProvenance(source: {
   const normAscii = (s: string) =>
     transliterateNordicAscii(s)
       .toLowerCase()
+      .replace(/ß/g, 'ss')
+      .replace(/œ/g, 'oe')
+      .replace(/ł/g, 'l')
+      .replace(/[đð]/g, 'd')
+      .replace(/þ/g, 'th')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '');
 
@@ -3410,7 +3415,7 @@ export function inspectSourceDomainProvenance(source: {
       (srcIdLower.endsWith(`-${pubSlug}`) || srcIdLower.startsWith(`${pubSlug}-`))
   );
 
-  const hasParenAcronym = /\([A-ZÆØÅ0-9]{2,10}\)\s*$/.test(candidatePub);
+  const hasParenAcronym = /\([\p{Lu}0-9]{2,10}\)\s*$/u.test(candidatePub);
   if (
     !isPipeSep &&
     !hasParenAcronym &&
@@ -3425,15 +3430,40 @@ export function inspectSourceDomainProvenance(source: {
 
   // Official shared government / intergovernmental umbrella portals legitimately host ministries & agencies
   if (
-    /\.(?:gov|gov\.[a-z]{2}|mil|int)$/i.test(hostname) ||
-    /(?:^|\.)(?:regjeringen\.no|stortinget\.no|europa\.eu|canada\.ca|gov\.uk|usa\.gov|who\.int|un\.org|oecd\.org|worldbank\.org)$/i.test(
+    /(?:^|\.)(?:gov|gov\.[a-z]{2}|gob\.[a-z]{2}|gouv\.[a-z]{2}|gv\.[a-z]{2}|go\.[a-z]{2}|mil|mil\.[a-z]{2}|int)$/i.test(
+      hostname
+    ) ||
+    /(?:^|\.)(?:regjeringen\.no|stortinget\.no|europa\.eu|canada\.ca|usa\.gov|who\.int|un\.org|oecd\.org|worldbank\.org)$/i.test(
       hostname
     )
   ) {
     return { hostname, isDirectFileAsset, claimedPublisher: candidatePub, domainMismatch: false };
   }
 
-  const hostIgnore = new Set([
+  // Universal DNS label extraction: strip rightmost TLD (any gTLD/ccTLD), 2nd-level public-suffix registries, and infra prefixes
+  const sldRegistries = new Set([
+    'co',
+    'com',
+    'org',
+    'or',
+    'net',
+    'ne',
+    'edu',
+    'ed',
+    'ac',
+    'gov',
+    'gob',
+    'gouv',
+    'gv',
+    'go',
+    'mil',
+    'nic',
+    'asn',
+    're',
+    'lg',
+    'nhs',
+  ]);
+  const infraPrefixes = new Set([
     'www',
     'www2',
     'wwwex',
@@ -3447,64 +3477,68 @@ export function inspectSourceDomainProvenance(source: {
     'static',
     'files',
     'media',
-    'no',
-    'com',
-    'org',
-    'net',
-    'edu',
-    'gov',
-    'int',
-    'eu',
-    'uk',
-    'de',
-    'se',
-    'dk',
-    'fi',
-    'is',
-    'nl',
-    'fr',
-    'es',
-    'it',
-    'ch',
-    'at',
-    'be',
-    'ca',
-    'au',
-    'nz',
-    'us',
-    'io',
-    'ai',
-    'co',
   ]);
-  const hostTokens = hostname
+  const rawHostParts = hostname
     .split('.')
     .map((p) => p.replace(/[^a-z0-9]/g, ''))
-    .filter((p) => p.length >= 2 && !hostIgnore.has(p));
+    .filter(Boolean);
+  const withoutTld = rawHostParts.length >= 2 ? rawHostParts.slice(0, -1) : rawHostParts;
+  const withoutSld =
+    withoutTld.length >= 2 && sldRegistries.has(withoutTld[withoutTld.length - 1])
+      ? withoutTld.slice(0, -1)
+      : withoutTld;
+  const hostTokens = withoutSld.filter((p) => p.length >= 2 && !infraPrefixes.has(p));
 
   if (hostTokens.length === 0) {
     return { hostname, isDirectFileAsset, claimedPublisher: candidatePub, domainMismatch: false };
   }
 
-  const pubStop = new Set([
+  const articleTokens = new Set(['the', 'la', 'le', 'les', 'de', 'het', 'een', 'der', 'die', 'das']);
+  const prepTokens = new Set([
     'for',
-    'og',
-    'and',
     'of',
-    'the',
     'in',
     'on',
-    'til',
-    'av',
+    'to',
+    'by',
+    'at',
+    'from',
+    'with',
+    'about',
+    'into',
+    'over',
+    'under',
     'om',
     'i',
-    'de',
-    'la',
+    'pa',
+    'til',
+    'av',
+    'ved',
+    'fra',
+    'hos',
+    'mot',
+    'fur',
+    'von',
+    'zu',
+    'sur',
+    'dans',
+    'pour',
+    'par',
+    'con',
+    'sobre',
+    'van',
+    'bij',
+  ]);
+  const pubStop = new Set([
+    ...articleTokens,
+    ...prepTokens,
+    'og',
+    'and',
+    'och',
+    'und',
+    'et',
     'du',
     'des',
-    'und',
-    'fur',
-    'van',
-    'het',
     'us',
     'uk',
   ]);
@@ -3514,62 +3548,66 @@ export function inspectSourceDomainProvenance(source: {
     const allTokens = normAscii(stripped)
       .split(/[^a-z0-9]+/)
       .filter((t) => t.length >= 2);
+    const trimmedLead = allTokens.slice();
+    while (trimmedLead.length > 1 && articleTokens.has(trimmedLead[0])) {
+      trimmedLead.shift();
+    }
+    if (strictLeading && (trimmedLead.length === 0 || prepTokens.has(trimmedLead[0]))) {
+      return false;
+    }
     const rawPubTokens = allTokens.filter((t) => !pubStop.has(t));
     const pubJoined = rawPubTokens.join('');
 
     const acronyms = new Set<string>();
-    for (const pm of pubStr.matchAll(/\(([A-Za-zÆØÅæøå0-9]{2,12})\)/g)) {
+    for (const pm of pubStr.matchAll(/\(([\p{L}\p{N}]{2,12})\)/gu)) {
       acronyms.add(normAscii(pm[1]).replace(/[^a-z0-9]/g, ''));
     }
-    for (const um of pubStr.matchAll(/\b([A-ZÆØÅ]{2,10})\b/g)) {
+    for (const um of pubStr.matchAll(/(?:^|[^\p{L}\p{N}])([\p{Lu}]{2,10})(?=$|[^\p{L}\p{N}])/gu)) {
       acronyms.add(normAscii(um[1]).replace(/[^a-z0-9]/g, ''));
     }
     if (rawPubTokens.length >= 2) {
       acronyms.add(rawPubTokens.map((t) => t[0]).join(''));
+    }
+    if (allTokens.length >= 2 && allTokens.length <= 6) {
+      acronyms.add(allTokens.map((t) => t[0]).join(''));
     }
 
     if (acronyms.has(hp)) return true;
     for (const ac of acronyms) {
       if (ac.length >= 3 && (hp.includes(ac) || ac.includes(hp))) return true;
     }
-    const tokenPool = strictLeading ? allTokens : rawPubTokens;
-    for (let idx = 0; idx < tokenPool.length; idx++) {
-      if (strictLeading) {
-        if (idx > 1) break;
-        if (idx === 1 && (allTokens.length !== 2 || pubStop.has(allTokens[0]))) continue;
+    if (strictLeading) {
+      const firstPrepIdx = trimmedLead.findIndex((t) => prepTokens.has(t));
+      const prePrep = firstPrepIdx === -1 ? trimmedLead : trimmedLead.slice(0, firstPrepIdx);
+      for (let idx = 0; idx < Math.min(2, prePrep.length); idx++) {
+        if (idx === 1 && (prePrep.length !== 2 || firstPrepIdx !== -1)) continue;
+        const pt = prePrep[idx];
+        if (pubStop.has(pt)) continue;
+        if (pt === hp) return true;
+        if (pt.length >= 4 && hp.includes(pt)) return true;
+        if (hp.length >= 4 && pt.includes(hp)) return true;
       }
-      const pt = tokenPool[idx];
-      if (pubStop.has(pt)) continue;
-      if (pt === hp) return true;
-      if (pt.length >= 4 && hp.includes(pt)) return true;
-      if (hp.length >= 4 && pt.includes(hp)) return true;
+    } else {
+      for (const pt of rawPubTokens) {
+        if (pt === hp) return true;
+        if (pt.length >= 4 && hp.includes(pt)) return true;
+        if (hp.length >= 4 && pt.includes(hp)) return true;
+      }
     }
     // Compound-word abbreviation (e.g., "udir" <-> "utdanningsdirektoratet", "digdir" <-> "digitaliseringsdirektoratet")
-    if (
-      (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) &&
-      hp.length >= 4 &&
-      pubJoined.startsWith(hp[0]) &&
-      pubJoined.includes(hp.slice(1))
-    ) {
+    if (hp.length >= 4 && pubJoined.startsWith(hp[0]) && pubJoined.includes(hp.slice(1))) {
       return true;
     }
-    if (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) {
-      for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
-        if (
-          pubJoined.startsWith(hp.slice(0, splitAt)) &&
-          pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
-        ) {
-          return true;
-        }
+    for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
+      if (
+        pubJoined.startsWith(hp.slice(0, splitAt)) &&
+        pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
+      ) {
+        return true;
       }
     }
     // Multi-token syllabic / compound initialism (e.g., "dibk" <-> ["direktoratet", "byggkvalitet"], "nkom", "bufdir")
-    if (
-      (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) &&
-      rawPubTokens.length >= 2 &&
-      hp.length >= 3 &&
-      hp.length <= 8
-    ) {
+    if (rawPubTokens.length >= 2 && hp.length >= 3 && hp.length <= 8) {
       const matchSyllabicTokens = (tokIdx: number, hpIdx: number): boolean => {
         if (tokIdx === rawPubTokens.length) return hpIdx === hp.length;
         if (hpIdx >= hp.length) return false;
@@ -3600,27 +3638,33 @@ export function inspectSourceDomainProvenance(source: {
 
   const matchesHost = hostTokens.some((hp) => doesPubMatchHostToken(candidatePub, hp, false));
 
-  // Hardened Publisher-First title layout (`"<True Host Publisher> – <Article Title>"`, e.g., `"DSB – Unngå ulykker med rødsprit"` on `dsb.no`)
+  // Hardened Publisher-First title layout (`"<True Host Publisher> – <Article Title>"`)
   if (!matchesHost && !viaAnnotMatch && !idEncodesPub && !hasParenAcronym) {
     const rawPrefix = titleWithoutVia.slice(0, sepMatch.index ?? 0).trim();
     if (rawPrefix && !/\s+(?:[|–—]|-\s)\s+/.test(rawPrefix)) {
       const leadOrg = rawPrefix.split(/\s*[/:\u2215]\s*/)[0].trim();
       const leadWords = leadOrg.split(/\s+/).filter(Boolean);
-      const isDocGenrePrefix =
-        /^(?:lov|forskrift|veileder|veiledning|retningslinjer|rundskriv|rapport|kapittel|del|act|law|regulation|statute|directive|ordinance|guidance|guide|report|form)\b/i.test(
-          leadOrg
-        );
-      if (leadWords.length >= 1 && leadWords.length <= 7 && !isDocGenrePrefix) {
-        const primaryHostToken = hostTokens[hostTokens.length - 1];
-        const srcIdStartsWithHost = srcIdLower.startsWith(`${primaryHostToken}-`);
-        const leadAcronyms = new Set<string>();
-        for (const pm of leadOrg.matchAll(/\(([A-Za-zÆØÅæøå0-9]{2,12})\)/g)) {
-          leadAcronyms.add(normAscii(pm[1]).replace(/[^a-z0-9]/g, ''));
-        }
-        for (const um of leadOrg.matchAll(/\b([A-ZÆØÅ]{2,10})\b/g)) {
-          leadAcronyms.add(normAscii(um[1]).replace(/[^a-z0-9]/g, ''));
-        }
-        const leadHasHostAcronym = leadAcronyms.has(primaryHostToken);
+      const leadNorm = normAscii(leadOrg);
+      const primaryHostToken = hostTokens[hostTokens.length - 1];
+      const srcIdStartsWithHost = srcIdLower.startsWith(`${primaryHostToken}-`);
+      const leadAcronyms = new Set<string>();
+      for (const pm of leadOrg.matchAll(/\(([\p{L}\p{N}]{2,12})\)/gu)) {
+        leadAcronyms.add(normAscii(pm[1]).replace(/[^a-z0-9]/g, ''));
+      }
+      for (const um of leadOrg.matchAll(/(?:^|[^\p{L}\p{N}])([\p{Lu}]{2,10})(?=$|[^\p{L}\p{N}])/gu)) {
+        leadAcronyms.add(normAscii(um[1]).replace(/[^a-z0-9]/g, ''));
+      }
+      const leadHasHostAcronym = leadAcronyms.has(primaryHostToken);
+      const isStatuteOrDocTitle =
+        !srcIdStartsWithHost &&
+        !leadHasHostAcronym &&
+        (/^(?:lov|forskrift|veileder|veiledning|retningslinjer|rundskriv|rapport|kapittel|del|act|law|regulation|statute|directive|ordinance|guidance|guide|report|form|gesetz|verordnung|loi|decret|ley|decreto)\b/.test(
+          leadNorm
+        ) ||
+          /(?:loven|forskriften|\s+(?:act|law|statute|regulation|directive|ordinance|gesetz|verordnung))$/.test(
+            leadNorm
+          ));
+      if (leadWords.length >= 1 && leadWords.length <= 7 && !isStatuteOrDocTitle) {
         const allHostTokensAccounted =
           hostTokens.length === 1 ||
           srcIdStartsWithHost ||
@@ -12856,7 +12900,7 @@ const A2UI_STUDIO_JS = `
       return { hostname: hostname, isDirectFileAsset: isDirectFileAsset, claimedPublisher: "", domainMismatch: false };
     }
     if (
-      (/^[a-zæøåäö]/.test(candidatePub) && !/\\.[a-z]{2,}$/i.test(candidatePub)) ||
+      (/^\\p{Ll}/u.test(candidatePub) && !/\\.[a-z]{2,}$/i.test(candidatePub)) ||
       /^(?:§+|kap(?:ittel|\\.)?\\s*\\d|del\\s+\\d|part\\s+\\d|ch(?:apter|\\.)\\s*\\d|sec(?:tion\\b|\\.\\s*\\d|\\s+\\d)|mod(?:ul|ule|\\.)\\s*\\d|steg\\s+\\d|step\\s+\\d|fase\\s+\\d|phase\\s+\\d|tabell\\b|table\\b|figur\\b|figure\\b|vedlegg\\b|appendix\\b|rev(?:ision\\b|\\.\\s*\\d|\\s+\\d)|v\\d|\\d{4}\\b|q[1-4]\\b)/i.test(
         candidatePub
       ) ||
@@ -12870,6 +12914,11 @@ const A2UI_STUDIO_JS = `
         .replace(/æ/g, "ae")
         .replace(/ø/g, "oe")
         .replace(/å/g, "aa")
+        .replace(/ß/g, "ss")
+        .replace(/œ/g, "oe")
+        .replace(/ł/g, "l")
+        .replace(/[đð]/g, "d")
+        .replace(/þ/g, "th")
         .normalize("NFD")
         .replace(/[\\u0300-\\u036f]/g, "");
     }
@@ -12883,7 +12932,7 @@ const A2UI_STUDIO_JS = `
         (srcIdLower.slice(-pubSlug.length - 1) === "-" + pubSlug ||
           srcIdLower.indexOf(pubSlug + "-") === 0)
     );
-    const hasParenAcronym = /\\([A-ZÆØÅ0-9]{2,10}\\)\\s*$/.test(candidatePub);
+    const hasParenAcronym = /\\([\\p{Lu}0-9]{2,10}\\)\\s*$/u.test(candidatePub);
     if (
       !isPipeSep &&
       !hasParenAcronym &&
@@ -12896,8 +12945,10 @@ const A2UI_STUDIO_JS = `
       return { hostname: hostname, isDirectFileAsset: isDirectFileAsset, claimedPublisher: "", domainMismatch: false };
     }
     if (
-      /\\.(?:gov|gov\\.[a-z]{2}|mil|int)$/i.test(hostname) ||
-      /(?:^|\\.)(?:regjeringen\\.no|stortinget\\.no|europa\\.eu|canada\\.ca|gov\\.uk|usa\\.gov|who\\.int|un\\.org|oecd\\.org|worldbank\\.org)$/i.test(
+      /(?:^|\\.)(?:gov|gov\\.[a-z]{2}|gob\\.[a-z]{2}|gouv\\.[a-z]{2}|gv\\.[a-z]{2}|go\\.[a-z]{2}|mil|mil\\.[a-z]{2}|int)$/i.test(
+        hostname
+      ) ||
+      /(?:^|\\.)(?:regjeringen\\.no|stortinget\\.no|europa\\.eu|canada\\.ca|usa\\.gov|who\\.int|un\\.org|oecd\\.org|worldbank\\.org)$/i.test(
         hostname
       )
     ) {
@@ -12908,15 +12959,22 @@ const A2UI_STUDIO_JS = `
         domainMismatch: false,
       };
     }
-    const hostIgnore = new Set([
-      "www", "www2", "wwwex", "web", "secure", "portal", "app", "api", "docs", "cdn", "static", "files", "media",
-      "no", "com", "org", "net", "edu", "gov", "int", "eu", "uk", "de", "se", "dk", "fi", "is", "nl", "fr", "es",
-      "it", "ch", "at", "be", "ca", "au", "nz", "us", "io", "ai", "co"
+    const sldRegistries = new Set([
+      "co", "com", "org", "or", "net", "ne", "edu", "ed", "ac", "gov", "gob", "gouv", "gv", "go", "mil", "nic", "asn", "re", "lg", "nhs"
     ]);
-    const hostTokens = hostname
+    const infraPrefixes = new Set([
+      "www", "www2", "wwwex", "web", "secure", "portal", "app", "api", "docs", "cdn", "static", "files", "media"
+    ]);
+    const rawHostParts = hostname
       .split(".")
       .map(function (p) { return p.replace(/[^a-z0-9]/g, ""); })
-      .filter(function (p) { return p.length >= 2 && !hostIgnore.has(p); });
+      .filter(Boolean);
+    const withoutTld = rawHostParts.length >= 2 ? rawHostParts.slice(0, -1) : rawHostParts;
+    const withoutSld =
+      withoutTld.length >= 2 && sldRegistries.has(withoutTld[withoutTld.length - 1])
+        ? withoutTld.slice(0, -1)
+        : withoutTld;
+    const hostTokens = withoutSld.filter(function (p) { return p.length >= 2 && !infraPrefixes.has(p); });
     if (hostTokens.length === 0) {
       return {
         hostname: hostname,
@@ -12925,23 +12983,40 @@ const A2UI_STUDIO_JS = `
         domainMismatch: false,
       };
     }
+    const articleTokens = new Set(["the", "la", "le", "les", "de", "het", "een", "der", "die", "das"]);
+    const prepTokens = new Set([
+      "for", "of", "in", "on", "to", "by", "at", "from", "with", "about", "into", "over", "under",
+      "om", "i", "pa", "til", "av", "ved", "fra", "hos", "mot",
+      "fur", "von", "zu", "sur", "dans", "pour", "par", "con", "sobre", "van", "bij"
+    ]);
     const pubStop = new Set([
-      "for", "og", "and", "of", "the", "in", "on", "til", "av", "om", "i", "de", "la", "du", "des", "und", "fur", "van", "het", "us", "uk"
+      "the", "la", "le", "les", "de", "het", "een", "der", "die", "das",
+      "for", "of", "in", "on", "to", "by", "at", "from", "with", "about", "into", "over", "under",
+      "om", "i", "pa", "til", "av", "ved", "fra", "hos", "mot",
+      "fur", "von", "zu", "sur", "dans", "pour", "par", "con", "sobre", "van", "bij",
+      "og", "and", "och", "und", "et", "du", "des", "us", "uk"
     ]);
     function doesClientPubMatchHostToken(pubStr, hp, strictLeading) {
       const stripped = String(pubStr || "").replace(/\\([^)]*\\)/g, " ");
       const allTokens = normClientAscii(stripped)
         .split(/[^a-z0-9]+/)
         .filter(function (t) { return t.length >= 2; });
+      const trimmedLead = allTokens.slice();
+      while (trimmedLead.length > 1 && articleTokens.has(trimmedLead[0])) {
+        trimmedLead.shift();
+      }
+      if (strictLeading && (trimmedLead.length === 0 || prepTokens.has(trimmedLead[0]))) {
+        return false;
+      }
       const rawPubTokens = allTokens.filter(function (t) { return !pubStop.has(t); });
       const pubJoined = rawPubTokens.join("");
       const acronyms = new Set();
-      const parenRe = /\\(([A-Za-zÆØÅæøå0-9]{2,12})\\)/g;
+      const parenRe = /\\(([\\p{L}\\p{N}]{2,12})\\)/gu;
       let pm;
       while ((pm = parenRe.exec(pubStr)) !== null) {
         acronyms.add(normClientAscii(pm[1]).replace(/[^a-z0-9]/g, ""));
       }
-      const upperRe = /\\b([A-ZÆØÅ]{2,10})\\b/g;
+      const upperRe = /(?:^|[^\\p{L}\\p{N}])([\\p{Lu}]{2,10})(?=$|[^\\p{L}\\p{N}])/gu;
       let um;
       while ((um = upperRe.exec(pubStr)) !== null) {
         acronyms.add(normClientAscii(um[1]).replace(/[^a-z0-9]/g, ""));
@@ -12949,48 +13024,52 @@ const A2UI_STUDIO_JS = `
       if (rawPubTokens.length >= 2) {
         acronyms.add(rawPubTokens.map(function (t) { return t[0]; }).join(""));
       }
+      if (allTokens.length >= 2 && allTokens.length <= 6) {
+        acronyms.add(allTokens.map(function (t) { return t[0]; }).join(""));
+      }
       if (acronyms.has(hp)) return true;
       let acMatch = false;
       acronyms.forEach(function (ac) {
         if (ac.length >= 3 && (hp.indexOf(ac) !== -1 || ac.indexOf(hp) !== -1)) acMatch = true;
       });
       if (acMatch) return true;
-      const tokenPool = strictLeading ? allTokens : rawPubTokens;
-      for (let k = 0; k < tokenPool.length; k++) {
-        if (strictLeading) {
-          if (k > 1) break;
-          if (k === 1 && (allTokens.length !== 2 || pubStop.has(allTokens[0]))) continue;
-        }
-        const pt = tokenPool[k];
-        if (pubStop.has(pt)) continue;
-        if (pt === hp) return true;
-        if (pt.length >= 4 && hp.indexOf(pt) !== -1) return true;
-        if (hp.length >= 4 && pt.indexOf(hp) !== -1) return true;
-      }
-      if (
-        (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) &&
-        hp.length >= 4 &&
-        pubJoined.indexOf(hp[0]) === 0 &&
-        pubJoined.indexOf(hp.slice(1)) !== -1
-      ) {
-        return true;
-      }
-      if (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) {
-        for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
-          if (
-            pubJoined.indexOf(hp.slice(0, splitAt)) === 0 &&
-            pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
-          ) {
-            return true;
+      if (strictLeading) {
+        let firstPrepIdx = -1;
+        for (let fi = 0; fi < trimmedLead.length; fi++) {
+          if (prepTokens.has(trimmedLead[fi])) {
+            firstPrepIdx = fi;
+            break;
           }
         }
+        const prePrep = firstPrepIdx === -1 ? trimmedLead : trimmedLead.slice(0, firstPrepIdx);
+        for (let k = 0; k < Math.min(2, prePrep.length); k++) {
+          if (k === 1 && (prePrep.length !== 2 || firstPrepIdx !== -1)) continue;
+          const pt = prePrep[k];
+          if (pubStop.has(pt)) continue;
+          if (pt === hp) return true;
+          if (pt.length >= 4 && hp.indexOf(pt) !== -1) return true;
+          if (hp.length >= 4 && pt.indexOf(hp) !== -1) return true;
+        }
+      } else {
+        for (let k = 0; k < rawPubTokens.length; k++) {
+          const pt = rawPubTokens[k];
+          if (pt === hp) return true;
+          if (pt.length >= 4 && hp.indexOf(pt) !== -1) return true;
+          if (hp.length >= 4 && pt.indexOf(hp) !== -1) return true;
+        }
       }
-      if (
-        (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) &&
-        rawPubTokens.length >= 2 &&
-        hp.length >= 3 &&
-        hp.length <= 8
-      ) {
+      if (hp.length >= 4 && pubJoined.indexOf(hp[0]) === 0 && pubJoined.indexOf(hp.slice(1)) !== -1) {
+        return true;
+      }
+      for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
+        if (
+          pubJoined.indexOf(hp.slice(0, splitAt)) === 0 &&
+          pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
+        ) {
+          return true;
+        }
+      }
+      if (rawPubTokens.length >= 2 && hp.length >= 3 && hp.length <= 8) {
         function matchClientSyllabicTokens(tokIdx, hpIdx) {
           if (tokIdx === rawPubTokens.length) return hpIdx === hp.length;
           if (hpIdx >= hp.length) return false;
@@ -13026,25 +13105,31 @@ const A2UI_STUDIO_JS = `
       if (rawPrefix && !/\\s+(?:[|–—]|-\\s)\\s+/.test(rawPrefix)) {
         const leadOrg = rawPrefix.split(/\\s*[/:\u2215]\\s*/)[0].trim();
         const leadWords = leadOrg.split(/\\s+/).filter(Boolean);
-        const isDocGenrePrefix =
-          /^(?:lov|forskrift|veileder|veiledning|retningslinjer|rundskriv|rapport|kapittel|del|act|law|regulation|statute|directive|ordinance|guidance|guide|report|form)\\b/i.test(
-            leadOrg
-          );
-        if (leadWords.length >= 1 && leadWords.length <= 7 && !isDocGenrePrefix) {
-          const primaryHostToken = hostTokens[hostTokens.length - 1];
-          const srcIdStartsWithHost = srcIdLower.indexOf(primaryHostToken + "-") === 0;
-          const leadAcronyms = new Set();
-          const leadParenRe = /\\(([A-Za-zÆØÅæøå0-9]{2,12})\\)/g;
-          let lpm;
-          while ((lpm = leadParenRe.exec(leadOrg)) !== null) {
-            leadAcronyms.add(normClientAscii(lpm[1]).replace(/[^a-z0-9]/g, ""));
-          }
-          const leadUpperRe = /\\b([A-ZÆØÅ]{2,10})\\b/g;
-          let lum;
-          while ((lum = leadUpperRe.exec(leadOrg)) !== null) {
-            leadAcronyms.add(normClientAscii(lum[1]).replace(/[^a-z0-9]/g, ""));
-          }
-          const leadHasHostAcronym = leadAcronyms.has(primaryHostToken);
+        const leadNorm = normClientAscii(leadOrg);
+        const primaryHostToken = hostTokens[hostTokens.length - 1];
+        const srcIdStartsWithHost = srcIdLower.indexOf(primaryHostToken + "-") === 0;
+        const leadAcronyms = new Set();
+        const leadParenRe = /\\(([\\p{L}\\p{N}]{2,12})\\)/gu;
+        let lpm;
+        while ((lpm = leadParenRe.exec(leadOrg)) !== null) {
+          leadAcronyms.add(normClientAscii(lpm[1]).replace(/[^a-z0-9]/g, ""));
+        }
+        const leadUpperRe = /(?:^|[^\\p{L}\\p{N}])([\\p{Lu}]{2,10})(?=$|[^\\p{L}\\p{N}])/gu;
+        let lum;
+        while ((lum = leadUpperRe.exec(leadOrg)) !== null) {
+          leadAcronyms.add(normClientAscii(lum[1]).replace(/[^a-z0-9]/g, ""));
+        }
+        const leadHasHostAcronym = leadAcronyms.has(primaryHostToken);
+        const isStatuteOrDocTitle =
+          !srcIdStartsWithHost &&
+          !leadHasHostAcronym &&
+          (/^(?:lov|forskrift|veileder|veiledning|retningslinjer|rundskriv|rapport|kapittel|del|act|law|regulation|statute|directive|ordinance|guidance|guide|report|form|gesetz|verordnung|loi|decret|ley|decreto)\\b/.test(
+            leadNorm
+          ) ||
+            /(?:loven|forskriften|\\s+(?:act|law|statute|regulation|directive|ordinance|gesetz|verordnung))$/.test(
+              leadNorm
+            ));
+        if (leadWords.length >= 1 && leadWords.length <= 7 && !isStatuteOrDocTitle) {
           const allHostTokensAccounted =
             hostTokens.length === 1 ||
             srcIdStartsWithHost ||
@@ -21531,6 +21616,41 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       title: 'Norske barnehager – Lovdata',
       url: 'https://www.barnehage.no/dokumenter/barnehageloven.pdf',
     });
+    const provIntlArticleOrg = inspectSourceDomainProvenance({
+      id: 'climate-emissions',
+      title: 'The Guardian – Global methane emissions hit record high',
+      resource: 'https://www.theguardian.com/environment/methane-emissions',
+    });
+    const provIntlDutchInitialism = inspectSourceDomainProvenance({
+      id: 'financial-stability',
+      title: 'De Nederlandsche Bank – Financial Stability in Autumn',
+      resource: 'https://www.dnb.nl/en/publications/financial-stability/',
+    });
+    const provIntlUkSecondLevel = inspectSourceDomainProvenance({
+      id: 'lunar-basalt',
+      title: 'Royal Astronomical Society – Lunar Basalt Isotopes',
+      resource: 'https://ras.ac.uk/news-and-press/lunar-basalt',
+    });
+    const provIntlJpCcTld = inspectSourceDomainProvenance({
+      id: 'hayabusa2-sample',
+      title: 'Ryugu Asteroid Sample Curation – Japan Aerospace Exploration Agency (JAXA)',
+      resource: 'https://www.jaxa.jp/projects/sas/hayabusa2/index_e.html',
+    });
+    const provAdvStatuteActMirror = inspectSourceDomainProvenance({
+      id: 'commercial-act',
+      title: 'Spaceflight Act – Federal Aviation Administration',
+      resource: 'https://www.spaceflight.com/uploads/commercial-spaceflight-act.pdf',
+    });
+    const clientProvIntlArticleOrg = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'climate-emissions',
+      title: 'The Guardian – Global methane emissions hit record high',
+      url: 'https://www.theguardian.com/environment/methane-emissions',
+    });
+    const clientProvAdvStatuteActMirror = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'commercial-act',
+      title: 'Spaceflight Act – Federal Aviation Administration',
+      url: 'https://www.spaceflight.com/uploads/commercial-spaceflight-act.pdf',
+    });
     assert(
       provMirrorPdf.domainMismatch === true &&
         provMirrorPdf.hostname === 'dyrebo.barnehage.no' &&
@@ -21551,21 +21671,30 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         provPubFirstDsb.domainMismatch === false &&
         provPubFirstDibkNoAcronym.domainMismatch === false &&
         provPubFirstTwoWordOrg.domainMismatch === false &&
+        provIntlArticleOrg.domainMismatch === false &&
+        provIntlDutchInitialism.domainMismatch === false &&
+        provIntlUkSecondLevel.domainMismatch === false &&
+        provIntlJpCcTld.domainMismatch === false &&
         provAdvSubdomainMirrorNoIdSlug.domainMismatch === true &&
         provAdvSubdomainMirrorNoIdSlug.claimedPublisher === 'Lovdata' &&
         provAdvRootMirrorSinglePub.domainMismatch === true &&
         provAdvRootMirrorSinglePub.claimedPublisher === 'Lovdata' &&
         provAdvPrepositionMirror.domainMismatch === true &&
         provAdvPrepositionMirror.claimedPublisher === 'U.S. Department of Education' &&
+        provAdvStatuteActMirror.domainMismatch === true &&
+        provAdvStatuteActMirror.claimedPublisher === 'Federal Aviation Administration' &&
         clientProvMirror.domainMismatch === true &&
         clientProvMirror.claimedPublisher === 'Lovdata' &&
         clientProvUdir.domainMismatch === false &&
         clientProvDibk.domainMismatch === false &&
         clientProvPubFirstDsb.domainMismatch === false &&
+        clientProvIntlArticleOrg.domainMismatch === false &&
         clientProvAdvSubdomainMirror.domainMismatch === true &&
         clientProvAdvSubdomainMirror.claimedPublisher === 'Lovdata' &&
         clientProvAdvRootMirrorSinglePub.domainMismatch === true &&
-        clientProvAdvRootMirrorSinglePub.claimedPublisher === 'Lovdata',
+        clientProvAdvRootMirrorSinglePub.claimedPublisher === 'Lovdata' &&
+        clientProvAdvStatuteActMirror.domainMismatch === true &&
+        clientProvAdvStatuteActMirror.claimedPublisher === 'Federal Aviation Administration',
       `inspectSourceDomainProvenance and inspectClientSourceDomainProvenance flag third-party mirrors masquerading as authorities while allowing true domains, acronyms, compound abbreviations, syllabic initialisms, Publisher-First titles, and umbrella portals`
     );
 
