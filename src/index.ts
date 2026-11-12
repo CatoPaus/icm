@@ -964,7 +964,204 @@ export function decodeHtmlEntities(text: string): string {
     .replace(/&amp;/gi, '&');
 }
 
-// Helper function to extract the destination URL (and opportunistic Last-Modified header) from Vertex AI Search grounding 302 redirects.
+function parseSaneDocTimestamp(val: any): string | undefined {
+  const iso = parseValidIsoTimestamp(val);
+  if (!iso) return undefined;
+  const yr = Number(iso.slice(0, 4));
+  const maxYr = new Date().getUTCFullYear() + 2;
+  if (!Number.isFinite(yr) || yr < 1970 || yr > maxYr) return undefined;
+  return iso;
+}
+
+/**
+ * Extracts standard W3C / OpenGraph / Dublin Core / Schema.org document modification
+ * (or fallback publication) timestamps from an HTML `<head>` / JSON-LD snippet.
+ * Zero domain/keyword heuristics — purely protocol-level metadata (`OKF v0.2` §5.1 `last_modified`).
+ */
+export function extractHtmlModifiedFromSnippet(htmlSnippet: string): string | undefined {
+  if (!htmlSnippet || typeof htmlSnippet !== 'string') return undefined;
+
+  const findMetaContent = (keys: Set<string>): string | undefined => {
+    const metaTagRe = /<meta\b[^>]*>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = metaTagRe.exec(htmlSnippet)) !== null) {
+      const tag = m[0];
+      const attrMatch = tag.match(/\b(?:property|name|http-equiv|itemprop)\s*=\s*["']([^"']+)["']/i);
+      const contentMatch = tag.match(/\bcontent\s*=\s*["']([^"']+)["']/i);
+      if (attrMatch && contentMatch) {
+        const key = attrMatch[1].trim().toLowerCase();
+        if (keys.has(key)) {
+          const parsed = parseSaneDocTimestamp(decodeHtmlEntities(contentMatch[1]));
+          if (parsed) return parsed;
+        }
+      }
+    }
+    return undefined;
+  };
+
+  const findTimeItemprop = (propLower: string): string | undefined => {
+    const timeTagRe = /<time\b[^>]*>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = timeTagRe.exec(htmlSnippet)) !== null) {
+      const tag = m[0];
+      const propMatch = tag.match(/\bitemprop\s*=\s*["']([^"']+)["']/i);
+      const dtMatch = tag.match(/\bdatetime\s*=\s*["']([^"']+)["']/i);
+      if (propMatch && dtMatch && propMatch[1].trim().toLowerCase() === propLower) {
+        const parsed = parseSaneDocTimestamp(decodeHtmlEntities(dtMatch[1]));
+        if (parsed) return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const findJsonLdDate = (field: 'dateModified' | 'datePublished'): string | undefined => {
+    const re = new RegExp(`"${field}"\\s*:\\s*"([^"]{8,64})"`, 'i');
+    const m = htmlSnippet.match(re);
+    return m && m[1] ? parseSaneDocTimestamp(decodeHtmlEntities(m[1])) : undefined;
+  };
+
+  const modKeys = new Set([
+    'article:modified_time',
+    'og:updated_time',
+    'dcterms.modified',
+    'dc.date.modified',
+    'last-modified',
+    'datemodified',
+  ]);
+  const explicitMod =
+    findMetaContent(modKeys) || findTimeItemprop('datemodified') || findJsonLdDate('dateModified');
+  if (explicitMod) return explicitMod;
+
+  const pubKeys = new Set([
+    'article:published_time',
+    'dcterms.issued',
+    'dcterms.created',
+    'dc.date',
+    'datepublished',
+  ]);
+  return (
+    findMetaContent(pubKeys) || findTimeItemprop('datepublished') || findJsonLdDate('datePublished')
+  );
+}
+
+/**
+ * Parses an ISO 32000-1 §7.9.4 PDF date string (`D:YYYYMMDDHHmmSSOHH'mm'`, including Quartz `Z00'00'`
+ * and octal `\\047` escapes) or ISO 8601 timestamp into canonical UTC ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`).
+ */
+export function parsePdfDateToIso(raw: string): string | undefined {
+  if (!raw || typeof raw !== 'string') return undefined;
+  const cleaned = raw.replace(/\\047/g, "'").trim();
+  if (!cleaned) return undefined;
+  const body = cleaned.replace(/^D:\s*/i, '');
+  const m = body.match(
+    /^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?(?:\.\d+)?\s*(Z(?:00'?00'?)?|[+-]\d{2}(?:'\d{2}'?|:\d{2}|\d{2})?)?$/i
+  );
+  if (m) {
+    const yyyy = m[1];
+    const mm = m[2] || '01';
+    const dd = m[3] || '01';
+    const hh = m[4] || '00';
+    const min = m[5] || '00';
+    const ss = m[6] || '00';
+    const mmNum = Number(mm);
+    const ddNum = Number(dd);
+    const hhNum = Number(hh);
+    const minNum = Number(min);
+    const ssNum = Number(ss);
+    if (
+      mmNum >= 1 &&
+      mmNum <= 12 &&
+      ddNum >= 1 &&
+      ddNum <= 31 &&
+      hhNum >= 0 &&
+      hhNum <= 23 &&
+      minNum >= 0 &&
+      minNum <= 59 &&
+      ssNum >= 0 &&
+      ssNum <= 60
+    ) {
+      const tzRaw = (m[7] || 'Z').trim();
+      let tz = 'Z';
+      if (tzRaw && !/^Z/i.test(tzRaw)) {
+        const tzMatch = tzRaw.match(/^([+-])(\d{2})(?:[':]?(\d{2})'?)?$/);
+        if (!tzMatch) return undefined;
+        tz = `${tzMatch[1]}${tzMatch[2]}:${tzMatch[3] || '00'}`;
+      }
+      return parseSaneDocTimestamp(`${yyyy}-${mm}-${dd}T${hh}:${min}:${ss}${tz}`);
+    }
+  }
+  return parseSaneDocTimestamp(cleaned);
+}
+
+/**
+ * Extracts ISO 32000 `/Info` (`/ModDate`, fallback `/CreationDate`, both inline `(D:...)` and
+ * indirect `<obj> <gen> R` objects) or Adobe XMP (`xmp:ModifyDate`, fallback `xmp:CreateDate`)
+ * timestamps from a `'latin1'`-decoded PDF byte slice.
+ */
+export function extractPdfModifiedFromLatin1(pdfLatin1: string): string | undefined {
+  if (!pdfLatin1 || typeof pdfLatin1 !== 'string') return undefined;
+
+  const extractByPdfInfoKey = (key: 'ModDate' | 'CreationDate'): string | undefined => {
+    let lastValid: string | undefined;
+    const directRe = new RegExp(`\\/${key}\\s*\\(\\s*([^)\\r\\n]{4,64})\\)`, 'g');
+    let dm: RegExpExecArray | null;
+    while ((dm = directRe.exec(pdfLatin1)) !== null) {
+      const parsed = parsePdfDateToIso(dm[1]);
+      if (parsed) lastValid = parsed;
+    }
+    if (lastValid) return lastValid;
+
+    const refRe = new RegExp(`\\/${key}\\s+(\\d+)\\s+(\\d+)\\s+R\\b`, 'g');
+    let rm: RegExpExecArray | null;
+    const refs: Array<[string, string]> = [];
+    while ((rm = refRe.exec(pdfLatin1)) !== null) {
+      refs.push([rm[1], rm[2]]);
+    }
+    for (let i = refs.length - 1; i >= 0; i--) {
+      const [objNum, genNum] = refs[i];
+      const objRe = new RegExp(
+        `(?:^|[^0-9])${objNum}\\s+${genNum}\\s+obj\\s*\\(\\s*([^)\\r\\n]{4,64})\\)`,
+        'g'
+      );
+      let om: RegExpExecArray | null;
+      let objParsed: string | undefined;
+      while ((om = objRe.exec(pdfLatin1)) !== null) {
+        const p = parsePdfDateToIso(om[1]);
+        if (p) objParsed = p;
+      }
+      if (objParsed) return objParsed;
+    }
+    return undefined;
+  };
+
+  const extractByXmpKey = (tag: 'ModifyDate' | 'CreateDate'): string | undefined => {
+    let lastValid: string | undefined;
+    const elRe = new RegExp(`<(?:xmp|xap):${tag}[^>]*>\\s*([^<]{8,64}?)\\s*<\\/(?:xmp|xap):${tag}>`, 'gi');
+    let em: RegExpExecArray | null;
+    while ((em = elRe.exec(pdfLatin1)) !== null) {
+      const p = parsePdfDateToIso(em[1]);
+      if (p) lastValid = p;
+    }
+    if (lastValid) return lastValid;
+
+    const attrRe = new RegExp(`\\b(?:xmp|xap):${tag}\\s*=\\s*["']([^"']{8,64})["']`, 'gi');
+    let am: RegExpExecArray | null;
+    while ((am = attrRe.exec(pdfLatin1)) !== null) {
+      const p = parsePdfDateToIso(am[1]);
+      if (p) lastValid = p;
+    }
+    return lastValid;
+  };
+
+  return (
+    extractByPdfInfoKey('ModDate') ||
+    extractByXmpKey('ModifyDate') ||
+    extractByPdfInfoKey('CreationDate') ||
+    extractByXmpKey('CreateDate')
+  );
+}
+
+// Helper function to extract the destination URL (and opportunistic Last-Modified / document metadata) from Vertex AI Search grounding 302 redirects.
 // Uses `redirect: 'manual'` first so we read Google's `Location` header directly in ~100ms without
 function extractHtmlTitleFromSnippet(htmlSnippet: string): string | undefined {
   if (!htmlSnippet || typeof htmlSnippet !== 'string') return undefined;
@@ -1014,38 +1211,158 @@ async function resolveRedirect(
   const isNonErrorStatus = (res: any): boolean =>
     res?.status === undefined || (typeof res.status === 'number' && res.status >= 200 && res.status < 400);
 
-  const readTitleFromRes = async (res: any): Promise<string | undefined> => {
+  const inspectResponseMetadata = async (
+    res: any,
+    targetUrl: string,
+    alreadyHasHttpLastModified: boolean
+  ): Promise<{ pageTitle?: string; docModified?: string }> => {
+    if (!isNonErrorStatus(res)) return {};
     const contentType = String(res?.headers?.get?.('content-type') || '').toLowerCase();
-    if (!isNonErrorStatus(res) || (contentType && !contentType.includes('text/html'))) {
-      return undefined;
+    const isDeclaredHtml = contentType.includes('text/html') || contentType.includes('application/xhtml');
+    const isDeclaredPdf = contentType.includes('application/pdf');
+    if (contentType && !isDeclaredHtml && !isDeclaredPdf && !contentType.includes('octet-stream')) {
+      return {};
     }
+
     try {
       if (typeof res?.body?.getReader === 'function') {
         const reader = res.body.getReader();
-        const chunks: Uint8Array[] = [];
-        let totalBytes = 0;
-        while (totalBytes < 16384) {
+        const headChunks: Uint8Array[] = [];
+        let headBytes = 0;
+        const headLimit = isDeclaredPdf ? 16384 : 32768;
+        while (headBytes < headLimit) {
           const { done, value } = await reader.read();
           if (done || !value) break;
-          chunks.push(value);
-          totalBytes += value.byteLength;
-          const partialStr = Buffer.concat(chunks).toString('utf8');
-          if (/<\/title>/i.test(partialStr) || /<\/head>/i.test(partialStr)) {
-            break;
+          headChunks.push(value);
+          headBytes += value.byteLength;
+          if (!isDeclaredPdf) {
+            const partialStr = Buffer.concat(headChunks).toString('utf8');
+            if (
+              /<\/head>/i.test(partialStr) ||
+              (alreadyHasHttpLastModified && /<\/title>/i.test(partialStr)) ||
+              partialStr.startsWith('%PDF-')
+            ) {
+              break;
+            }
           }
         }
-        await reader.cancel().catch(() => {});
-        if (chunks.length > 0) {
-          return extractHtmlTitleFromSnippet(Buffer.concat(chunks).toString('utf8'));
+        if (headChunks.length === 0) {
+          await reader.cancel().catch(() => {});
+          return {};
         }
+
+        const headBuf = Buffer.concat(headChunks);
+        const headLatin1 = headBuf.toString('latin1');
+        const isPdf = isDeclaredPdf || headLatin1.startsWith('%PDF-');
+
+        if (!isPdf) {
+          await reader.cancel().catch(() => {});
+          const headUtf8 = headBuf.toString('utf8');
+          const pageTitle = extractHtmlTitleFromSnippet(headUtf8);
+          const docModified = alreadyHasHttpLastModified
+            ? undefined
+            : extractHtmlModifiedFromSnippet(headUtf8);
+          return {
+            ...(pageTitle ? { pageTitle } : {}),
+            ...(docModified ? { docModified } : {}),
+          };
+        }
+
+        // PDF response (`application/pdf` or `%PDF-` magic header)
+        if (alreadyHasHttpLastModified) {
+          await reader.cancel().catch(() => {});
+          return {};
+        }
+        const headPdfMod = extractPdfModifiedFromLatin1(headLatin1);
+        if (headPdfMod) {
+          await reader.cancel().catch(() => {});
+          return { docModified: headPdfMod };
+        }
+
+        // ISO 32000 `/Info` (`/ModDate`, `/CreationDate`) typically resides near `xref` at the PDF trailer.
+        if (res?.status === 206 && /^https?:\/\//i.test(targetUrl)) {
+          await reader.cancel().catch(() => {});
+          const crHeader = String(res?.headers?.get?.('content-range') || '');
+          const totalMatch = crHeader.match(/\/(\d+)\s*$/);
+          const totalSize = totalMatch ? Number(totalMatch[1]) : 0;
+          if (totalSize > headBytes) {
+            try {
+              const tailStart = Math.max(0, totalSize - 32768);
+              const tailRes = await globalThis.fetch(targetUrl, {
+                method: 'GET',
+                redirect: 'follow',
+                signal: AbortSignal.timeout(1800),
+                headers: {
+                  ...headers,
+                  Range: `bytes=${tailStart}-${totalSize - 1}`,
+                },
+              });
+              if (isNonErrorStatus(tailRes) && typeof tailRes?.arrayBuffer === 'function') {
+                const tailAb = await tailRes.arrayBuffer();
+                const tailMod = extractPdfModifiedFromLatin1(
+                  Buffer.from(tailAb).subarray(-40960).toString('latin1')
+                );
+                if (tailMod) return { docModified: tailMod };
+              } else {
+                await tailRes?.body?.cancel().catch(() => {});
+              }
+            } catch {
+              // Ignore opportunistic PDF tail range timeout
+            }
+          }
+          return {};
+        }
+
+        // Server ignored `Range` and returned `200 OK` (e.g., Varnish CDN): drain open stream up to 4 MB
+        // while retaining only a rolling 40 KB tail window in memory.
+        const clRaw = Number(res?.headers?.get?.('content-length') || 0);
+        const maxDrainBytes = 4 * 1024 * 1024;
+        if (!clRaw || clRaw <= maxDrainBytes) {
+          let totalRead = headBytes;
+          let tailBuf: Buffer = headBuf.length > 40960 ? headBuf.subarray(headBuf.length - 40960) : headBuf;
+          let reachedEof = false;
+          while (totalRead <= maxDrainBytes) {
+            const { done, value } = await reader.read();
+            if (done || !value) {
+              reachedEof = true;
+              break;
+            }
+            totalRead += value.byteLength;
+            const combined = Buffer.concat([tailBuf, value]);
+            tailBuf = combined.length > 40960 ? combined.subarray(combined.length - 40960) : combined;
+          }
+          await reader.cancel().catch(() => {});
+          if (reachedEof || tailBuf.length > 0) {
+            const tailMod = extractPdfModifiedFromLatin1(tailBuf.toString('latin1'));
+            if (tailMod) return { docModified: tailMod };
+          }
+        } else {
+          await reader.cancel().catch(() => {});
+        }
+        return {};
       } else if (typeof res?.text === 'function' && !res?.body) {
-        const txt = await res.text();
-        return extractHtmlTitleFromSnippet(String(txt || '').slice(0, 16384));
+        const txt = String((await res.text()) || '');
+        if (isDeclaredPdf || txt.startsWith('%PDF-')) {
+          const docModified = alreadyHasHttpLastModified
+            ? undefined
+            : extractPdfModifiedFromLatin1(txt.slice(0, 32768)) ||
+              extractPdfModifiedFromLatin1(txt.slice(-40960));
+          return docModified ? { docModified } : {};
+        }
+        const snippet = txt.slice(0, 32768);
+        const pageTitle = extractHtmlTitleFromSnippet(snippet);
+        const docModified = alreadyHasHttpLastModified
+          ? undefined
+          : extractHtmlModifiedFromSnippet(snippet);
+        return {
+          ...(pageTitle ? { pageTitle } : {}),
+          ...(docModified ? { docModified } : {}),
+        };
       }
     } catch {
-      // Ignore stream read errors when opportunistically extracting <title>
+      // Ignore stream read errors when opportunistically extracting <title> / document timestamps
     }
-    return undefined;
+    return {};
   };
 
   try {
@@ -1068,7 +1385,7 @@ async function resolveRedirect(
           const destRes = await globalThis.fetch(location, {
             method: 'GET',
             redirect: 'follow',
-            signal: AbortSignal.timeout(2000),
+            signal: AbortSignal.timeout(2500),
             headers: {
               ...headers,
               Range: 'bytes=0-16383',
@@ -1080,7 +1397,15 @@ async function resolveRedirect(
           if (!lastModified && isNonErrorStatus(destRes)) {
             lastModified = parseHttpLastModified(destRes?.headers?.get?.('last-modified'));
           }
-          pageTitle = await readTitleFromRes(destRes);
+          const destMeta = await inspectResponseMetadata(
+            destRes,
+            finalLocation,
+            Boolean(lastModified)
+          );
+          pageTitle = destMeta.pageTitle;
+          if (!lastModified && destMeta.docModified) {
+            lastModified = destMeta.docModified;
+          }
           await destRes?.body?.cancel().catch(() => {});
         } catch {
           // Ignore unreachable third-party servers or timeout during opportunistic title/header check
@@ -1088,13 +1413,22 @@ async function resolveRedirect(
       }
       return { url: finalLocation, lastModified, ...(pageTitle ? { pageTitle } : {}) };
     }
-    const directPageTitle = await readTitleFromRes(manualRes);
+    const directMeta = await inspectResponseMetadata(
+      manualRes,
+      manualRes.url || url,
+      Boolean(lastModified)
+    );
+    if (!lastModified && directMeta.docModified) {
+      lastModified = directMeta.docModified;
+    }
     await manualRes.body?.cancel().catch(() => {});
-    if (lastModified || directPageTitle) {
+    const isDirect2xx =
+      typeof manualRes.status === 'number' && manualRes.status >= 200 && manualRes.status < 300;
+    if (isDirect2xx || lastModified || directMeta.pageTitle) {
       return {
         url: manualRes.url || url,
         lastModified,
-        ...(directPageTitle ? { pageTitle: directPageTitle } : {}),
+        ...(directMeta.pageTitle ? { pageTitle: directMeta.pageTitle } : {}),
       };
     }
   } catch {
@@ -1108,12 +1442,23 @@ async function resolveRedirect(
       signal: AbortSignal.timeout(6000),
       headers,
     });
-    const pageTitle = await readTitleFromRes(followRes);
-    await followRes.body?.cancel().catch(() => {});
-    const lastModified = isNonErrorStatus(followRes)
+    let lastModified = isNonErrorStatus(followRes)
       ? parseHttpLastModified(followRes.headers?.get?.('last-modified'))
       : undefined;
-    return { url: followRes.url || url, lastModified, ...(pageTitle ? { pageTitle } : {}) };
+    const followMeta = await inspectResponseMetadata(
+      followRes,
+      followRes.url || url,
+      Boolean(lastModified)
+    );
+    if (!lastModified && followMeta.docModified) {
+      lastModified = followMeta.docModified;
+    }
+    await followRes.body?.cancel().catch(() => {});
+    return {
+      url: followRes.url || url,
+      lastModified,
+      ...(followMeta.pageTitle ? { pageTitle: followMeta.pageTitle } : {}),
+    };
   } catch {
     return { url };
   }
@@ -3313,17 +3658,59 @@ export function curateOkfSources(
     (s) => s && !rejectSet.has(String(s.id || '').trim())
   );
 
-  // Register human-added sources BEFORE resolving `replaceSourceMap` so `--replace-source oldId=<addedUrlOrId>` resolves cleanly
+  const parseInlineReplaceUrlSpec = (
+    specRaw: string
+  ): { url: string; title?: string; id?: string } | undefined => {
+    let rest = String(specRaw || '').trim();
+    let customId: string | undefined;
+    const idPrefix = rest.match(/^id=([A-Za-z0-9_\-]+)\|([\s\S]+)$/i);
+    if (idPrefix) {
+      customId = idPrefix[1].trim();
+      rest = idPrefix[2].trim();
+    }
+    if (!/^https?:\/\//i.test(rest)) return undefined;
+    const pipeIdx = rest.indexOf('|');
+    const url = (pipeIdx !== -1 ? rest.slice(0, pipeIdx) : rest).trim();
+    const title = pipeIdx !== -1 ? rest.slice(pipeIdx + 1).trim() : '';
+    if (!url) return undefined;
+    return {
+      url,
+      ...(title ? { title } : {}),
+      ...(customId ? { id: customId } : {}),
+    };
+  };
+
+  // Register human-added sources (plus any standalone `https://...` targets in `replaceSourceMap`)
+  // BEFORE resolving `replaceSourceMap` so `--replace-source oldId=https://...` works standalone without `--add-source`
   const addedSources: OKFSource[] = [];
   const existingMatchIdsToWeave: string[] = [];
-  const addList = Array.isArray(options?.addSources) ? options.addSources : [];
+  const baseAddList = Array.isArray(options?.addSources) ? options.addSources : [];
   const existingByCanonUrl = new Map<string, OKFSource>();
   for (const s of remainingSources) {
     const cUrl = normalizeCanonicalSourceUrl(String(s.resource || s.url || ''));
     if (cUrl) existingByCanonUrl.set(cUrl, s);
   }
 
-  if (addList.length > 0) {
+  const effectiveAddList = [...baseAddList];
+  const queuedCanonUrls = new Set<string>(
+    effectiveAddList
+      .map((item) => {
+        const u = String(item?.url || '').trim();
+        return u ? normalizeCanonicalSourceUrl(u) || u : '';
+      })
+      .filter(Boolean)
+  );
+  for (const [, targetSpec] of rawReplaceEntries) {
+    const parsedUrlTarget = parseInlineReplaceUrlSpec(targetSpec);
+    if (!parsedUrlTarget) continue;
+    const canonTarget = normalizeCanonicalSourceUrl(parsedUrlTarget.url) || parsedUrlTarget.url;
+    if (!existingByCanonUrl.has(canonTarget) && !queuedCanonUrls.has(canonTarget)) {
+      effectiveAddList.push(parsedUrlTarget);
+      queuedCanonUrls.add(canonTarget);
+    }
+  }
+
+  if (effectiveAddList.length > 0) {
     const nowIso = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     const usedIds = new Set<string>([
       ...remainingSources.map((s) => String(s?.id || '').trim()).filter(Boolean),
@@ -3333,7 +3720,7 @@ export function curateOkfSources(
       usedIds.add(m[1]);
     }
 
-    for (const item of addList) {
+    for (const item of effectiveAddList) {
       const rawUrl = String(item?.url || '').trim();
       if (!rawUrl) continue;
       const rawLastMod = item.lastModified || item.last_modified;
@@ -3393,9 +3780,15 @@ export function curateOkfSources(
     }
     for (const [oldId, targetSpec] of rawReplaceEntries) {
       let resolvedTarget: OKFSource | undefined = activeById.get(targetSpec);
-      if (!resolvedTarget && /^https?:\/\//i.test(targetSpec)) {
-        const canonTarget = normalizeCanonicalSourceUrl(targetSpec) || targetSpec;
-        resolvedTarget = existingByCanonUrl.get(canonTarget);
+      if (!resolvedTarget) {
+        const parsedUrlTarget = parseInlineReplaceUrlSpec(targetSpec);
+        if (parsedUrlTarget) {
+          const canonTarget =
+            normalizeCanonicalSourceUrl(parsedUrlTarget.url) || parsedUrlTarget.url;
+          resolvedTarget =
+            existingByCanonUrl.get(canonTarget) ||
+            (parsedUrlTarget.id ? activeById.get(parsedUrlTarget.id) : undefined);
+        }
       }
       if (resolvedTarget && resolvedTarget.id && resolvedTarget.id !== oldId) {
         const newId = resolvedTarget.id;
@@ -10970,12 +11363,18 @@ body {
   background: #fff7ed;
   border: 1px solid #fdba74;
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #7c2d12;
+}
+.okf-replace-select-wrap {
+  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
-  font-size: 11.5px;
-  color: #7c2d12;
 }
 .okf-replace-select {
   flex: 1;
@@ -10986,6 +11385,27 @@ body {
   background: #fff;
   font-size: 11.5px;
   color: #0f172a;
+}
+.okf-replace-url-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.okf-replace-url-input {
+  flex: 1;
+  min-width: 190px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  border: 1px solid #fb923c;
+  background: #fff;
+  font-size: 11.5px;
+  color: #0f172a;
+}
+.okf-replace-url-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 .okf-md-outer {
   display: flex;
@@ -12048,8 +12468,13 @@ const A2UI_STUDIO_JS = `
     if (rejected.length > 0) {
       cliParts.push("--reject-source " + rejected.join(","));
     }
-    if (replacePairs.length > 0) {
-      cliParts.push("--replace-source " + replacePairs.join(","));
+    for (let rpIdx = 0; rpIdx < replacePairs.length; rpIdx++) {
+      const rp = replacePairs[rpIdx];
+      cliParts.push(
+        /[\\s|&;()"]/.test(rp)
+          ? '--replace-source "' + rp.replace(/"/g, '\\\\"') + '"'
+          : "--replace-source " + rp
+      );
     }
     for (let i = 0; i < added.length; i++) {
       const item = added[i];
@@ -12154,7 +12579,15 @@ const A2UI_STUDIO_JS = `
       {},
       resolvePointer(surface.dataModel, "/okf/replacedSources") || {}
     );
-    const cleanTarget = String(newTarget || "").trim();
+    let cleanTarget = String(newTarget || "").trim();
+    if (
+      cleanTarget &&
+      !/^[A-Za-z0-9_\\-]+$/.test(cleanTarget) &&
+      !/^https?:\\/\\//i.test(cleanTarget) &&
+      /^[a-z0-9.-]+\\.[a-z]{2,}\\/\\S*$/i.test(cleanTarget)
+    ) {
+      cleanTarget = "https://" + cleanTarget;
+    }
     if (!cleanTarget || cleanTarget === cleanOld) {
       delete currentMap[cleanOld];
     } else {
@@ -14602,47 +15035,95 @@ const A2UI_STUDIO_JS = `
           actionRow.appendChild(rejBtn);
           sc.appendChild(actionRow);
 
-          if (isRej && citeStats.mentionCount > 0 && activeSourcesList.length > 0) {
+          if (isRej && citeStats.mentionCount > 0) {
             const replRow = document.createElement("div");
             replRow.className = "okf-replace-row";
+            const selectWrap = document.createElement("div");
+            selectWrap.className = "okf-replace-select-wrap";
             const replLbl = document.createElement("label");
             replLbl.style.fontWeight = "600";
             replLbl.textContent = isNo
               ? "🔀 Erstatt " + citeStats.mentionCount + " sitering(er) med:"
               : "🔀 Replace " + citeStats.mentionCount + " citation(s) with:";
-            const replSelect = document.createElement("select");
-            replSelect.className = "okf-replace-select";
-            replSelect.setAttribute("data-src-id", rawId);
-            const defaultOpt = document.createElement("option");
-            defaultOpt.value = "";
-            defaultOpt.textContent = isNo
-              ? "(La AGY velge / fjern fotnote)"
-              : "(Let AGY choose / strip footnote)";
-            replSelect.appendChild(defaultOpt);
-            activeSourcesList.forEach(function (actSrc) {
-              const actId = String(actSrc.id || "");
-              const actUrl = String(actSrc.url || actSrc.resource || "");
-              const optVal = actSrc.addedByHuman && actUrl ? actUrl : actId;
-              if (!optVal) return;
-              const opt = document.createElement("option");
-              opt.value = optVal;
-              const shortT = String(actSrc.title || actUrl || actId);
-              opt.textContent =
-                (actSrc.addedByHuman ? "➕ " : "") +
-                "[^" +
-                actId +
-                "] " +
-                (shortT.length > 52 ? shortT.slice(0, 52) + "…" : shortT);
-              if (replacedTarget === optVal || replacedTarget === actId) {
-                opt.selected = true;
+            selectWrap.appendChild(replLbl);
+
+            let matchedDropdownOption = false;
+            if (activeSourcesList.length > 0 || replacedTarget) {
+              const replSelect = document.createElement("select");
+              replSelect.className = "okf-replace-select";
+              replSelect.setAttribute("data-src-id", rawId);
+              const defaultOpt = document.createElement("option");
+              defaultOpt.value = "";
+              defaultOpt.textContent = isNo
+                ? "(La AGY velge / fjern fotnote)"
+                : "(Let AGY choose / strip footnote)";
+              replSelect.appendChild(defaultOpt);
+              activeSourcesList.forEach(function (actSrc) {
+                const actId = String(actSrc.id || "");
+                const actUrl = String(actSrc.url || actSrc.resource || "");
+                const optVal = actSrc.addedByHuman && actUrl ? actUrl : actId;
+                if (!optVal) return;
+                const opt = document.createElement("option");
+                opt.value = optVal;
+                const shortT = String(actSrc.title || actUrl || actId);
+                opt.textContent =
+                  (actSrc.addedByHuman ? "➕ " : "") +
+                  "[^" +
+                  actId +
+                  "] " +
+                  (shortT.length > 52 ? shortT.slice(0, 52) + "…" : shortT);
+                if (replacedTarget === optVal || replacedTarget === actId) {
+                  opt.selected = true;
+                  matchedDropdownOption = true;
+                }
+                replSelect.appendChild(opt);
+              });
+              if (replacedTarget && !matchedDropdownOption) {
+                const customUrlOpt = document.createElement("option");
+                customUrlOpt.value = replacedTarget;
+                customUrlOpt.textContent =
+                  "🌐 " +
+                  (replacedTarget.length > 58
+                    ? replacedTarget.slice(0, 58) + "…"
+                    : replacedTarget);
+                customUrlOpt.selected = true;
+                replSelect.appendChild(customUrlOpt);
               }
-              replSelect.appendChild(opt);
+              replSelect.addEventListener("change", function () {
+                setReplaceSourceInStudio(surface, rawId, replSelect.value);
+              });
+              selectWrap.appendChild(replSelect);
+            }
+            replRow.appendChild(selectWrap);
+
+            const urlWrap = document.createElement("div");
+            urlWrap.className = "okf-replace-url-wrap";
+            const urlInput = document.createElement("input");
+            urlInput.type = "url";
+            urlInput.className = "okf-replace-url-input";
+            urlInput.setAttribute("data-src-id", rawId);
+            urlInput.placeholder = isNo
+              ? "Eller lim inn gjeldende https://-lenke direkte (1 steg)…"
+              : "Or paste canonical https:// URL directly (1 step)…";
+            if (replacedTarget && !matchedDropdownOption && /^https?:\\/\\//i.test(replacedTarget)) {
+              urlInput.value = replacedTarget;
+            }
+            const urlBtn = document.createElement("button");
+            urlBtn.type = "button";
+            urlBtn.className = "a2ui-btn okf-replace-url-btn";
+            urlBtn.textContent = isNo ? "Bruk lenke" : "Use URL";
+            urlBtn.addEventListener("click", function () {
+              setReplaceSourceInStudio(surface, rawId, urlInput.value);
             });
-            replSelect.addEventListener("change", function () {
-              setReplaceSourceInStudio(surface, rawId, replSelect.value);
+            urlInput.addEventListener("keydown", function (ev) {
+              if (ev && ev.key === "Enter") {
+                ev.preventDefault();
+                setReplaceSourceInStudio(surface, rawId, urlInput.value);
+              }
             });
-            replRow.appendChild(replLbl);
-            replRow.appendChild(replSelect);
+            urlWrap.appendChild(urlInput);
+            urlWrap.appendChild(urlBtn);
+            replRow.appendChild(urlWrap);
             sc.appendChild(replRow);
           }
         }
@@ -18358,10 +18839,88 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     'extractHtmlTitleFromSnippet extracts and decodes og:title and <title> from HTML snippets'
   );
 
+  assert(
+    extractHtmlModifiedFromSnippet(
+      '<html><head><meta property="article:modified_time" content="2023-11-04T14:22:10+01:00"></head></html>'
+    ) === '2023-11-04T13:22:10Z' &&
+      extractHtmlModifiedFromSnippet(
+        '<html><head><script type="application/ld+json">{"@type":"WebPage","dateModified":"2025-02-18T08:00:00Z"}</script></head></html>'
+      ) === '2025-02-18T08:00:00Z' &&
+      extractHtmlModifiedFromSnippet(
+        '<html><head><meta name="dcterms.issued" content="2019-06-01"></head></html>'
+      ) === '2019-06-01T00:00:00Z' &&
+      parsePdfDateToIso("D:20170830125340Z00'00'") === '2017-08-30T12:53:40Z' &&
+      parsePdfDateToIso("D:20170701120000+02'00'") === '2017-07-01T10:00:00Z' &&
+      extractPdfModifiedFromLatin1(
+        "%PDF-1.3\n422 0 obj\n(D:20170830125340Z00'00')\nendobj\n1 0 obj\n<< /CreationDate 422 0 R /ModDate 422 0 R >>\nendobj"
+      ) === '2017-08-30T12:53:40Z' &&
+      extractPdfModifiedFromLatin1(
+        '%PDF-1.7\n<x:xmpmeta><rdf:Description><xmp:ModifyDate>2022-09-15T16:45:00+02:00</xmp:ModifyDate></rdf:Description></x:xmpmeta>'
+      ) === '2022-09-15T14:45:00Z',
+    'extractHtmlModifiedFromSnippet, parsePdfDateToIso, and extractPdfModifiedFromLatin1 parse W3C/OpenGraph/JSON-LD/DublinCore and ISO 32000 direct/indirect PDF + Adobe XMP timestamps'
+  );
+
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const mockPdfTrailer =
+      "\n422 0 obj\n(D:20170830125340Z00'00')\nendobj\n1 0 obj\n<< /CreationDate 422 0 R /ModDate 422 0 R >>\nendobj\n%%EOF";
+    const mockPdfBody90k = '%PDF-1.3\n' + 'A'.repeat(90000) + mockPdfTrailer;
+
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const reqUrl = String(input);
+      const rangeHdr =
+        (init?.headers && typeof init.headers === 'object' && !Array.isArray(init.headers)
+          ? (init.headers as Record<string, string>)['Range'] ||
+            (init.headers as Record<string, string>)['range']
+          : '') || '';
+      if (reqUrl.includes('vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQ_pdf206')) {
+        return new Response('', {
+          status: 302,
+          headers: { location: 'https://example.gov/archive/2017_edition_206.pdf' },
+        });
+      }
+      if (reqUrl === 'https://example.gov/archive/2017_edition_206.pdf') {
+        const total = mockPdfBody90k.length;
+        if (rangeHdr.startsWith('bytes=0-')) {
+          return new Response(Buffer.from(mockPdfBody90k.slice(0, 16384), 'latin1'), {
+            status: 206,
+            headers: {
+              'content-type': 'application/pdf',
+              'content-range': `bytes 0-16383/${total}`,
+            },
+          });
+        }
+        const tailMatch = rangeHdr.match(/^bytes=(\d+)-(\d+)$/);
+        if (tailMatch) {
+          const s = Number(tailMatch[1]);
+          const e = Number(tailMatch[2]) + 1;
+          return new Response(Buffer.from(mockPdfBody90k.slice(s, e), 'latin1'), {
+            status: 206,
+            headers: {
+              'content-type': 'application/pdf',
+              'content-range': `bytes ${s}-${e - 1}/${total}`,
+            },
+          });
+        }
+      }
+      if (reqUrl === 'https://example.gov/archive/2017_edition_varnish200.pdf') {
+        return new Response(Buffer.from(mockPdfBody90k, 'latin1'), {
+          status: 200,
+          headers: {
+            'content-type': 'application/pdf',
+            'content-length': String(mockPdfBody90k.length),
+          },
+        });
+      }
+      if (reqUrl === 'https://example.gov/rules/html_meta_only') {
+        return new Response(
+          '<html><head><title>Current Regulation &#8211; § 11-12</title><meta property="article:modified_time" content="2026-01-10T09:00:00Z"></head></html>',
+          {
+            status: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+          }
+        );
+      }
       if (reqUrl.includes('vertexaisearch.cloud.google.com/grounding-api-redirect/')) {
         return new Response('', {
           status: 302,
@@ -18382,11 +18941,23 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     const redirectResult = await resolveRedirect(
       'https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQ_mock'
     );
+    const pdf206Result = await resolveRedirect(
+      'https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQ_pdf206'
+    );
+    const pdf200Result = await resolveRedirect(
+      'https://example.gov/archive/2017_edition_varnish200.pdf'
+    );
+    const htmlMetaResult = await resolveRedirect('https://example.gov/rules/html_meta_only');
     assert(
       redirectResult.url === 'https://ntrs.nasa.gov/citations/20240001' &&
         redirectResult.pageTitle === 'NASA Technical Reports Server — Psyche Mission' &&
-        redirectResult.lastModified === '2024-05-15T12:00:00Z',
-      `resolveRedirect follows 302 redirect Location and extracts HTML <title> and Last-Modified from the destination page (got ${JSON.stringify(redirectResult)})`
+        redirectResult.lastModified === '2024-05-15T12:00:00Z' &&
+        pdf206Result.url === 'https://example.gov/archive/2017_edition_206.pdf' &&
+        pdf206Result.lastModified === '2017-08-30T12:53:40Z' &&
+        pdf200Result.lastModified === '2017-08-30T12:53:40Z' &&
+        htmlMetaResult.pageTitle === 'Current Regulation – § 11-12' &&
+        htmlMetaResult.lastModified === '2026-01-10T09:00:00Z',
+      `resolveRedirect extracts HTTP Last-Modified, HTML <meta> modified timestamps, and ISO 32000 PDF trailer timestamps across both 206 Range and 200 full-stream responses`
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -19814,13 +20385,46 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       `curateOkfSources replaceSourceMap re-anchors citations to existing IDs and newly added URLs with 0 orphan claims, deduplicated footnotes, and no dummy first-paragraph weave`
     );
 
-    // Verify Studio `setReplaceSourceInStudio` + `buildCurationPrompts` + `.okf-replace-select` / `.domain-host` DOM rendering
+    // Verify standalone `replaceSourceMap` URL replacement WITHOUT `addSources` or `rejectSourceIds`
+    const standaloneUrlReplaced = curateOkfSources(replaceInputMd, {
+      replaceSourceMap: {
+        'mirror-forskrift': 'dsb-veiledning',
+        'mirror-barnehageloven':
+          'https://www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/iv/11-12|Byggteknisk forskrift (TEK17) § 11-12 – DiBK',
+      },
+    });
+    const standaloneNewSlug = standaloneUrlReplaced.replacedMap['mirror-barnehageloven'];
+    assert(
+      standaloneUrlReplaced.orphanClaimLines.length === 0 &&
+        standaloneUrlReplaced.addedSources.length === 1 &&
+        Boolean(standaloneNewSlug) &&
+        standaloneUrlReplaced.addedSources[0].resource ===
+          'https://www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/iv/11-12' &&
+        standaloneUrlReplaced.markdown.includes(`§ 9[^${standaloneNewSlug}].`) &&
+        !standaloneUrlReplaced.markdown.includes('mirror-barnehageloven') &&
+        !standaloneUrlReplaced.markdown.includes('mirror-forskrift'),
+      `curateOkfSources auto-registers standalone https:// replacement URLs in replaceSourceMap without requiring a separate addSources call`
+    );
+
+    // Verify Studio `setReplaceSourceInStudio` + `buildCurationPrompts` + 1-step `.okf-replace-url-input`
     s1Hooks.setReplaceSourceInStudio(s1SimSurface, 'svak-blogg-kilde', 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710');
     const replPrompts = s1Hooks.buildCurationPrompts(s1SimSurface);
+    s1Hooks.setReplaceSourceInStudio(
+      s1SimSurface,
+      'svak-blogg-kilde',
+      'www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/iv/11-12'
+    );
+    const bareHostPrompts = s1Hooks.buildCurationPrompts(s1SimSurface);
+    const s1HtmlRendered = fs.readFileSync(multiRunRes.htmlOutputPath, 'utf-8');
     assert(
       replPrompts.cliText.includes('--replace-source svak-blogg-kilde=https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710') &&
-        replPrompts.agyText.includes('--replace-source'),
-      `setReplaceSourceInStudio and buildCurationPrompts emit --replace-source in CLI command and AGY reply`
+        replPrompts.agyText.includes('--replace-source') &&
+        bareHostPrompts.cliText.includes(
+          '--replace-source svak-blogg-kilde=https://www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/iv/11-12'
+        ) &&
+        s1HtmlRendered.includes('okf-replace-url-input') &&
+        s1HtmlRendered.includes('okf-replace-url-btn'),
+      `setReplaceSourceInStudio and buildCurationPrompts support 1-step inline replacement URLs (including bare host/path normalization) and emit --replace-source`
     );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
@@ -20054,6 +20658,39 @@ if (
       return resolvedList;
     };
 
+    const resolveCliCurationInputs = async (): Promise<{
+      addSourcesResolved: Array<{
+        url: string;
+        title?: string;
+        id?: string;
+        lastModified?: string;
+        last_modified?: string;
+      }>;
+      normalizedReplaceSourceMap: Record<string, string>;
+    }> => {
+      const addSourcesResolved = await resolveCliAddedSources(rawAddSourceSpecsCli);
+      const seenCanonUrls = new Set<string>(
+        addSourcesResolved
+          .map((item) => normalizeCanonicalSourceUrl(item.url) || item.url)
+          .filter(Boolean)
+      );
+      const normalizedReplaceSourceMap: Record<string, string> = { ...replaceSourceMapCli };
+      for (const [oldKey, rawTarget] of Object.entries(replaceSourceMapCli)) {
+        if (/^(?:id=[A-Za-z0-9_\-]+\|)?https?:\/\//i.test(rawTarget)) {
+          const [resolvedItem] = await resolveCliAddedSources([rawTarget]);
+          if (resolvedItem && resolvedItem.url) {
+            const canon = normalizeCanonicalSourceUrl(resolvedItem.url) || resolvedItem.url;
+            if (!seenCanonUrls.has(canon)) {
+              addSourcesResolved.push(resolvedItem);
+              seenCanonUrls.add(canon);
+            }
+            normalizedReplaceSourceMap[oldKey] = resolvedItem.id || resolvedItem.url;
+          }
+        }
+      }
+      return { addSourcesResolved, normalizedReplaceSourceMap };
+    };
+
     // Standalone `--verify` execution
     if (hasVerify && !isStage1Only && !isStage2Only && !isFullCli) {
       const verifyIdx = process.argv.indexOf('--verify');
@@ -20083,12 +20720,12 @@ if (
         );
         process.exit(1);
       }
-      const addSourcesResolved = await resolveCliAddedSources(rawAddSourceSpecsCli);
+      const { addSourcesResolved, normalizedReplaceSourceMap } = await resolveCliCurationInputs();
       const verifyResult = verifyOkfConcept(target, {
         workspaceRoot: './workspace',
         by: verifierBy,
         rejectSourceIds: rejectSourceIdsCli,
-        replaceSourceMap: replaceSourceMapCli,
+        replaceSourceMap: normalizedReplaceSourceMap,
         addSources: addSourcesResolved,
       });
       if (hasViz) {
@@ -20148,12 +20785,12 @@ if (
 
     if (isStage2Only) {
       if (hasVerify) {
-        const addSourcesResolved = await resolveCliAddedSources(rawAddSourceSpecsCli);
+        const { addSourcesResolved, normalizedReplaceSourceMap } = await resolveCliCurationInputs();
         verifyOkfConcept(argValue, {
           workspaceRoot: './workspace',
           by: verifierBy,
           rejectSourceIds: rejectSourceIdsCli,
-          replaceSourceMap: replaceSourceMapCli,
+          replaceSourceMap: normalizedReplaceSourceMap,
           addSources: addSourcesResolved,
         });
       }
