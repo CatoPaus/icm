@@ -4800,6 +4800,19 @@ export async function cleanGroundingLinks(
   // Deduplicate adjacent identical footnote markers like `[^id][^id]`
   bodyText = bodyText.replace(/(\[\^[A-Za-z0-9_\-]+\])\1+/g, '$1');
 
+  // Normalize stray BPE space immediately after list-item opening bold marker (e.g. `2. ** label**:` -> `2. **label**:`) outside code fences
+  bodyText = bodyText
+    .split(/(^```[\s\S]*?^```)/gm)
+    .map((segment, idx) =>
+      idx % 2 === 1
+        ? segment
+        : segment.replace(
+            /^(\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)\*\*[ \t]+([^\s*\r\n][^*\r\n]*?\*\*)/gm,
+            '$1**$2'
+          )
+    )
+    .join('');
+
   // 6. Register any remaining groundedSources from the Interactions API steps
   for (const src of groundedSources) {
     const candidateResolved = (urlMap.get(src.url) || src.url).trim();
@@ -11338,6 +11351,10 @@ body {
   border-color: var(--primary);
   background: var(--primary-soft);
 }
+.okf-source-card.replaced {
+  border-color: #60a5fa;
+  background: #f0f7ff;
+}
 .src-chip {
   display: inline-block;
   padding: 1px 6px;
@@ -11368,6 +11385,15 @@ body {
   gap: 6px;
   font-size: 11.5px;
   color: #7c2d12;
+}
+.okf-replace-row.swap-mode {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1e3a8a;
+}
+.okf-replace-row.swap-mode .okf-replace-select,
+.okf-replace-row.swap-mode .okf-replace-url-input {
+  border-color: #60a5fa;
 }
 .okf-replace-select-wrap {
   display: flex;
@@ -12433,14 +12459,20 @@ const A2UI_STUDIO_JS = `
       return !a.id || !rejectedSet.has(String(a.id));
     });
     const replacedRaw = resolvePointer(surface.dataModel, "/okf/replacedSources") || {};
-    const replacePairs = [];
+    const replaceKeySet = new Set();
     for (let rIdx = 0; rIdx < rejected.length; rIdx++) {
-      const rejId = rejected[rIdx];
-      const replTarget = String(replacedRaw[rejId] || "").trim();
-      if (replTarget && !rejectedSet.has(replTarget)) {
-        replacePairs.push(rejId + "=" + replTarget);
-      }
+      replaceKeySet.add(rejected[rIdx]);
     }
+    Object.keys(replacedRaw).forEach(function (k) {
+      if (k) replaceKeySet.add(String(k));
+    });
+    const replacePairs = [];
+    replaceKeySet.forEach(function (oldKey) {
+      const replTarget = String(replacedRaw[oldKey] || "").trim();
+      if (replTarget && replTarget !== oldKey && !rejectedSet.has(replTarget)) {
+        replacePairs.push(oldKey + "=" + replTarget);
+      }
+    });
     let byActor = String(resolvePointer(surface.dataModel, "/okf/verifierActor") || "").trim();
     if (!byActor || byActor === "human:styrer" || byActor === "human:reviewer") {
       try {
@@ -12579,6 +12611,10 @@ const A2UI_STUDIO_JS = `
       {},
       resolvePointer(surface.dataModel, "/okf/replacedSources") || {}
     );
+    const openMap = Object.assign(
+      {},
+      resolvePointer(surface.dataModel, "/okf/replaceOpenSources") || {}
+    );
     let cleanTarget = String(newTarget || "").trim();
     if (
       cleanTarget &&
@@ -12592,8 +12628,10 @@ const A2UI_STUDIO_JS = `
       delete currentMap[cleanOld];
     } else {
       currentMap[cleanOld] = cleanTarget;
+      openMap[cleanOld] = true;
     }
     setPointer(surface.dataModel, "/okf/replacedSources", currentMap);
+    setPointer(surface.dataModel, "/okf/replaceOpenSources", openMap);
     buildCurationPrompts(surface);
     if (
       typeof renderSurface === "function" &&
@@ -12606,6 +12644,41 @@ const A2UI_STUDIO_JS = `
     return currentMap;
   }
 
+  function toggleReplacePanelInStudio(surface, srcId) {
+    const cleanId = String(srcId || "").trim();
+    if (!surface || !surface.dataModel || !cleanId) return {};
+    const openMap = Object.assign(
+      {},
+      resolvePointer(surface.dataModel, "/okf/replaceOpenSources") || {}
+    );
+    const replacedMap = Object.assign(
+      {},
+      resolvePointer(surface.dataModel, "/okf/replacedSources") || {}
+    );
+    const rejectedList = resolvePointer(surface.dataModel, "/okf/rejectedSources") || [];
+    const isRej = rejectedList.indexOf(cleanId) !== -1;
+    if (!isRej && replacedMap[cleanId]) {
+      delete replacedMap[cleanId];
+      delete openMap[cleanId];
+    } else if (openMap[cleanId]) {
+      delete openMap[cleanId];
+    } else {
+      openMap[cleanId] = true;
+    }
+    setPointer(surface.dataModel, "/okf/replacedSources", replacedMap);
+    setPointer(surface.dataModel, "/okf/replaceOpenSources", openMap);
+    buildCurationPrompts(surface);
+    if (
+      typeof renderSurface === "function" &&
+      typeof document !== "undefined" &&
+      document.getElementById &&
+      document.getElementById("a2ui-surface-root")
+    ) {
+      renderSurface();
+    }
+    return openMap;
+  }
+
   function toggleRejectSourceInStudio(surface, srcId) {
     const cleanId = String(srcId || "").trim();
     if (!surface || !surface.dataModel || !cleanId) return [];
@@ -12614,6 +12687,11 @@ const A2UI_STUDIO_JS = `
       {},
       resolvePointer(surface.dataModel, "/okf/replacedSources") || {}
     );
+    const openMap = Object.assign(
+      {},
+      resolvePointer(surface.dataModel, "/okf/replaceOpenSources") || {}
+    );
+    delete openMap[cleanId];
     const idx = current.indexOf(cleanId);
     if (idx === -1) {
       current.push(cleanId);
@@ -12636,6 +12714,7 @@ const A2UI_STUDIO_JS = `
     }
     setPointer(surface.dataModel, "/okf/rejectedSources", current);
     setPointer(surface.dataModel, "/okf/replacedSources", replacedMap);
+    setPointer(surface.dataModel, "/okf/replaceOpenSources", openMap);
 
     const bodyMd = String(resolvePointer(surface.dataModel, "/okf/body") || "");
     const sources = resolvePointer(surface.dataModel, "/okf/sources") || [];
@@ -12752,6 +12831,7 @@ const A2UI_STUDIO_JS = `
     window.__ICM_TEST_HOOKS__.inspectClientSourceDomainProvenance = inspectClientSourceDomainProvenance;
     window.__ICM_TEST_HOOKS__.buildCurationPrompts = buildCurationPrompts;
     window.__ICM_TEST_HOOKS__.setReplaceSourceInStudio = setReplaceSourceInStudio;
+    window.__ICM_TEST_HOOKS__.toggleReplacePanelInStudio = toggleReplacePanelInStudio;
     window.__ICM_TEST_HOOKS__.toggleRejectSourceInStudio = toggleRejectSourceInStudio;
     window.__ICM_TEST_HOOKS__.addSourceInStudio = addSourceInStudio;
     window.__ICM_TEST_HOOKS__.renderComponent = renderComponent;
@@ -13441,6 +13521,8 @@ const A2UI_STUDIO_JS = `
     out = out.replace(/\\r?\\n+---\\s*$/g, "");
     out = out.replace(/(?:\\r?\\n+---)?\\r?\\n+#{1,4}\\s+(?:\\*\\*|__)?(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:Sources?(?:\\s*(?:&|and|\\/)\\s*(?:Citations?|Footnotes?|References?))?|References?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|Citations?|Sources?))?|Citations?(?:\\s*(?:&|and|\\/)\\s*(?:Footnotes?|References?))?|Footnotes?(?:\\s*(?:&|and|\\/)\\s*(?:References?|Sources?))?|Grounded\\s+Search\\s+References|Kildehenvisninger(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter))?|Kilder(?:\\s*(?:og|&|\\/)\\s*(?:referanser|fotnoter|kildehenvisninger))?|Kildeliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Referanser(?:\\s*(?:og|&|\\/)\\s*(?:fotnoter|kilder))?|Referanseliste(?:\\s*(?:og|&|\\/)\\s*fotnoter)?|Fotnoter(?:\\s*(?:og|&|\\/)\\s*(?:kilder|referanser))?):?(?:\\*\\*|__)?(?:\\r?\\n+---)?\\s*$/i, "");
     out = out.replace(/\\r?\\n+---\\s*$/g, "").trim();
+    // Normalize stray BPE space immediately after list-item opening bold marker (e.g. '2. ** label**:' -> '2. **label**:')
+    out = out.replace(/^(\\s*(?:[-*+]|\\d+[.)])\\s+(?:\\[[ xX]\\]\\s+)?)\\*\\*[ \\t]+([^\\s*\\r\\n][^*\\r\\n]*?\\*\\*)/gm, "$1**$2");
     // Format inline TeX math spans ($...$ and $$...$$) safely without matching currency $ pairs or table pipes
     out = replaceInlineLatexSpans(out, function (_, inner) {
       let cleaned = String(inner)
@@ -14465,17 +14547,25 @@ const A2UI_STUDIO_JS = `
       if (resolvePointer(surface.dataModel, "/okf/replacedSources") === undefined) {
         setPointer(surface.dataModel, "/okf/replacedSources", {});
       }
+      if (resolvePointer(surface.dataModel, "/okf/replaceOpenSources") === undefined) {
+        setPointer(surface.dataModel, "/okf/replaceOpenSources", {});
+      }
       if (resolvePointer(surface.dataModel, "/okf/addedSources") === undefined) {
         setPointer(surface.dataModel, "/okf/addedSources", []);
       }
       const rejectedSources = (resolvePointer(surface.dataModel, "/okf/rejectedSources") || []).map(String);
       const rejectedSet = new Set(rejectedSources);
       const replacedSources = resolvePointer(surface.dataModel, "/okf/replacedSources") || {};
+      const replaceOpenSources = resolvePointer(surface.dataModel, "/okf/replaceOpenSources") || {};
       const addedSources = resolvePointer(surface.dataModel, "/okf/addedSources") || [];
       const activeSourcesList = sources.filter(function (s) {
         return s && !rejectedSet.has(String(s.id || ""));
       });
       const activeSourceCount = activeSourcesList.length;
+      const replacedSourceCount = Object.keys(replacedSources).filter(function (k) {
+        const tgt = String(replacedSources[k] || "").trim();
+        return Boolean(tgt) && tgt !== k && !rejectedSet.has(tgt);
+      }).length;
       const curationPrompts = buildCurationPrompts(surface);
 
       if (!viewingStub) {
@@ -14527,6 +14617,14 @@ const A2UI_STUDIO_JS = `
             : "🚫 " + rejectedSources.length + " rejected";
           bannerLeft.appendChild(rejChip);
         }
+        if (replacedSourceCount > 0) {
+          const replChip = document.createElement("span");
+          replChip.className = "a2ui-badge accent";
+          replChip.textContent = isNo
+            ? "🔀 " + replacedSourceCount + " erstattet"
+            : "🔀 " + replacedSourceCount + " replaced";
+          bannerLeft.appendChild(replChip);
+        }
         if (addedSources.length > 0) {
           const addChip = document.createElement("span");
           addChip.className = "a2ui-badge success";
@@ -14535,6 +14633,23 @@ const A2UI_STUDIO_JS = `
             : "➕ " + addedSources.length + " added";
           bannerLeft.appendChild(addChip);
         }
+
+        const jumpSourcesBtn = document.createElement("button");
+        jumpSourcesBtn.type = "button";
+        jumpSourcesBtn.className = "a2ui-btn";
+        jumpSourcesBtn.id = "okf-jump-sources-btn";
+        jumpSourcesBtn.style.padding = "3px 9px";
+        jumpSourcesBtn.style.fontSize = "11.5px";
+        jumpSourcesBtn.textContent = isNo
+          ? "⬇️ Kilder & Erstatt (" + sources.length + ")"
+          : "⬇️ Sources & Replace (" + sources.length + ")";
+        jumpSourcesBtn.addEventListener("click", function () {
+          const panelEl = document.getElementById("okf-sources-panel");
+          if (panelEl && panelEl.scrollIntoView) {
+            panelEl.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        });
+        bannerLeft.appendChild(jumpSourcesBtn);
 
         const bannerRight = document.createElement("div");
         bannerRight.className = "a2ui-row";
@@ -14850,6 +14965,7 @@ const A2UI_STUDIO_JS = `
 
       const sideCard = document.createElement("div");
       sideCard.className = "a2ui-card a2ui-col";
+      sideCard.id = "okf-sources-panel";
       const sHead = document.createElement("h3");
       sHead.className = "a2ui-h3";
       const countDisplay =
@@ -14931,7 +15047,14 @@ const A2UI_STUDIO_JS = `
         const sc = document.createElement("div");
         const rawId = String(src.id || "src");
         const isRej = rejectedSet.has(rawId);
-        sc.className = "okf-source-card" + (isRej ? " rejected" : "");
+        const rawReplacedTarget = String(replacedSources[rawId] || "").trim();
+        const replacedTarget =
+          rawReplacedTarget && rawReplacedTarget !== rawId && !rejectedSet.has(rawReplacedTarget)
+            ? rawReplacedTarget
+            : "";
+        const isReplaceOpen = Boolean(replaceOpenSources[rawId]);
+        sc.className =
+          "okf-source-card" + (isRej ? " rejected" : replacedTarget ? " replaced" : "");
         const safeId = escapeHtml(rawId);
         const rawUrl = src.url || src.resource || "";
         const safeTitle = escapeHtml(src.title || rawUrl || "");
@@ -14943,7 +15066,6 @@ const A2UI_STUDIO_JS = `
         const citeStats = inspectSourceCitationsInBody(bodyMd, rawId, rejectedSources);
         statsMap[rawId] = citeStats;
         const prov = inspectClientSourceDomainProvenance(src);
-        const replacedTarget = isRej ? String(replacedSources[rawId] || "").trim() : "";
 
         sc.id = "okf-src-" + rawId;
         const headerHtml =
@@ -15017,7 +15139,35 @@ const A2UI_STUDIO_JS = `
           actionRow.style.marginTop = "6px";
           actionRow.style.display = "flex";
           actionRow.style.justifyContent = "flex-end";
+          actionRow.style.gap = "6px";
+          actionRow.style.flexWrap = "wrap";
+
+          if (!isRej && citeStats.mentionCount > 0) {
+            const swapBtn = document.createElement("button");
+            swapBtn.type = "button";
+            swapBtn.className = "a2ui-btn okf-open-replace-btn";
+            swapBtn.setAttribute("data-src-id", rawId);
+            swapBtn.style.padding = "3px 8px";
+            swapBtn.style.fontSize = "11.5px";
+            swapBtn.textContent = replacedTarget
+              ? isNo
+                ? "↩ Angre erstatning"
+                : "↩ Undo replace"
+              : isReplaceOpen
+                ? isNo
+                  ? "✕ Lukk erstatt"
+                  : "✕ Close replace"
+                : isNo
+                  ? "🔀 Erstatt kilde"
+                  : "🔀 Replace source";
+            swapBtn.addEventListener("click", function () {
+              toggleReplacePanelInStudio(surface, rawId);
+            });
+            actionRow.appendChild(swapBtn);
+          }
+
           const rejBtn = document.createElement("button");
+          rejBtn.type = "button";
           rejBtn.className = "a2ui-btn okf-reject-btn" + (isRej ? "" : " danger");
           rejBtn.setAttribute("data-src-id", rawId);
           rejBtn.style.padding = "3px 8px";
@@ -15035,9 +15185,9 @@ const A2UI_STUDIO_JS = `
           actionRow.appendChild(rejBtn);
           sc.appendChild(actionRow);
 
-          if (isRej && citeStats.mentionCount > 0) {
+          if ((isRej || isReplaceOpen || Boolean(replacedTarget)) && citeStats.mentionCount > 0) {
             const replRow = document.createElement("div");
-            replRow.className = "okf-replace-row";
+            replRow.className = "okf-replace-row" + (isRej ? "" : " swap-mode");
             const selectWrap = document.createElement("div");
             selectWrap.className = "okf-replace-select-wrap";
             const replLbl = document.createElement("label");
@@ -15054,15 +15204,22 @@ const A2UI_STUDIO_JS = `
               replSelect.setAttribute("data-src-id", rawId);
               const defaultOpt = document.createElement("option");
               defaultOpt.value = "";
-              defaultOpt.textContent = isNo
-                ? "(La AGY velge / fjern fotnote)"
-                : "(Let AGY choose / strip footnote)";
+              defaultOpt.textContent = isRej
+                ? isNo
+                  ? "(La AGY velge / fjern fotnote)"
+                  : "(Let AGY choose / strip footnote)"
+                : isNo
+                  ? "(Velg eksisterende kilde eller lim inn lenke under…)"
+                  : "(Select existing source or paste URL below…)";
               replSelect.appendChild(defaultOpt);
               activeSourcesList.forEach(function (actSrc) {
                 const actId = String(actSrc.id || "");
                 const actUrl = String(actSrc.url || actSrc.resource || "");
                 const optVal = actSrc.addedByHuman && actUrl ? actUrl : actId;
-                if (!optVal) return;
+                if (!optVal || actId === rawId) return;
+                if (replacedSources[actId] && actId !== replacedTarget && optVal !== replacedTarget) {
+                  return;
+                }
                 const opt = document.createElement("option");
                 opt.value = optVal;
                 const shortT = String(actSrc.title || actUrl || actId);
@@ -20406,7 +20563,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       `curateOkfSources auto-registers standalone https:// replacement URLs in replaceSourceMap without requiring a separate addSources call`
     );
 
-    // Verify Studio `setReplaceSourceInStudio` + `buildCurationPrompts` + 1-step `.okf-replace-url-input`
+    // Verify Studio `setReplaceSourceInStudio` + `toggleReplacePanelInStudio` (direct swap without clicking Reject first) + `buildCurationPrompts`
     s1Hooks.setReplaceSourceInStudio(s1SimSurface, 'svak-blogg-kilde', 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710');
     const replPrompts = s1Hooks.buildCurationPrompts(s1SimSurface);
     s1Hooks.setReplaceSourceInStudio(
@@ -20415,6 +20572,23 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       'www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/iv/11-12'
     );
     const bareHostPrompts = s1Hooks.buildCurationPrompts(s1SimSurface);
+
+    // Direct swap on an active (non-rejected) source via `🔀 Erstatt kilde`
+    const openState1 = s1Hooks.toggleReplacePanelInStudio(s1SimSurface, 'dsb-veiledning');
+    s1Hooks.setReplaceSourceInStudio(
+      s1SimSurface,
+      'dsb-veiledning',
+      'https://lovdata.no/dokument/NL/lov/2002-06-14-20'
+    );
+    const directSwapPrompts = s1Hooks.buildCurationPrompts(s1SimSurface);
+    const undoOpenState = s1Hooks.toggleReplacePanelInStudio(s1SimSurface, 'dsb-veiledning');
+    const afterUndoSwapPrompts = s1Hooks.buildCurationPrompts(s1SimSurface);
+
+    const formattedBoldList = s1Hooks.formatInlineLatexAndFootnotes(
+      '1. **Tellingsansvarlig**: teller barn.\n2. ** gjennomsøkingsansvarlig (søkeleder)**: sjekker toaletter.',
+      [],
+      []
+    );
     const s1HtmlRendered = fs.readFileSync(multiRunRes.htmlOutputPath, 'utf-8');
     assert(
       replPrompts.cliText.includes('--replace-source svak-blogg-kilde=https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710') &&
@@ -20422,9 +20596,19 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         bareHostPrompts.cliText.includes(
           '--replace-source svak-blogg-kilde=https://www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/iv/11-12'
         ) &&
+        openState1['dsb-veiledning'] === true &&
+        directSwapPrompts.cliText.includes(
+          '--replace-source dsb-veiledning=https://lovdata.no/dokument/NL/lov/2002-06-14-20'
+        ) &&
+        !directSwapPrompts.cliText.includes('dsb-veiledning,') &&
+        !undoOpenState['dsb-veiledning'] &&
+        !afterUndoSwapPrompts.cliText.includes('dsb-veiledning=') &&
+        formattedBoldList.includes('2. **gjennomsøkingsansvarlig (søkeleder)**:') &&
+        s1HtmlRendered.includes('okf-open-replace-btn') &&
+        s1HtmlRendered.includes('okf-jump-sources-btn') &&
         s1HtmlRendered.includes('okf-replace-url-input') &&
         s1HtmlRendered.includes('okf-replace-url-btn'),
-      `setReplaceSourceInStudio and buildCurationPrompts support 1-step inline replacement URLs (including bare host/path normalization) and emit --replace-source`
+      `toggleReplacePanelInStudio, setReplaceSourceInStudio, and buildCurationPrompts support 1-click direct source swap (without requiring Reject first), 1-step inline URLs, jump-to-sources button, and BPE bold-space normalization`
     );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
