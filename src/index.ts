@@ -3534,9 +3534,44 @@ export function inspectSourceDomainProvenance(source: {
       if (pt.length >= 4 && hp.includes(pt)) return true;
       if (hp.length >= 4 && pt.includes(hp)) return true;
     }
-    // Compound-word abbreviation (e.g., "udir" <-> "utdanningsdirektoratet", "miljodir" <-> "miljodirektoratet")
+    // Compound-word abbreviation (e.g., "udir" <-> "utdanningsdirektoratet", "digdir" <-> "digitaliseringsdirektoratet")
     if (hp.length >= 4 && pubJoined.startsWith(hp[0]) && pubJoined.includes(hp.slice(1))) {
       return true;
+    }
+    for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
+      if (
+        pubJoined.startsWith(hp.slice(0, splitAt)) &&
+        pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
+      ) {
+        return true;
+      }
+    }
+    // Multi-token syllabic / compound initialism (e.g., "dibk" <-> ["direktoratet", "byggkvalitet"], "nkom", "bufdir")
+    if (rawPubTokens.length >= 2 && hp.length >= 3 && hp.length <= 8) {
+      const matchSyllabicTokens = (tokIdx: number, hpIdx: number): boolean => {
+        if (tokIdx === rawPubTokens.length) return hpIdx === hp.length;
+        if (hpIdx >= hp.length) return false;
+        const tok = rawPubTokens[tokIdx];
+        if (tok[0] !== hp[hpIdx]) return false;
+        const maxPrefix = Math.min(4, tok.length, hp.length - hpIdx);
+        for (let len = 1; len <= maxPrefix; len++) {
+          if (tok.slice(0, len) === hp.slice(hpIdx, hpIdx + len)) {
+            if (matchSyllabicTokens(tokIdx + 1, hpIdx + len)) return true;
+          }
+        }
+        if (tok.length >= 8) {
+          const maxStem = Math.min(4, hp.length - hpIdx - 1);
+          for (let remLen = 1; remLen <= maxStem; remLen++) {
+            const sub = hp.slice(hpIdx + 1, hpIdx + 1 + remLen);
+            const minOffset = remLen === 1 ? 3 : 2;
+            if (tok.indexOf(sub, minOffset) !== -1) {
+              if (matchSyllabicTokens(tokIdx + 1, hpIdx + 1 + remLen)) return true;
+            }
+          }
+        }
+        return false;
+      };
+      if (matchSyllabicTokens(0, 0)) return true;
     }
     return false;
   });
@@ -12245,6 +12280,21 @@ const A2UI_STUDIO_JS = `
       .replace(/\\bs⁻¹(?![a-zA-Z0-9])/g, isNo ? "per sekund" : "per second")
       .replace(/(?:μ|µ)g\\b/g, isNo ? "mikro-g" : "micro-g")
       .replace(/(?:μ|µ)m\\b/g, isNo ? "mikrometer" : "micrometers")
+      .replace(/§§\\s*(\\d+[A-Za-z]?(?:-\\d+[A-Za-z]?)?)\\s*(?:[–—]|\\s+-\\s+)\\s*(\\d+[A-Za-z]?(?:-\\d+[A-Za-z]?)?)/g, function (_m, a, b) {
+        return (isNo ? "paragrafene " : "sections ") + a + (isNo ? " til " : " to ") + b;
+      })
+      .replace(/§§\\s*(\\d+)-(\\d+)\\b/g, function (full, a, b, offset, str) {
+        const rest = String(str).slice(offset + full.length);
+        if (/^\\s*(?:og|and|eller|or|,)\\s*\\d+-/i.test(rest) || Number(a) >= Number(b)) {
+          return (isNo ? "paragrafene " : "sections ") + a + "-" + b;
+        }
+        return (isNo ? "paragrafene " : "sections ") + a + (isNo ? " til " : " to ") + b;
+      })
+      .replace(/§§\\s*(?=\\d)/g, isNo ? "paragrafene " : "sections ")
+      .replace(/§\\s*(?=\\d)/g, isNo ? "paragraf " : "section ")
+      .replace(/(^|[\\s(])[−-]\\s*(\\d+[0-9,.]*)\\s*°([CF])\\b/g, function (_m, pre, num, scale) {
+        return pre + "minus " + num + " °" + scale;
+      })
       .replace(/°C\\b/g, isNo ? " grader celsius" : " degrees Celsius")
       .replace(/°F\\b/g, isNo ? " grader fahrenheit" : " degrees Fahrenheit")
       .replace(/°/g, isNo ? " grader " : " degrees ");
@@ -12850,6 +12900,40 @@ const A2UI_STUDIO_JS = `
       }
       if (hp.length >= 4 && pubJoined.indexOf(hp[0]) === 0 && pubJoined.indexOf(hp.slice(1)) !== -1) {
         return true;
+      }
+      for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
+        if (
+          pubJoined.indexOf(hp.slice(0, splitAt)) === 0 &&
+          pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
+        ) {
+          return true;
+        }
+      }
+      if (rawPubTokens.length >= 2 && hp.length >= 3 && hp.length <= 8) {
+        function matchClientSyllabicTokens(tokIdx, hpIdx) {
+          if (tokIdx === rawPubTokens.length) return hpIdx === hp.length;
+          if (hpIdx >= hp.length) return false;
+          const tok = rawPubTokens[tokIdx];
+          if (tok[0] !== hp[hpIdx]) return false;
+          const maxPrefix = Math.min(4, tok.length, hp.length - hpIdx);
+          for (let len = 1; len <= maxPrefix; len++) {
+            if (tok.slice(0, len) === hp.slice(hpIdx, hpIdx + len)) {
+              if (matchClientSyllabicTokens(tokIdx + 1, hpIdx + len)) return true;
+            }
+          }
+          if (tok.length >= 8) {
+            const maxStem = Math.min(4, hp.length - hpIdx - 1);
+            for (let remLen = 1; remLen <= maxStem; remLen++) {
+              const sub = hp.slice(hpIdx + 1, hpIdx + 1 + remLen);
+              const minOffset = remLen === 1 ? 3 : 2;
+              if (tok.indexOf(sub, minOffset) !== -1) {
+                if (matchClientSyllabicTokens(tokIdx + 1, hpIdx + 1 + remLen)) return true;
+              }
+            }
+          }
+          return false;
+        }
+        if (matchClientSyllabicTokens(0, 0)) return true;
       }
       return false;
     });
@@ -19733,21 +19817,30 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
 
   // Fix 3 Self-Test: Dual-register TTS normalizer & automatic multi-paragraph splitting for wall-of-text Stage 2 fields
   const ttsSampleEn =
-    'NPV_8 of -$1,795.7M at 3.88 ± 0.25 g/cm³, Iₛₚ of 380 s, 6 μg sample, and Δv of 4.630 km/s with $10,000/kg cap, $1.77T–$1.98T range, and ~$800.0B valuation.';
+    'NPV_8 of -$1,795.7M at 3.88 ± 0.25 g/cm³, Iₛₚ of 380 s, 6 μg sample, §§ 4–10 and § 12 at -10 °C, and Δv of 4.630 km/s with $10,000/kg cap, $1.77T–$1.98T range, and ~$800.0B valuation.';
   const normalizedTtsEn = String(studioHooks.normalizeTextForTts(ttsSampleEn, 'en-US'));
-  const normalizedTtsNo = String(studioHooks.normalizeTextForTts('3,88 ± 0,25 g/cm³ og Iₛₚ på 380 s', 'nb-NO'));
+  const normalizedTtsNo = String(
+    studioHooks.normalizeTextForTts(
+      '3,88 ± 0,25 g/cm³, Iₛₚ på 380 s, §§ 4–10, TEK17 §§ 11-13 og 11-14 samt § 11-2 ved -10 °C',
+      'nb-NO'
+    )
+  );
   assert(
     normalizedTtsEn.includes('NPV 8 of negative 1,795.7 million dollars') &&
       normalizedTtsEn.includes('3.88 plus or minus 0.25 grams per cubic centimeter') &&
       normalizedTtsEn.includes('specific impulse of 380 s') &&
       normalizedTtsEn.includes('6 micro-g sample') &&
+      normalizedTtsEn.includes('sections 4 to 10 and section 12 at minus 10 degrees Celsius') &&
       normalizedTtsEn.includes('delta-v of 4.630 kilometers per second') &&
       normalizedTtsEn.includes('10,000 dollars per kilogram cap') &&
       normalizedTtsEn.includes('1.77 trillion dollars to 1.98 trillion dollars range') &&
       normalizedTtsEn.includes('approximately 800.0 billion dollars valuation') &&
       normalizedTtsNo.includes('3,88 pluss eller minus 0,25 gram per kubikkcentimeter') &&
-      normalizedTtsNo.includes('spesifikk impuls på 380 s'),
-    `normalizeTextForTts expands symbolic financial/scientific notation into natural spoken English and Norwegian for Web Speech API (got EN="${normalizedTtsEn}", NO="${normalizedTtsNo}")`
+      normalizedTtsNo.includes('spesifikk impuls på 380 s') &&
+      normalizedTtsNo.includes('paragrafene 4 til 10') &&
+      normalizedTtsNo.includes('TEK17 paragrafene 11-13 og 11-14') &&
+      normalizedTtsNo.includes('paragraf 11-2 ved minus 10 grader celsius'),
+    `normalizeTextForTts expands symbolic financial/scientific/legal notation into natural spoken English and Norwegian for Web Speech API (got EN="${normalizedTtsEn}", NO="${normalizedTtsNo}")`
   );
 
   const wallOfTextThesis = [
@@ -21240,6 +21333,16 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       title: 'dibk.no – Byggteknisk forskrift tek17',
       resource: 'https://dibk.no/regelverk/byggteknisk-forskrift-tek17/',
     });
+    const provDibkSyllabic = inspectSourceDomainProvenance({
+      id: 'dibk-tek17-11-2',
+      title: 'Byggteknisk forskrift (TEK17) § 11-2 Risikoklasser - Direktoratet for byggkvalitet',
+      resource: 'https://www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/i/11-2',
+    });
+    const provDigdirCompound = inspectSourceDomainProvenance({
+      id: 'digdir-veileder',
+      title: 'Innebygd personvern - Digitaliseringsdirektoratet',
+      resource: 'https://www.digdir.no/informasjonssikkerhet/innebygd-personvern/123',
+    });
     const clientProvMirror = s1Hooks.inspectClientSourceDomainProvenance({
       id: 'barnehageloven-lovdata',
       title: 'Lov om barnehager (barnehageloven) – Lovdata (via dyrebo.barnehage.no)',
@@ -21249,6 +21352,11 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       id: 'udir-beredskap',
       title: 'Beredskap i barnehagen – Utdanningsdirektoratet',
       url: 'https://www.udir.no/sikkerhet-og-beredskap/',
+    });
+    const clientProvDibk = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'dibk-tek17-11-2',
+      title: 'Byggteknisk forskrift (TEK17) § 11-2 Risikoklasser - Direktoratet for byggkvalitet',
+      url: 'https://www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/i/11-2',
     });
     assert(
       provMirrorPdf.domainMismatch === true &&
@@ -21265,9 +21373,12 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         provRealSecGov.domainMismatch === false &&
         provGenericSubtitle.domainMismatch === false &&
         provHostPrefixedTitle.domainMismatch === false &&
+        provDibkSyllabic.domainMismatch === false &&
+        provDigdirCompound.domainMismatch === false &&
         clientProvMirror.domainMismatch === true &&
         clientProvMirror.claimedPublisher === 'Lovdata' &&
-        clientProvUdir.domainMismatch === false,
+        clientProvUdir.domainMismatch === false &&
+        clientProvDibk.domainMismatch === false,
       `inspectSourceDomainProvenance and inspectClientSourceDomainProvenance flag third-party mirrors masquerading as authorities while allowing true domains, acronyms, compound abbreviations, host-prefixed slugs, and umbrella portals`
     );
 

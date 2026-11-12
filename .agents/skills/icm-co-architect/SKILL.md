@@ -102,7 +102,7 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
      npm run cli:stage2 -- --dry-run <runId>
      npm run cli:stage2 -- --artifact-dir "<appDataDir>\brain\<conversation-id>" <runId>
      ```
-   - Inspect `stage2Telemetry` in `workspace/runs/<runId>/meta.json`, `stages/02_script/output/thinking_trace.md`, and `stages/02_script/output/script_draft.json`. `runStage2Flow()` automatically recompiles `a2ui.html` and copies `a2ui_studio.html` into `--artifact-dir`; refresh `a2ui_studio.html` in the **HTML Auxiliary Pane** via a 1-byte `write_file(Append: true, Content: "\n", ArtifactMetadata: ...)` call (and open in the integrated browser if `chrome-devtools` MCP is available).
+   - Inspect `stage2Telemetry` in `workspace/runs/<runId>/meta.json`, `stages/02_script/output/thinking_trace.md`, and `stages/02_script/output/script_draft.json`. `runStage2Flow()` automatically recompiles `a2ui.html` and copies `a2ui_studio.html` into `--artifact-dir`; refresh `a2ui_studio.html` in the **HTML Auxiliary Pane** via a 1-byte `write_file(Append: true, Content: "\n", ArtifactMetadata: ...)` call (and open in the integrated browser if `chrome-devtools` MCP is available). **Always output your Stage 2 Audit summary with clickable `[a2ui_studio.html](file:///...)`, `[a2ui.html](file:///...)`, and `[script_draft.json](file:///...)` links directly in chat before calling `ask_question`** (or ask your Phase 5 follow-up in plain text at the end of that message) so a modal never hides the Stage 2 links while the user inspects the refreshed Studio.
 
 ---
 
@@ -140,7 +140,7 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
 
 ## Phase 5: A2UI v0.9.1 Declarative Surface (`npm run cli:a2ui`) or Optional Bespoke Domain Web Studio
 
-Once the pipeline's stages (`01_research`, `02_script`, `03_...`, `04_...`) and a real verified run in `workspace/runs/<runId>/` are complete on disk, ask the user via `ask_question` whether they want to:
+Once the pipeline's stages (`01_research`, `02_script`, `03_...`, `04_...`) and a real verified run in `workspace/runs/<runId>/` are complete on disk (and **after** you have already output the clickable `[a2ui_studio.html](file:///...)` / `[a2ui.html](file:///...)` links in chat so a modal never blocks them), ask the user via `ask_question` (or plain text) whether they want to:
 1. **(Recommended) Compile a Declarative A2UI v0.9.1 Surface & Bi-Directional Studio (`npm run cli:a2ui -- <runId>`)** generating `a2ui_surface.json`, `a2ui_surface.jsonl`, `workspace/runs/<runId>/a2ui.html`, `workspace/bundle/a2ui.html`, and automatically refreshing `workspace/bundle/viz.html` in a single command with Tier 1 A2UI Basic Catalog Primitives + Tier 2 ICM/OKF Domain Components (`OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`),
 2. **Build a Bespoke Domain Web Studio (`src/server.ts` + `public/`)** designed from scratch around their pipeline's *actual* filesystem artifacts, or
 3. **Keep the project as a 100% Pure Headless CLI Pipeline** (zero web server code).
