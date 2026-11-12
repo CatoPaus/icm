@@ -3508,46 +3508,68 @@ export function inspectSourceDomainProvenance(source: {
     'us',
     'uk',
   ]);
-  const rawPubTokens = normAscii(candidatePub.replace(/\([^)]*\)/g, ' '))
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length >= 2 && !pubStop.has(t));
-  const pubJoined = rawPubTokens.join('');
 
-  const acronyms = new Set<string>();
-  for (const pm of candidatePub.matchAll(/\(([A-Za-zÆØÅæøå0-9]{2,12})\)/g)) {
-    acronyms.add(normAscii(pm[1]).replace(/[^a-z0-9]/g, ''));
-  }
-  for (const um of candidatePub.matchAll(/\b([A-ZÆØÅ]{2,10})\b/g)) {
-    acronyms.add(normAscii(um[1]).replace(/[^a-z0-9]/g, ''));
-  }
-  if (rawPubTokens.length >= 2) {
-    acronyms.add(rawPubTokens.map((t) => t[0]).join(''));
-  }
+  const doesPubMatchHostToken = (pubStr: string, hp: string, strictLeading = false): boolean => {
+    const stripped = pubStr.replace(/\([^)]*\)/g, ' ');
+    const allTokens = normAscii(stripped)
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 2);
+    const rawPubTokens = allTokens.filter((t) => !pubStop.has(t));
+    const pubJoined = rawPubTokens.join('');
 
-  const matchesHost = hostTokens.some((hp) => {
+    const acronyms = new Set<string>();
+    for (const pm of pubStr.matchAll(/\(([A-Za-zÆØÅæøå0-9]{2,12})\)/g)) {
+      acronyms.add(normAscii(pm[1]).replace(/[^a-z0-9]/g, ''));
+    }
+    for (const um of pubStr.matchAll(/\b([A-ZÆØÅ]{2,10})\b/g)) {
+      acronyms.add(normAscii(um[1]).replace(/[^a-z0-9]/g, ''));
+    }
+    if (rawPubTokens.length >= 2) {
+      acronyms.add(rawPubTokens.map((t) => t[0]).join(''));
+    }
+
     if (acronyms.has(hp)) return true;
     for (const ac of acronyms) {
       if (ac.length >= 3 && (hp.includes(ac) || ac.includes(hp))) return true;
     }
-    for (const pt of rawPubTokens) {
+    const tokenPool = strictLeading ? allTokens : rawPubTokens;
+    for (let idx = 0; idx < tokenPool.length; idx++) {
+      if (strictLeading) {
+        if (idx > 1) break;
+        if (idx === 1 && (allTokens.length !== 2 || pubStop.has(allTokens[0]))) continue;
+      }
+      const pt = tokenPool[idx];
+      if (pubStop.has(pt)) continue;
       if (pt === hp) return true;
       if (pt.length >= 4 && hp.includes(pt)) return true;
       if (hp.length >= 4 && pt.includes(hp)) return true;
     }
     // Compound-word abbreviation (e.g., "udir" <-> "utdanningsdirektoratet", "digdir" <-> "digitaliseringsdirektoratet")
-    if (hp.length >= 4 && pubJoined.startsWith(hp[0]) && pubJoined.includes(hp.slice(1))) {
+    if (
+      (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) &&
+      hp.length >= 4 &&
+      pubJoined.startsWith(hp[0]) &&
+      pubJoined.includes(hp.slice(1))
+    ) {
       return true;
     }
-    for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
-      if (
-        pubJoined.startsWith(hp.slice(0, splitAt)) &&
-        pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
-      ) {
-        return true;
+    if (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) {
+      for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
+        if (
+          pubJoined.startsWith(hp.slice(0, splitAt)) &&
+          pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
+        ) {
+          return true;
+        }
       }
     }
     // Multi-token syllabic / compound initialism (e.g., "dibk" <-> ["direktoratet", "byggkvalitet"], "nkom", "bufdir")
-    if (rawPubTokens.length >= 2 && hp.length >= 3 && hp.length <= 8) {
+    if (
+      (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) &&
+      rawPubTokens.length >= 2 &&
+      hp.length >= 3 &&
+      hp.length <= 8
+    ) {
       const matchSyllabicTokens = (tokIdx: number, hpIdx: number): boolean => {
         if (tokIdx === rawPubTokens.length) return hpIdx === hp.length;
         if (hpIdx >= hp.length) return false;
@@ -3574,7 +3596,46 @@ export function inspectSourceDomainProvenance(source: {
       if (matchSyllabicTokens(0, 0)) return true;
     }
     return false;
-  });
+  };
+
+  const matchesHost = hostTokens.some((hp) => doesPubMatchHostToken(candidatePub, hp, false));
+
+  // Hardened Publisher-First title layout (`"<True Host Publisher> – <Article Title>"`, e.g., `"DSB – Unngå ulykker med rødsprit"` on `dsb.no`)
+  if (!matchesHost && !viaAnnotMatch && !idEncodesPub && !hasParenAcronym) {
+    const rawPrefix = titleWithoutVia.slice(0, sepMatch.index ?? 0).trim();
+    if (rawPrefix && !/\s+(?:[|–—]|-\s)\s+/.test(rawPrefix)) {
+      const leadOrg = rawPrefix.split(/\s*[/:\u2215]\s*/)[0].trim();
+      const leadWords = leadOrg.split(/\s+/).filter(Boolean);
+      const isDocGenrePrefix =
+        /^(?:lov|forskrift|veileder|veiledning|retningslinjer|rundskriv|rapport|kapittel|del|act|law|regulation|statute|directive|ordinance|guidance|guide|report|form)\b/i.test(
+          leadOrg
+        );
+      if (leadWords.length >= 1 && leadWords.length <= 7 && !isDocGenrePrefix) {
+        const primaryHostToken = hostTokens[hostTokens.length - 1];
+        const srcIdStartsWithHost = srcIdLower.startsWith(`${primaryHostToken}-`);
+        const leadAcronyms = new Set<string>();
+        for (const pm of leadOrg.matchAll(/\(([A-Za-zÆØÅæøå0-9]{2,12})\)/g)) {
+          leadAcronyms.add(normAscii(pm[1]).replace(/[^a-z0-9]/g, ''));
+        }
+        for (const um of leadOrg.matchAll(/\b([A-ZÆØÅ]{2,10})\b/g)) {
+          leadAcronyms.add(normAscii(um[1]).replace(/[^a-z0-9]/g, ''));
+        }
+        const leadHasHostAcronym = leadAcronyms.has(primaryHostToken);
+        const allHostTokensAccounted =
+          hostTokens.length === 1 ||
+          srcIdStartsWithHost ||
+          leadHasHostAcronym ||
+          hostTokens.every((hp) => doesPubMatchHostToken(rawPrefix, hp, false));
+        if (
+          allHostTokensAccounted &&
+          (pubWords.length >= 2 || srcIdStartsWithHost || leadHasHostAcronym) &&
+          doesPubMatchHostToken(leadOrg, primaryHostToken, true)
+        ) {
+          return { hostname, isDirectFileAsset, domainMismatch: false };
+        }
+      }
+    }
+  }
 
   return {
     hostname,
@@ -12867,49 +12928,69 @@ const A2UI_STUDIO_JS = `
     const pubStop = new Set([
       "for", "og", "and", "of", "the", "in", "on", "til", "av", "om", "i", "de", "la", "du", "des", "und", "fur", "van", "het", "us", "uk"
     ]);
-    const rawPubTokens = normClientAscii(candidatePub.replace(/\\([^)]*\\)/g, " "))
-      .split(/[^a-z0-9]+/)
-      .filter(function (t) { return t.length >= 2 && !pubStop.has(t); });
-    const pubJoined = rawPubTokens.join("");
-    const acronyms = new Set();
-    const parenRe = /\\(([A-Za-zÆØÅæøå0-9]{2,12})\\)/g;
-    let pm;
-    while ((pm = parenRe.exec(candidatePub)) !== null) {
-      acronyms.add(normClientAscii(pm[1]).replace(/[^a-z0-9]/g, ""));
-    }
-    const upperRe = /\\b([A-ZÆØÅ]{2,10})\\b/g;
-    let um;
-    while ((um = upperRe.exec(candidatePub)) !== null) {
-      acronyms.add(normClientAscii(um[1]).replace(/[^a-z0-9]/g, ""));
-    }
-    if (rawPubTokens.length >= 2) {
-      acronyms.add(rawPubTokens.map(function (t) { return t[0]; }).join(""));
-    }
-    const matchesHost = hostTokens.some(function (hp) {
+    function doesClientPubMatchHostToken(pubStr, hp, strictLeading) {
+      const stripped = String(pubStr || "").replace(/\\([^)]*\\)/g, " ");
+      const allTokens = normClientAscii(stripped)
+        .split(/[^a-z0-9]+/)
+        .filter(function (t) { return t.length >= 2; });
+      const rawPubTokens = allTokens.filter(function (t) { return !pubStop.has(t); });
+      const pubJoined = rawPubTokens.join("");
+      const acronyms = new Set();
+      const parenRe = /\\(([A-Za-zÆØÅæøå0-9]{2,12})\\)/g;
+      let pm;
+      while ((pm = parenRe.exec(pubStr)) !== null) {
+        acronyms.add(normClientAscii(pm[1]).replace(/[^a-z0-9]/g, ""));
+      }
+      const upperRe = /\\b([A-ZÆØÅ]{2,10})\\b/g;
+      let um;
+      while ((um = upperRe.exec(pubStr)) !== null) {
+        acronyms.add(normClientAscii(um[1]).replace(/[^a-z0-9]/g, ""));
+      }
+      if (rawPubTokens.length >= 2) {
+        acronyms.add(rawPubTokens.map(function (t) { return t[0]; }).join(""));
+      }
       if (acronyms.has(hp)) return true;
       let acMatch = false;
       acronyms.forEach(function (ac) {
         if (ac.length >= 3 && (hp.indexOf(ac) !== -1 || ac.indexOf(hp) !== -1)) acMatch = true;
       });
       if (acMatch) return true;
-      for (let k = 0; k < rawPubTokens.length; k++) {
-        const pt = rawPubTokens[k];
+      const tokenPool = strictLeading ? allTokens : rawPubTokens;
+      for (let k = 0; k < tokenPool.length; k++) {
+        if (strictLeading) {
+          if (k > 1) break;
+          if (k === 1 && (allTokens.length !== 2 || pubStop.has(allTokens[0]))) continue;
+        }
+        const pt = tokenPool[k];
+        if (pubStop.has(pt)) continue;
         if (pt === hp) return true;
         if (pt.length >= 4 && hp.indexOf(pt) !== -1) return true;
         if (hp.length >= 4 && pt.indexOf(hp) !== -1) return true;
       }
-      if (hp.length >= 4 && pubJoined.indexOf(hp[0]) === 0 && pubJoined.indexOf(hp.slice(1)) !== -1) {
+      if (
+        (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) &&
+        hp.length >= 4 &&
+        pubJoined.indexOf(hp[0]) === 0 &&
+        pubJoined.indexOf(hp.slice(1)) !== -1
+      ) {
         return true;
       }
-      for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
-        if (
-          pubJoined.indexOf(hp.slice(0, splitAt)) === 0 &&
-          pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
-        ) {
-          return true;
+      if (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) {
+        for (let splitAt = 2; splitAt <= Math.min(4, hp.length - 3); splitAt++) {
+          if (
+            pubJoined.indexOf(hp.slice(0, splitAt)) === 0 &&
+            pubJoined.indexOf(hp.slice(splitAt), splitAt) !== -1
+          ) {
+            return true;
+          }
         }
       }
-      if (rawPubTokens.length >= 2 && hp.length >= 3 && hp.length <= 8) {
+      if (
+        (!strictLeading || (allTokens.length > 0 && !pubStop.has(allTokens[0]))) &&
+        rawPubTokens.length >= 2 &&
+        hp.length >= 3 &&
+        hp.length <= 8
+      ) {
         function matchClientSyllabicTokens(tokIdx, hpIdx) {
           if (tokIdx === rawPubTokens.length) return hpIdx === hp.length;
           if (hpIdx >= hp.length) return false;
@@ -12936,7 +13017,54 @@ const A2UI_STUDIO_JS = `
         if (matchClientSyllabicTokens(0, 0)) return true;
       }
       return false;
+    }
+    const matchesHost = hostTokens.some(function (hp) {
+      return doesClientPubMatchHostToken(candidatePub, hp, false);
     });
+    if (!matchesHost && !viaAnnotMatch && !idEncodesPub && !hasParenAcronym) {
+      const rawPrefix = titleWithoutVia.slice(0, sepMatch.index || 0).trim();
+      if (rawPrefix && !/\\s+(?:[|–—]|-\\s)\\s+/.test(rawPrefix)) {
+        const leadOrg = rawPrefix.split(/\\s*[/:\u2215]\\s*/)[0].trim();
+        const leadWords = leadOrg.split(/\\s+/).filter(Boolean);
+        const isDocGenrePrefix =
+          /^(?:lov|forskrift|veileder|veiledning|retningslinjer|rundskriv|rapport|kapittel|del|act|law|regulation|statute|directive|ordinance|guidance|guide|report|form)\\b/i.test(
+            leadOrg
+          );
+        if (leadWords.length >= 1 && leadWords.length <= 7 && !isDocGenrePrefix) {
+          const primaryHostToken = hostTokens[hostTokens.length - 1];
+          const srcIdStartsWithHost = srcIdLower.indexOf(primaryHostToken + "-") === 0;
+          const leadAcronyms = new Set();
+          const leadParenRe = /\\(([A-Za-zÆØÅæøå0-9]{2,12})\\)/g;
+          let lpm;
+          while ((lpm = leadParenRe.exec(leadOrg)) !== null) {
+            leadAcronyms.add(normClientAscii(lpm[1]).replace(/[^a-z0-9]/g, ""));
+          }
+          const leadUpperRe = /\\b([A-ZÆØÅ]{2,10})\\b/g;
+          let lum;
+          while ((lum = leadUpperRe.exec(leadOrg)) !== null) {
+            leadAcronyms.add(normClientAscii(lum[1]).replace(/[^a-z0-9]/g, ""));
+          }
+          const leadHasHostAcronym = leadAcronyms.has(primaryHostToken);
+          const allHostTokensAccounted =
+            hostTokens.length === 1 ||
+            srcIdStartsWithHost ||
+            leadHasHostAcronym ||
+            hostTokens.every(function (hp) { return doesClientPubMatchHostToken(rawPrefix, hp, false); });
+          if (
+            allHostTokensAccounted &&
+            (pubWords.length >= 2 || srcIdStartsWithHost || leadHasHostAcronym) &&
+            doesClientPubMatchHostToken(leadOrg, primaryHostToken, true)
+          ) {
+            return {
+              hostname: hostname,
+              isDirectFileAsset: isDirectFileAsset,
+              claimedPublisher: "",
+              domainMismatch: false,
+            };
+          }
+        }
+      }
+    }
     return {
       hostname: hostname,
       isDirectFileAsset: isDirectFileAsset,
@@ -21358,6 +21486,51 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       title: 'Byggteknisk forskrift (TEK17) § 11-2 Risikoklasser - Direktoratet for byggkvalitet',
       url: 'https://www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/i/11-2',
     });
+    const provPubFirstDsb = inspectSourceDomainProvenance({
+      id: 'dsb-rodsprit',
+      title: 'Direktoratet for samfunnssikkerhet og beredskap (DSB) / Sikker hverdag – Unngå ulykker med rødsprit',
+      resource: 'https://www.dsb.no/sikkerhverdag/gass-og-brannfarlig-vaske/unnga-ulykker-med-rodsprit/',
+    });
+    const provPubFirstDibkNoAcronym = inspectSourceDomainProvenance({
+      id: 'tek17-11-2',
+      title: 'Direktoratet for byggkvalitet – Risikoklasser i TEK17',
+      resource: 'https://www.dibk.no/regelverk/byggteknisk-forskrift-tek17/11/i/11-2',
+    });
+    const provPubFirstTwoWordOrg = inspectSourceDomainProvenance({
+      id: 'lading-brannfare',
+      title: 'Norsk brannvernforening – Lading av batterier',
+      resource: 'https://brannvernforeningen.no/brannsikkerhet/lading/',
+    });
+    const provAdvSubdomainMirrorNoIdSlug = inspectSourceDomainProvenance({
+      id: 'barnehageloven',
+      title: 'Lov om barnehager – Lovdata',
+      resource: 'https://dyrebo.barnehage.no/Getfile.aspx/123/Lov_om_barnehager.pdf',
+    });
+    const provAdvRootMirrorSinglePub = inspectSourceDomainProvenance({
+      id: 'barnehageloven',
+      title: 'Norske barnehager – Lovdata',
+      resource: 'https://www.barnehage.no/dokumenter/barnehageloven.pdf',
+    });
+    const provAdvPrepositionMirror = inspectSourceDomainProvenance({
+      id: 'strategi-dok',
+      title: 'Strategi om barnehager – U.S. Department of Education',
+      resource: 'https://www.barnehage.no/dokumenter/strategi.pdf',
+    });
+    const clientProvPubFirstDsb = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'dsb-rodsprit',
+      title: 'Direktoratet for samfunnssikkerhet og beredskap (DSB) / Sikker hverdag – Unngå ulykker med rødsprit',
+      url: 'https://www.dsb.no/sikkerhverdag/gass-og-brannfarlig-vaske/unnga-ulykker-med-rodsprit/',
+    });
+    const clientProvAdvSubdomainMirror = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'barnehageloven',
+      title: 'Lov om barnehager – Lovdata',
+      url: 'https://dyrebo.barnehage.no/Getfile.aspx/123/Lov_om_barnehager.pdf',
+    });
+    const clientProvAdvRootMirrorSinglePub = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'barnehageloven',
+      title: 'Norske barnehager – Lovdata',
+      url: 'https://www.barnehage.no/dokumenter/barnehageloven.pdf',
+    });
     assert(
       provMirrorPdf.domainMismatch === true &&
         provMirrorPdf.hostname === 'dyrebo.barnehage.no' &&
@@ -21375,11 +21548,25 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         provHostPrefixedTitle.domainMismatch === false &&
         provDibkSyllabic.domainMismatch === false &&
         provDigdirCompound.domainMismatch === false &&
+        provPubFirstDsb.domainMismatch === false &&
+        provPubFirstDibkNoAcronym.domainMismatch === false &&
+        provPubFirstTwoWordOrg.domainMismatch === false &&
+        provAdvSubdomainMirrorNoIdSlug.domainMismatch === true &&
+        provAdvSubdomainMirrorNoIdSlug.claimedPublisher === 'Lovdata' &&
+        provAdvRootMirrorSinglePub.domainMismatch === true &&
+        provAdvRootMirrorSinglePub.claimedPublisher === 'Lovdata' &&
+        provAdvPrepositionMirror.domainMismatch === true &&
+        provAdvPrepositionMirror.claimedPublisher === 'U.S. Department of Education' &&
         clientProvMirror.domainMismatch === true &&
         clientProvMirror.claimedPublisher === 'Lovdata' &&
         clientProvUdir.domainMismatch === false &&
-        clientProvDibk.domainMismatch === false,
-      `inspectSourceDomainProvenance and inspectClientSourceDomainProvenance flag third-party mirrors masquerading as authorities while allowing true domains, acronyms, compound abbreviations, host-prefixed slugs, and umbrella portals`
+        clientProvDibk.domainMismatch === false &&
+        clientProvPubFirstDsb.domainMismatch === false &&
+        clientProvAdvSubdomainMirror.domainMismatch === true &&
+        clientProvAdvSubdomainMirror.claimedPublisher === 'Lovdata' &&
+        clientProvAdvRootMirrorSinglePub.domainMismatch === true &&
+        clientProvAdvRootMirrorSinglePub.claimedPublisher === 'Lovdata',
+      `inspectSourceDomainProvenance and inspectClientSourceDomainProvenance flag third-party mirrors masquerading as authorities while allowing true domains, acronyms, compound abbreviations, syllabic initialisms, Publisher-First titles, and umbrella portals`
     );
 
     // Verify `cleanGroundingLinks()` annotates `(via <hostname>)` on masquerading mirror titles
