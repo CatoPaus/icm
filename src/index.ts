@@ -2961,8 +2961,252 @@ export function healOrphanOkfFootnotes(doc: OKFDocument): boolean {
   return modified;
 }
 
+export interface SourceDomainProvenance {
+  hostname: string;
+  isDirectFileAsset: boolean;
+  claimedPublisher?: string;
+  domainMismatch: boolean;
+}
+
+/**
+ * Domain-neutral provenance check comparing a source's resolved URL hostname against any
+ * explicit publisher attribution in its title (`– Publisher` / `| Publisher`).
+ * Recognizes direct domain token overlap, parenthetical/initialism acronyms (`DSB` <-> `dsb.no`,
+ * `SEC` <-> `sec.gov`), compound-word abbreviations (`Utdanningsdirektoratet` <-> `udir.no`),
+ * and official government/intergovernmental umbrella portals (`.gov`, `regjeringen.no`, `europa.eu`),
+ * while flagging third-party mirrors/uploads (`secure.styret.com`, `dyrebo.barnehage.no`, `scribd.com`)
+ * whose titles masquerade as another authority.
+ */
+export function inspectSourceDomainProvenance(source: {
+  id?: string;
+  title?: string;
+  resource?: string;
+  url?: string;
+}): SourceDomainProvenance {
+  const rawUrl = String(source?.resource || source?.url || '').trim();
+  if (!rawUrl || isVertexRedirectUrl(rawUrl)) {
+    return { hostname: '', isDirectFileAsset: false, domainMismatch: false };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return { hostname: '', isDirectFileAsset: false, domainMismatch: false };
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  if (!hostname) {
+    return { hostname: '', isDirectFileAsset: false, domainMismatch: false };
+  }
+
+  const isDirectFileAsset =
+    /\.(?:pdf|docx?|xlsx?|pptx?)(?:$|[?#])/i.test(parsed.pathname) ||
+    /\/(?:s3assets[^/]*|getfile(?:\.aspx)?|wp-content\/uploads|uploads|attachments)\b/i.test(
+      parsed.pathname
+    ) ||
+    /(?:amazonaws\.com|cloudfront\.net|blob\.core\.windows\.net|storage\.googleapis\.com)$/i.test(
+      hostname
+    );
+
+  const rawTitle = decodeHtmlEntities(String(source?.title || '').trim());
+  if (!rawTitle) {
+    return { hostname, isDirectFileAsset, domainMismatch: false };
+  }
+
+  const viaAnnotMatch = rawTitle.match(/\s*\(via\s+([a-z0-9.-]+\.[a-z]{2,})\)\s*$/i);
+  const titleWithoutVia = viaAnnotMatch
+    ? rawTitle.slice(0, rawTitle.length - viaAnnotMatch[0].length).trim()
+    : rawTitle;
+
+  const sepMatch = titleWithoutVia.match(/\s+(?:([|])|[–—]|-\s)\s*([^–—|]{2,60})\s*$/);
+  if (!sepMatch) {
+    return { hostname, isDirectFileAsset, domainMismatch: false };
+  }
+  const prefixHostCandidate = titleWithoutVia
+    .slice(0, sepMatch.index ?? 0)
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, '');
+  if (
+    prefixHostCandidate &&
+    (prefixHostCandidate === hostname || hostname.endsWith(`.${prefixHostCandidate}`))
+  ) {
+    return { hostname, isDirectFileAsset, domainMismatch: false };
+  }
+  const isPipeSep = sepMatch[1] === '|';
+  const candidatePub = sepMatch[2].trim();
+  const pubWords = candidatePub.split(/\s+/).filter(Boolean);
+  if (pubWords.length === 0 || pubWords.length > 6) {
+    return { hostname, isDirectFileAsset, domainMismatch: false };
+  }
+  // Ignore lowercase phrases (unless domain-like), section/chapter/date markers, or generic subtitle words
+  if (
+    (/^[a-zæøåäö]/.test(candidatePub) && !/\.[a-z]{2,}$/i.test(candidatePub)) ||
+    /^(?:§+|kap(?:ittel|\.)?\s*\d|del\s+\d|part\s+\d|ch(?:apter|\.)\s*\d|sec(?:tion\b|\.\s*\d|\s+\d)|mod(?:ul|ule|\.)\s*\d|steg\s+\d|step\s+\d|fase\s+\d|phase\s+\d|tabell\b|table\b|figur\b|figure\b|vedlegg\b|appendix\b|rev(?:ision\b|\.\s*\d|\s+\d)|v\d|\d{4}\b|q[1-4]\b)/i.test(
+      candidatePub
+    ) ||
+    /^\d+[\d\s.,:\-–/]*$/.test(candidatePub)
+  ) {
+    return { hostname, isDirectFileAsset, domainMismatch: false };
+  }
+
+  const normAscii = (s: string) =>
+    transliterateNordicAscii(s)
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+
+  const pubSlug = normAscii(candidatePub)
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const srcIdLower = String(source?.id || '').toLowerCase();
+  const idEncodesPub = Boolean(
+    pubSlug &&
+      pubSlug.length >= 3 &&
+      (srcIdLower.endsWith(`-${pubSlug}`) || srcIdLower.startsWith(`${pubSlug}-`))
+  );
+
+  const hasParenAcronym = /\([A-ZÆØÅ0-9]{2,10}\)\s*$/.test(candidatePub);
+  if (
+    !isPipeSep &&
+    !hasParenAcronym &&
+    !idEncodesPub &&
+    (pubWords.length > 4 ||
+      /\b(?:oversikt|overview|innledning|introduction|sammendrag|summary|veiledning|veileder|guide|guidelines|sjekkliste|checklist|kontrollrutiner|gjennomforing|gjennomføring|analyse|analysis|vurdering|assessment|krav|requirements|praksis|tiltak|actions|rapport|report|utgave|edition|hovedpunkter|key\s+points)\b/i.test(
+        candidatePub
+      ))
+  ) {
+    return { hostname, isDirectFileAsset, domainMismatch: false };
+  }
+
+  // Official shared government / intergovernmental umbrella portals legitimately host ministries & agencies
+  if (
+    /\.(?:gov|gov\.[a-z]{2}|mil|int)$/i.test(hostname) ||
+    /(?:^|\.)(?:regjeringen\.no|stortinget\.no|europa\.eu|canada\.ca|gov\.uk|usa\.gov|who\.int|un\.org|oecd\.org|worldbank\.org)$/i.test(
+      hostname
+    )
+  ) {
+    return { hostname, isDirectFileAsset, claimedPublisher: candidatePub, domainMismatch: false };
+  }
+
+  const hostIgnore = new Set([
+    'www',
+    'www2',
+    'wwwex',
+    'web',
+    'secure',
+    'portal',
+    'app',
+    'api',
+    'docs',
+    'cdn',
+    'static',
+    'files',
+    'media',
+    'no',
+    'com',
+    'org',
+    'net',
+    'edu',
+    'gov',
+    'int',
+    'eu',
+    'uk',
+    'de',
+    'se',
+    'dk',
+    'fi',
+    'is',
+    'nl',
+    'fr',
+    'es',
+    'it',
+    'ch',
+    'at',
+    'be',
+    'ca',
+    'au',
+    'nz',
+    'us',
+    'io',
+    'ai',
+    'co',
+  ]);
+  const hostTokens = hostname
+    .split('.')
+    .map((p) => p.replace(/[^a-z0-9]/g, ''))
+    .filter((p) => p.length >= 2 && !hostIgnore.has(p));
+
+  if (hostTokens.length === 0) {
+    return { hostname, isDirectFileAsset, claimedPublisher: candidatePub, domainMismatch: false };
+  }
+
+  const pubStop = new Set([
+    'for',
+    'og',
+    'and',
+    'of',
+    'the',
+    'in',
+    'on',
+    'til',
+    'av',
+    'om',
+    'i',
+    'de',
+    'la',
+    'du',
+    'des',
+    'und',
+    'fur',
+    'van',
+    'het',
+    'us',
+    'uk',
+  ]);
+  const rawPubTokens = normAscii(candidatePub.replace(/\([^)]*\)/g, ' '))
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 2 && !pubStop.has(t));
+  const pubJoined = rawPubTokens.join('');
+
+  const acronyms = new Set<string>();
+  for (const pm of candidatePub.matchAll(/\(([A-Za-zÆØÅæøå0-9]{2,12})\)/g)) {
+    acronyms.add(normAscii(pm[1]).replace(/[^a-z0-9]/g, ''));
+  }
+  for (const um of candidatePub.matchAll(/\b([A-ZÆØÅ]{2,10})\b/g)) {
+    acronyms.add(normAscii(um[1]).replace(/[^a-z0-9]/g, ''));
+  }
+  if (rawPubTokens.length >= 2) {
+    acronyms.add(rawPubTokens.map((t) => t[0]).join(''));
+  }
+
+  const matchesHost = hostTokens.some((hp) => {
+    if (acronyms.has(hp)) return true;
+    for (const ac of acronyms) {
+      if (ac.length >= 3 && (hp.includes(ac) || ac.includes(hp))) return true;
+    }
+    for (const pt of rawPubTokens) {
+      if (pt === hp) return true;
+      if (pt.length >= 4 && hp.includes(pt)) return true;
+      if (hp.length >= 4 && pt.includes(hp)) return true;
+    }
+    // Compound-word abbreviation (e.g., "udir" <-> "utdanningsdirektoratet", "miljodir" <-> "miljodirektoratet")
+    if (hp.length >= 4 && pubJoined.startsWith(hp[0]) && pubJoined.includes(hp.slice(1))) {
+      return true;
+    }
+    return false;
+  });
+
+  return {
+    hostname,
+    isDirectFileAsset,
+    claimedPublisher: candidatePub,
+    domainMismatch: !matchesHost || Boolean(viaAnnotMatch),
+  };
+}
+
 export interface CurateOkfSourcesOptions {
   rejectSourceIds?: string[];
+  replaceSourceMap?: Record<string, string>;
   addSources?: Array<{
     url: string;
     title?: string;
@@ -2976,11 +3220,13 @@ export interface CurateOkfSourcesOptions {
 
 /**
  * Deterministically curates an OKF v0.2 Markdown document by:
- * 1. Rejecting specified source IDs (`rejectSourceIds`), detecting any prose lines or sentences/table cells
- *    whose only remaining citation was a rejected source (`orphanClaimLines`), removing the rejected sources
- *    from `frontmatter.sources`, and stripping `[^rejected-id]` inline tags and bottom definitions
+ * 1. Re-anchoring inline citations from rejected sources to existing or newly added sources (`replaceSourceMap`),
+ *    so `[^old-id]` becomes `[^new-id]` across the entire document at zero LLM token cost.
+ * 2. Rejecting specified source IDs (`rejectSourceIds`), detecting any prose lines or sentences/table cells
+ *    whose only remaining citation was an un-replaced rejected source (`orphanClaimLines`), removing the rejected
+ *    sources from `frontmatter.sources`, and stripping `[^rejected-id]` inline tags and bottom definitions
  *    while preserving word boundaries and sentence punctuation.
- * 2. Adding human-supplied sources (`addSources`), deduplicating by canonical URL, generating
+ * 3. Adding human-supplied sources (`addSources`), deduplicating by canonical URL, generating
  *    clean Nordic-transliterated slug IDs, enriching titles, and weaving `[^id]` inline + bottom
  *    definitions so 3-way OKF v0.2 footnote parity (`frontmatter.sources == inline [^id] == bottom definitions`)
  *    is guaranteed.
@@ -2991,6 +3237,7 @@ export function curateOkfSources(
 ): {
   markdown: string;
   rejectedIds: string[];
+  replacedMap: Record<string, string>;
   addedSources: OKFSource[];
   orphanClaimLines: string[];
 } {
@@ -3002,18 +3249,33 @@ export function curateOkfSources(
     ? doc.frontmatter.sources.map((s) => ({ ...s }))
     : [];
 
+  const cleanFnId = (val: string) =>
+    String(val || '')
+      .trim()
+      .replace(/^\[\^/, '')
+      .replace(/\]$/, '')
+      .trim();
+
+  const rawReplaceEntries: Array<[string, string]> = [];
+  if (options?.replaceSourceMap && typeof options.replaceSourceMap === 'object') {
+    for (const [rawOld, rawTarget] of Object.entries(options.replaceSourceMap)) {
+      const oldId = cleanFnId(rawOld);
+      const targetSpec = String(rawTarget || '')
+        .trim()
+        .replace(/^\[\^/, '')
+        .replace(/\]$/, '')
+        .trim();
+      if (oldId && targetSpec && oldId !== targetSpec) {
+        rawReplaceEntries.push([oldId, targetSpec]);
+      }
+    }
+  }
+
   const normalizedRejectIds = Array.from(
-    new Set(
-      (options?.rejectSourceIds || [])
-        .map((id) =>
-          String(id || '')
-            .trim()
-            .replace(/^\[\^/, '')
-            .replace(/\]$/, '')
-            .trim()
-        )
-        .filter(Boolean)
-    )
+    new Set([
+      ...(options?.rejectSourceIds || []).map(cleanFnId).filter(Boolean),
+      ...rawReplaceEntries.map(([oldId]) => oldId),
+    ])
   );
   const rejectSet = new Set(normalizedRejectIds);
 
@@ -3035,8 +3297,126 @@ export function curateOkfSources(
     }
   }
 
-  // Detect prose lines (or individual sentences / table cells on multi-citation lines) that cite a rejected source
-  // and have no other non-rejected citation backing that claim.
+  // Track actually rejected IDs (present in initial frontmatter.sources or initial inline body)
+  const existingSourceIds = new Set(
+    initialSources.map((s) => String(s?.id || '').trim()).filter(Boolean)
+  );
+  const initialInlineBodyIds = new Set(
+    Array.from(proseLines.join('\n').matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1])
+  );
+  const rejectedIds = normalizedRejectIds.filter(
+    (id) => existingSourceIds.has(id) || initialInlineBodyIds.has(id)
+  );
+
+  // Filter out rejected sources from frontmatter.sources
+  const remainingSources: OKFSource[] = initialSources.filter(
+    (s) => s && !rejectSet.has(String(s.id || '').trim())
+  );
+
+  // Register human-added sources BEFORE resolving `replaceSourceMap` so `--replace-source oldId=<addedUrlOrId>` resolves cleanly
+  const addedSources: OKFSource[] = [];
+  const existingMatchIdsToWeave: string[] = [];
+  const addList = Array.isArray(options?.addSources) ? options.addSources : [];
+  const existingByCanonUrl = new Map<string, OKFSource>();
+  for (const s of remainingSources) {
+    const cUrl = normalizeCanonicalSourceUrl(String(s.resource || s.url || ''));
+    if (cUrl) existingByCanonUrl.set(cUrl, s);
+  }
+
+  if (addList.length > 0) {
+    const nowIso = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const usedIds = new Set<string>([
+      ...remainingSources.map((s) => String(s?.id || '').trim()).filter(Boolean),
+      ...normalizedRejectIds,
+    ]);
+    for (const m of proseLines.join('\n').matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)) {
+      usedIds.add(m[1]);
+    }
+
+    for (const item of addList) {
+      const rawUrl = String(item?.url || '').trim();
+      if (!rawUrl) continue;
+      const rawLastMod = item.lastModified || item.last_modified;
+      const rawRetAt = item.retrievedAt || item.retrieved_at;
+      const canonUrl = normalizeCanonicalSourceUrl(rawUrl) || rawUrl;
+      const existingMatch = existingByCanonUrl.get(canonUrl);
+      if (existingMatch && existingMatch.id) {
+        if (item.title && shouldUpgradeSourceTitle(existingMatch.title, item.title, rawUrl)) {
+          existingMatch.title = enrichBareDomainSourceTitle(item.title, rawUrl);
+          existingDefs.set(existingMatch.id, existingMatch.title);
+        }
+        if (rawLastMod && !existingMatch.last_modified) {
+          const validLm = parseValidIsoTimestamp(rawLastMod);
+          if (validLm) existingMatch.last_modified = validLm;
+        }
+        existingMatchIdsToWeave.push(existingMatch.id);
+        continue;
+      }
+
+      const rawCustomId = item.id
+        ? transliterateNordicAscii(String(item.id))
+            .toLowerCase()
+            .replace(/[^a-z0-9_-]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+        : '';
+      let slugId = '';
+      if (rawCustomId && !usedIds.has(rawCustomId)) {
+        slugId = rawCustomId;
+        usedIds.add(slugId);
+      } else {
+        slugId = generateSourceSlugId(item.title || rawUrl, rawUrl, usedIds);
+      }
+
+      const enrichedTitle = enrichBareDomainSourceTitle(item.title || rawUrl, rawUrl);
+      const retrievedAt = parseValidIsoTimestamp(rawRetAt) || nowIso;
+      const lastModified = parseValidIsoTimestamp(rawLastMod);
+      const newSrc: OKFSource = {
+        id: slugId,
+        resource: rawUrl,
+        title: enrichedTitle,
+        retrieved_at: retrievedAt,
+        ...(lastModified ? { last_modified: lastModified } : {}),
+      };
+      remainingSources.push(newSrc);
+      addedSources.push(newSrc);
+      existingByCanonUrl.set(canonUrl, newSrc);
+      existingDefs.set(slugId, enrichedTitle);
+    }
+  }
+
+  // Apply `replaceSourceMap` re-anchoring (`[^oldId]` -> `[^newId]`) before orphan-claim detection
+  const replacedMap: Record<string, string> = {};
+  if (rawReplaceEntries.length > 0) {
+    const activeById = new Map<string, OKFSource>();
+    for (const s of remainingSources) {
+      if (s && s.id) activeById.set(String(s.id).trim(), s);
+    }
+    for (const [oldId, targetSpec] of rawReplaceEntries) {
+      let resolvedTarget: OKFSource | undefined = activeById.get(targetSpec);
+      if (!resolvedTarget && /^https?:\/\//i.test(targetSpec)) {
+        const canonTarget = normalizeCanonicalSourceUrl(targetSpec) || targetSpec;
+        resolvedTarget = existingByCanonUrl.get(canonTarget);
+      }
+      if (resolvedTarget && resolvedTarget.id && resolvedTarget.id !== oldId) {
+        const newId = resolvedTarget.id;
+        replacedMap[oldId] = newId;
+        const escapedOld = oldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const escapedNew = newId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const oldFnRe = new RegExp(`\\[\\^${escapedOld}\\]`, 'g');
+        const dupNewRe = new RegExp(`(\\[\\^${escapedNew}\\])(?:\\s*\\[\\^${escapedNew}\\])+`, 'g');
+        for (let idx = 0; idx < proseLines.length; idx++) {
+          if (proseLines[idx].includes(`[^${oldId}]`)) {
+            proseLines[idx] = proseLines[idx]
+              .replace(oldFnRe, `[^${newId}]`)
+              .replace(dupNewRe, '$1');
+          }
+        }
+      }
+    }
+  }
+
+  // Detect prose lines (or individual sentences / table cells on multi-citation lines) that cite an un-replaced
+  // rejected source and have no other non-rejected citation backing that claim.
   const orphanClaimLines: string[] = [];
   if (rejectSet.size > 0) {
     for (const line of proseLines) {
@@ -3074,23 +3454,7 @@ export function curateOkfSources(
     }
   }
 
-  // Track actually rejected IDs (present in frontmatter.sources or inline body)
-  const existingSourceIds = new Set(
-    initialSources.map((s) => String(s?.id || '').trim()).filter(Boolean)
-  );
-  const inlineBodyIds = new Set(
-    Array.from(proseLines.join('\n').matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)).map((m) => m[1])
-  );
-  const rejectedIds = normalizedRejectIds.filter(
-    (id) => existingSourceIds.has(id) || inlineBodyIds.has(id)
-  );
-
-  // Filter out rejected sources from frontmatter.sources
-  const remainingSources: OKFSource[] = initialSources.filter(
-    (s) => s && !rejectSet.has(String(s.id || '').trim())
-  );
-
-  // Strip rejected [^id] citations from prose while preserving word boundaries, table cells, and punctuation
+  // Strip any remaining rejected [^id] citations from prose while preserving word boundaries, table cells, and punctuation
   let proseText = proseLines.join('\n');
   for (const rejId of normalizedRejectIds) {
     proseText = removeSpecificFootnotePreservingBoundary(proseText, rejId);
@@ -3106,24 +3470,8 @@ export function curateOkfSources(
     proseText = proseText.replace(/[ \t]+$/gm, '');
   }
 
-  // Add new sources
-  const addedSources: OKFSource[] = [];
-  const addList = Array.isArray(options?.addSources) ? options.addSources : [];
-  if (addList.length > 0) {
-    const nowIso = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-    const usedIds = new Set<string>(
-      remainingSources.map((s) => String(s?.id || '').trim()).filter(Boolean)
-    );
-    for (const m of proseText.matchAll(/\[\^([A-Za-z0-9_\-]+)\]/g)) {
-      usedIds.add(m[1]);
-    }
-
-    const existingByCanonUrl = new Map<string, OKFSource>();
-    for (const s of remainingSources) {
-      const cUrl = normalizeCanonicalSourceUrl(String(s.resource || s.url || ''));
-      if (cUrl) existingByCanonUrl.set(cUrl, s);
-    }
-
+  // Ensure any newly added sources that weren't already cited inline (e.g. via `replaceSourceMap`) are weaved for 3-way parity
+  if (addedSources.length > 0 || existingMatchIdsToWeave.length > 0) {
     const ensureInlineCitationWeaved = (fnId: string) => {
       const escaped = fnId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       if (new RegExp(`\\[\\^${escaped}\\]`).test(proseText)) {
@@ -3175,55 +3523,11 @@ export function curateOkfSources(
       }
     };
 
-    for (const item of addList) {
-      const rawUrl = String(item?.url || '').trim();
-      if (!rawUrl) continue;
-      const rawLastMod = item.lastModified || item.last_modified;
-      const rawRetAt = item.retrievedAt || item.retrieved_at;
-      const canonUrl = normalizeCanonicalSourceUrl(rawUrl) || rawUrl;
-      const existingMatch = existingByCanonUrl.get(canonUrl);
-      if (existingMatch && existingMatch.id) {
-        if (item.title && shouldUpgradeSourceTitle(existingMatch.title, item.title, rawUrl)) {
-          existingMatch.title = enrichBareDomainSourceTitle(item.title, rawUrl);
-          existingDefs.set(existingMatch.id, existingMatch.title);
-        }
-        if (rawLastMod && !existingMatch.last_modified) {
-          const validLm = parseValidIsoTimestamp(rawLastMod);
-          if (validLm) existingMatch.last_modified = validLm;
-        }
-        ensureInlineCitationWeaved(existingMatch.id);
-        continue;
-      }
-
-      const rawCustomId = item.id
-        ? transliterateNordicAscii(String(item.id))
-            .toLowerCase()
-            .replace(/[^a-z0-9_-]+/g, '-')
-            .replace(/^-+|-+$/g, '')
-        : '';
-      let slugId = '';
-      if (rawCustomId && !usedIds.has(rawCustomId)) {
-        slugId = rawCustomId;
-        usedIds.add(slugId);
-      } else {
-        slugId = generateSourceSlugId(item.title || rawUrl, rawUrl, usedIds);
-      }
-
-      const enrichedTitle = enrichBareDomainSourceTitle(item.title || rawUrl, rawUrl);
-      const retrievedAt = parseValidIsoTimestamp(rawRetAt) || nowIso;
-      const lastModified = parseValidIsoTimestamp(rawLastMod);
-      const newSrc: OKFSource = {
-        id: slugId,
-        resource: rawUrl,
-        title: enrichedTitle,
-        retrieved_at: retrievedAt,
-        ...(lastModified ? { last_modified: lastModified } : {}),
-      };
-      remainingSources.push(newSrc);
-      addedSources.push(newSrc);
-      existingByCanonUrl.set(canonUrl, newSrc);
-      existingDefs.set(slugId, enrichedTitle);
-      ensureInlineCitationWeaved(slugId);
+    for (const idToWeave of existingMatchIdsToWeave) {
+      ensureInlineCitationWeaved(idToWeave);
+    }
+    for (const addedSrc of addedSources) {
+      if (addedSrc.id) ensureInlineCitationWeaved(addedSrc.id);
     }
   }
 
@@ -3243,6 +3547,7 @@ export function curateOkfSources(
   return {
     markdown: serializeOkfDocument(doc),
     rejectedIds,
+    replacedMap,
     addedSources,
     orphanClaimLines,
   };
@@ -4193,6 +4498,23 @@ export async function cleanGroundingLinks(
   }
   orderedSources.length = 0;
   orderedSources.push(...dedupedSources);
+
+  // Domain-neutral provenance check: annotate masquerading publisher titles on third-party mirrors (`(via <hostname>)`)
+  for (const entry of orderedSources) {
+    const prov = inspectSourceDomainProvenance(entry);
+    if (prov.domainMismatch && prov.hostname && prov.claimedPublisher) {
+      const viaSuffix = `(via ${prov.hostname})`;
+      if (entry.title && !entry.title.toLowerCase().includes(prov.hostname.toLowerCase())) {
+        entry.title = `${entry.title} ${viaSuffix}`;
+        if (entry.id) {
+          existingFootnoteDefs.set(entry.id, entry.title);
+        }
+      }
+      console.log(
+        `[OKF Source Provenance Notice] Source [^${entry.id}] claims "${prov.claimedPublisher}" in title, but resolved to "${prov.hostname}" (${entry.resource}).`
+      );
+    }
+  }
 
   // Expand comma/semicolon-separated multi-footnote brackets (`[^id1, ^id2]` or `[^id1,[^id1] 4]`) into separate `[^id1] [^id2]` tags before bare-caret and alias rewriting
   bodyText = bodyText.replace(
@@ -6153,6 +6475,7 @@ export function verifyOkfConcept(
     by?: string;
     at?: string;
     rejectSourceIds?: string[];
+    replaceSourceMap?: Record<string, string>;
     addSources?: CurateOkfSourcesOptions['addSources'];
   }
 ): {
@@ -6164,6 +6487,7 @@ export function verifyOkfConcept(
   is_stale: boolean;
   verified: OKFActorEvent[];
   rejectedIds: string[];
+  replacedMap: Record<string, string>;
   addedSources: OKFSource[];
   orphanClaimLines: string[];
 } {
@@ -6223,19 +6547,26 @@ export function verifyOkfConcept(
 
   let raw = fs.readFileSync(targetFilePath, 'utf-8');
   let rejectedIds: string[] = [];
+  let replacedMap: Record<string, string> = {};
   let addedSources: OKFSource[] = [];
   let orphanClaimLines: string[] = [];
+  const hasReplaceMap =
+    Boolean(options?.replaceSourceMap) &&
+    Object.keys(options?.replaceSourceMap || {}).length > 0;
 
   if (
     (options?.rejectSourceIds && options.rejectSourceIds.length > 0) ||
+    hasReplaceMap ||
     (options?.addSources && options.addSources.length > 0)
   ) {
     const curated = curateOkfSources(raw, {
-      rejectSourceIds: options.rejectSourceIds,
-      addSources: options.addSources,
+      rejectSourceIds: options?.rejectSourceIds,
+      replaceSourceMap: options?.replaceSourceMap,
+      addSources: options?.addSources,
     });
     raw = curated.markdown;
     rejectedIds = curated.rejectedIds;
+    replacedMap = curated.replacedMap;
     addedSources = curated.addedSources;
     orphanClaimLines = curated.orphanClaimLines;
     if (options?.rejectSourceIds && options.rejectSourceIds.length > 0) {
@@ -6381,8 +6712,11 @@ export function verifyOkfConcept(
     }
   }
 
+  const replacedSummary = Object.entries(replacedMap)
+    .map(([k, v]) => `${k}->${v}`)
+    .join(', ');
   console.log(
-    `[OKF Verification Gate]: Verified ${targetFilePath} (by: ${actor}, status: stable, trust_tier: ${trustTier}, is_stale: ${stale}${rejectedIds.length > 0 ? `, rejected: [${rejectedIds.join(', ')}]` : ''}${addedSources.length > 0 ? `, added: [${addedSources.map((s) => s.id).join(', ')}]` : ''})`
+    `[OKF Verification Gate]: Verified ${targetFilePath} (by: ${actor}, status: stable, trust_tier: ${trustTier}, is_stale: ${stale}${rejectedIds.length > 0 ? `, rejected: [${rejectedIds.join(', ')}]` : ''}${replacedSummary ? `, replaced: [${replacedSummary}]` : ''}${addedSources.length > 0 ? `, added: [${addedSources.map((s) => s.id).join(', ')}]` : ''})`
   );
   if (orphanClaimLines.length > 0) {
     console.warn(
@@ -6399,6 +6733,7 @@ export function verifyOkfConcept(
     is_stale: stale,
     verified: existingVerified,
     rejectedIds,
+    replacedMap,
     addedSources,
     orphanClaimLines,
   };
@@ -10591,8 +10926,35 @@ body {
 .src-chip.modified { background: #dbeafe; color: #1e40af; }
 .src-chip.citations { background: #e0f2fe; color: #0369a1; font-weight: 600; }
 .src-chip.sole-warning { background: #fef3c7; color: #92400e; font-weight: 600; border: 1px solid #f59e0b; }
+.src-chip.domain-host { background: #f1f5f9; color: #0f172a; font-weight: 700; border: 1px solid #cbd5e1; }
+.src-chip.domain-mismatch { background: #ffedd5; color: #9a3412; font-weight: 700; border: 1px solid #f97316; }
+.src-chip.replaced-badge { background: #dcfce7; color: #166534; font-weight: 700; border: 1px solid #22c55e; }
 .src-chip.rejected-badge { background: #fee2e2; color: #991b1b; font-weight: 700; border: 1px solid #f87171; }
 .src-chip.added-badge { background: #dcfce7; color: #166534; font-weight: 700; border: 1px solid #4ade80; }
+.okf-replace-row {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: #7c2d12;
+}
+.okf-replace-select {
+  flex: 1;
+  min-width: 170px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  border: 1px solid #fb923c;
+  background: #fff;
+  font-size: 11.5px;
+  color: #0f172a;
+}
 .okf-md-outer {
   display: flex;
   flex-direction: column;
@@ -11418,6 +11780,176 @@ const A2UI_STUDIO_JS = `
     }
   }
 
+  function inspectClientSourceDomainProvenance(src) {
+    const rawUrl = String((src && (src.url || src.resource)) || "").trim();
+    if (!rawUrl || rawUrl.indexOf("vertexaisearch.cloud.google.com/grounding-api-redirect/") !== -1) {
+      return { hostname: "", isDirectFileAsset: false, claimedPublisher: "", domainMismatch: false };
+    }
+    let parsed = null;
+    try {
+      parsed = new URL(rawUrl);
+    } catch (_e) {
+      return { hostname: "", isDirectFileAsset: false, claimedPublisher: "", domainMismatch: false };
+    }
+    const hostname = String(parsed.hostname || "").toLowerCase().replace(/^www\\./, "");
+    if (!hostname) {
+      return { hostname: "", isDirectFileAsset: false, claimedPublisher: "", domainMismatch: false };
+    }
+    const isDirectFileAsset =
+      /\\.(?:pdf|docx?|xlsx?|pptx?)(?:$|[?#])/i.test(parsed.pathname || "") ||
+      /\\/(?:s3assets[^/]*|getfile(?:\\.aspx)?|wp-content\\/uploads|uploads|attachments)\\b/i.test(
+        parsed.pathname || ""
+      ) ||
+      /(?:amazonaws\\.com|cloudfront\\.net|blob\\.core\\.windows\\.net|storage\\.googleapis\\.com)$/i.test(
+        hostname
+      );
+    const rawTitle = String((src && src.title) || "").trim();
+    if (!rawTitle) {
+      return { hostname: hostname, isDirectFileAsset: isDirectFileAsset, claimedPublisher: "", domainMismatch: false };
+    }
+    const viaAnnotMatch = rawTitle.match(/\\s*\\(via\\s+([a-z0-9.-]+\\.[a-z]{2,})\\)\\s*$/i);
+    const titleWithoutVia = viaAnnotMatch
+      ? rawTitle.slice(0, rawTitle.length - viaAnnotMatch[0].length).trim()
+      : rawTitle;
+    const sepMatch = titleWithoutVia.match(/\\s+(?:([|])|[–—]|-\\s)\\s*([^–—|]{2,60})\\s*$/);
+    if (!sepMatch) {
+      return { hostname: hostname, isDirectFileAsset: isDirectFileAsset, claimedPublisher: "", domainMismatch: false };
+    }
+    const prefixHostCandidate = titleWithoutVia
+      .slice(0, sepMatch.index || 0)
+      .trim()
+      .toLowerCase()
+      .replace(/^www\\./, "");
+    if (
+      prefixHostCandidate &&
+      (prefixHostCandidate === hostname ||
+        hostname.slice(-prefixHostCandidate.length - 1) === "." + prefixHostCandidate)
+    ) {
+      return { hostname: hostname, isDirectFileAsset: isDirectFileAsset, claimedPublisher: "", domainMismatch: false };
+    }
+    const isPipeSep = sepMatch[1] === "|";
+    const candidatePub = sepMatch[2].trim();
+    const pubWords = candidatePub.split(/\\s+/).filter(Boolean);
+    if (pubWords.length === 0 || pubWords.length > 6) {
+      return { hostname: hostname, isDirectFileAsset: isDirectFileAsset, claimedPublisher: "", domainMismatch: false };
+    }
+    if (
+      (/^[a-zæøåäö]/.test(candidatePub) && !/\\.[a-z]{2,}$/i.test(candidatePub)) ||
+      /^(?:§+|kap(?:ittel|\\.)?\\s*\\d|del\\s+\\d|part\\s+\\d|ch(?:apter|\\.)\\s*\\d|sec(?:tion\\b|\\.\\s*\\d|\\s+\\d)|mod(?:ul|ule|\\.)\\s*\\d|steg\\s+\\d|step\\s+\\d|fase\\s+\\d|phase\\s+\\d|tabell\\b|table\\b|figur\\b|figure\\b|vedlegg\\b|appendix\\b|rev(?:ision\\b|\\.\\s*\\d|\\s+\\d)|v\\d|\\d{4}\\b|q[1-4]\\b)/i.test(
+        candidatePub
+      ) ||
+      /^\\d+[\\d\\s.,:\\-–/]*$/.test(candidatePub)
+    ) {
+      return { hostname: hostname, isDirectFileAsset: isDirectFileAsset, claimedPublisher: "", domainMismatch: false };
+    }
+    function normClientAscii(s) {
+      return String(s || "")
+        .toLowerCase()
+        .replace(/æ/g, "ae")
+        .replace(/ø/g, "oe")
+        .replace(/å/g, "aa")
+        .normalize("NFD")
+        .replace(/[\\u0300-\\u036f]/g, "");
+    }
+    const pubSlug = normClientAscii(candidatePub)
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    const srcIdLower = String((src && src.id) || "").toLowerCase();
+    const idEncodesPub = Boolean(
+      pubSlug &&
+        pubSlug.length >= 3 &&
+        (srcIdLower.slice(-pubSlug.length - 1) === "-" + pubSlug ||
+          srcIdLower.indexOf(pubSlug + "-") === 0)
+    );
+    const hasParenAcronym = /\\([A-ZÆØÅ0-9]{2,10}\\)\\s*$/.test(candidatePub);
+    if (
+      !isPipeSep &&
+      !hasParenAcronym &&
+      !idEncodesPub &&
+      (pubWords.length > 4 ||
+        /\\b(?:oversikt|overview|innledning|introduction|sammendrag|summary|veiledning|veileder|guide|guidelines|sjekkliste|checklist|kontrollrutiner|gjennomforing|gjennomføring|analyse|analysis|vurdering|assessment|krav|requirements|praksis|tiltak|actions|rapport|report|utgave|edition|hovedpunkter|key\\s+points)\\b/i.test(
+          candidatePub
+        ))
+    ) {
+      return { hostname: hostname, isDirectFileAsset: isDirectFileAsset, claimedPublisher: "", domainMismatch: false };
+    }
+    if (
+      /\\.(?:gov|gov\\.[a-z]{2}|mil|int)$/i.test(hostname) ||
+      /(?:^|\\.)(?:regjeringen\\.no|stortinget\\.no|europa\\.eu|canada\\.ca|gov\\.uk|usa\\.gov|who\\.int|un\\.org|oecd\\.org|worldbank\\.org)$/i.test(
+        hostname
+      )
+    ) {
+      return {
+        hostname: hostname,
+        isDirectFileAsset: isDirectFileAsset,
+        claimedPublisher: candidatePub,
+        domainMismatch: false,
+      };
+    }
+    const hostIgnore = new Set([
+      "www", "www2", "wwwex", "web", "secure", "portal", "app", "api", "docs", "cdn", "static", "files", "media",
+      "no", "com", "org", "net", "edu", "gov", "int", "eu", "uk", "de", "se", "dk", "fi", "is", "nl", "fr", "es",
+      "it", "ch", "at", "be", "ca", "au", "nz", "us", "io", "ai", "co"
+    ]);
+    const hostTokens = hostname
+      .split(".")
+      .map(function (p) { return p.replace(/[^a-z0-9]/g, ""); })
+      .filter(function (p) { return p.length >= 2 && !hostIgnore.has(p); });
+    if (hostTokens.length === 0) {
+      return {
+        hostname: hostname,
+        isDirectFileAsset: isDirectFileAsset,
+        claimedPublisher: candidatePub,
+        domainMismatch: false,
+      };
+    }
+    const pubStop = new Set([
+      "for", "og", "and", "of", "the", "in", "on", "til", "av", "om", "i", "de", "la", "du", "des", "und", "fur", "van", "het", "us", "uk"
+    ]);
+    const rawPubTokens = normClientAscii(candidatePub.replace(/\\([^)]*\\)/g, " "))
+      .split(/[^a-z0-9]+/)
+      .filter(function (t) { return t.length >= 2 && !pubStop.has(t); });
+    const pubJoined = rawPubTokens.join("");
+    const acronyms = new Set();
+    const parenRe = /\\(([A-Za-zÆØÅæøå0-9]{2,12})\\)/g;
+    let pm;
+    while ((pm = parenRe.exec(candidatePub)) !== null) {
+      acronyms.add(normClientAscii(pm[1]).replace(/[^a-z0-9]/g, ""));
+    }
+    const upperRe = /\\b([A-ZÆØÅ]{2,10})\\b/g;
+    let um;
+    while ((um = upperRe.exec(candidatePub)) !== null) {
+      acronyms.add(normClientAscii(um[1]).replace(/[^a-z0-9]/g, ""));
+    }
+    if (rawPubTokens.length >= 2) {
+      acronyms.add(rawPubTokens.map(function (t) { return t[0]; }).join(""));
+    }
+    const matchesHost = hostTokens.some(function (hp) {
+      if (acronyms.has(hp)) return true;
+      let acMatch = false;
+      acronyms.forEach(function (ac) {
+        if (ac.length >= 3 && (hp.indexOf(ac) !== -1 || ac.indexOf(hp) !== -1)) acMatch = true;
+      });
+      if (acMatch) return true;
+      for (let k = 0; k < rawPubTokens.length; k++) {
+        const pt = rawPubTokens[k];
+        if (pt === hp) return true;
+        if (pt.length >= 4 && hp.indexOf(pt) !== -1) return true;
+        if (hp.length >= 4 && pt.indexOf(hp) !== -1) return true;
+      }
+      if (hp.length >= 4 && pubJoined.indexOf(hp[0]) === 0 && pubJoined.indexOf(hp.slice(1)) !== -1) {
+        return true;
+      }
+      return false;
+    });
+    return {
+      hostname: hostname,
+      isDirectFileAsset: isDirectFileAsset,
+      claimedPublisher: candidatePub,
+      domainMismatch: !matchesHost || Boolean(viaAnnotMatch),
+    };
+  }
+
   function buildCurationPrompts(surface) {
     if (!surface || !surface.dataModel) {
       return { agyText: "", cliText: "" };
@@ -11448,6 +11980,15 @@ const A2UI_STUDIO_JS = `
     const added = addedRaw.filter(function (a) {
       return !a.id || !rejectedSet.has(String(a.id));
     });
+    const replacedRaw = resolvePointer(surface.dataModel, "/okf/replacedSources") || {};
+    const replacePairs = [];
+    for (let rIdx = 0; rIdx < rejected.length; rIdx++) {
+      const rejId = rejected[rIdx];
+      const replTarget = String(replacedRaw[rejId] || "").trim();
+      if (replTarget && !rejectedSet.has(replTarget)) {
+        replacePairs.push(rejId + "=" + replTarget);
+      }
+    }
     let byActor = String(resolvePointer(surface.dataModel, "/okf/verifierActor") || "").trim();
     if (!byActor || byActor === "human:styrer" || byActor === "human:reviewer") {
       try {
@@ -11475,6 +12016,9 @@ const A2UI_STUDIO_JS = `
     if (rejected.length > 0) {
       cliParts.push("--reject-source " + rejected.join(","));
     }
+    if (replacePairs.length > 0) {
+      cliParts.push("--replace-source " + replacePairs.join(","));
+    }
     for (let i = 0; i < added.length; i++) {
       const item = added[i];
       const spec =
@@ -11485,7 +12029,7 @@ const A2UI_STUDIO_JS = `
     const cliText = cliParts.join(" ");
 
     let agyText = "";
-    if (rejected.length === 0 && added.length === 0) {
+    if (rejected.length === 0 && added.length === 0 && replacePairs.length === 0) {
       if (isStage1Only) {
         agyText = isNo
           ? "Jeg har gjennomgått a2ui.html og godkjenner alle kildene — kjør " +
@@ -11513,27 +12057,29 @@ const A2UI_STUDIO_JS = `
       const segs = [];
       if (isNo) {
         if (rejected.length > 0) segs.push("Avvis kilder: [" + rejList + "].");
+        if (replacePairs.length > 0) segs.push("Erstatt siteringer: [" + replacePairs.join(", ") + "].");
         if (added.length > 0) segs.push("Legg til kilder: [" + addList + "].");
         segs.push(
           isStage1Only
-            ? "Oppdater research_summary.md (flett inn nye kilder og fjern/erstatt påstander som kun hviler på avviste kilder), kjør " +
+            ? "Kjør " +
                 cliText +
-                " og gå videre til Stage 2."
-            : "Oppdater research_summary.md (flett inn nye kilder og fjern/erstatt påstander som kun hviler på avviste kilder) og kjør " +
+                " (bruk --replace-source gammelId=nyId_eller_URL i cli:verify for å re-ankre siteringer fra avviste kilder til eksisterende/nye kilder uten å omskrive hele research_summary.md; rediger kun enkeltsetninger ved reelle faktaendringer) og gå videre til Stage 2."
+            : "Kjør " +
                 cliText +
-                " for å oppdatere kunnskapsgrunnlaget og A2UI-studioet (uten å kjøre Stage 2 på nytt med mindre påstander i kurset må endres)."
+                " (bruk --replace-source gammelId=nyId_eller_URL i cli:verify for å re-ankre siteringer uten å omskrive hele research_summary.md) for å oppdatere kunnskapsgrunnlaget og A2UI-studioet (uten å kjøre Stage 2 på nytt med mindre påstander i kurset må endres)."
         );
       } else {
         if (rejected.length > 0) segs.push("Reject sources: [" + rejList + "].");
+        if (replacePairs.length > 0) segs.push("Replace citations: [" + replacePairs.join(", ") + "].");
         if (added.length > 0) segs.push("Add sources: [" + addList + "].");
         segs.push(
           isStage1Only
-            ? "Update research_summary.md (weave added sources and remove/replace claims backed solely by rejected sources), run " +
+            ? "Run " +
                 cliText +
-                " and proceed to Stage 2."
-            : "Update research_summary.md (weave added sources and remove/replace claims backed solely by rejected sources) and run " +
+                " (use --replace-source oldId=newId_or_URL in cli:verify to re-anchor citations from rejected sources to existing/added sources without rewriting research_summary.md; only edit specific sentences if factual claims must change) and proceed to Stage 2."
+            : "Run " +
                 cliText +
-                " to refresh the knowledge base and A2UI studio (without re-running Stage 2 unless course claims changed)."
+                " (use --replace-source oldId=newId_or_URL in cli:verify to re-anchor citations without rewriting research_summary.md) to refresh the knowledge base and A2UI studio (without re-running Stage 2 unless course claims changed)."
         );
       }
       agyText = segs.join(" ");
@@ -11569,17 +12115,62 @@ const A2UI_STUDIO_JS = `
     return candidate;
   }
 
+  function setReplaceSourceInStudio(surface, oldId, newTarget) {
+    const cleanOld = String(oldId || "").trim();
+    if (!surface || !surface.dataModel || !cleanOld) return {};
+    const currentMap = Object.assign(
+      {},
+      resolvePointer(surface.dataModel, "/okf/replacedSources") || {}
+    );
+    const cleanTarget = String(newTarget || "").trim();
+    if (!cleanTarget || cleanTarget === cleanOld) {
+      delete currentMap[cleanOld];
+    } else {
+      currentMap[cleanOld] = cleanTarget;
+    }
+    setPointer(surface.dataModel, "/okf/replacedSources", currentMap);
+    buildCurationPrompts(surface);
+    if (
+      typeof renderSurface === "function" &&
+      typeof document !== "undefined" &&
+      document.getElementById &&
+      document.getElementById("a2ui-surface-root")
+    ) {
+      renderSurface();
+    }
+    return currentMap;
+  }
+
   function toggleRejectSourceInStudio(surface, srcId) {
     const cleanId = String(srcId || "").trim();
     if (!surface || !surface.dataModel || !cleanId) return [];
     const current = (resolvePointer(surface.dataModel, "/okf/rejectedSources") || []).slice();
+    const replacedMap = Object.assign(
+      {},
+      resolvePointer(surface.dataModel, "/okf/replacedSources") || {}
+    );
     const idx = current.indexOf(cleanId);
     if (idx === -1) {
       current.push(cleanId);
+      const sourcesList = resolvePointer(surface.dataModel, "/okf/sources") || [];
+      let rejUrl = "";
+      for (let i = 0; i < sourcesList.length; i++) {
+        if (sourcesList[i] && String(sourcesList[i].id) === cleanId) {
+          rejUrl = String(sourcesList[i].url || sourcesList[i].resource || "");
+          break;
+        }
+      }
+      Object.keys(replacedMap).forEach(function (k) {
+        if (replacedMap[k] === cleanId || (rejUrl && replacedMap[k] === rejUrl)) {
+          delete replacedMap[k];
+        }
+      });
     } else {
       current.splice(idx, 1);
+      delete replacedMap[cleanId];
     }
     setPointer(surface.dataModel, "/okf/rejectedSources", current);
+    setPointer(surface.dataModel, "/okf/replacedSources", replacedMap);
 
     const bodyMd = String(resolvePointer(surface.dataModel, "/okf/body") || "");
     const sources = resolvePointer(surface.dataModel, "/okf/sources") || [];
@@ -11693,7 +12284,9 @@ const A2UI_STUDIO_JS = `
     window.__ICM_TEST_HOOKS__.syncChecklistToOkfBody = syncChecklistToOkfBody;
     window.__ICM_TEST_HOOKS__.syncOkfBodyToChecklist = syncOkfBodyToChecklist;
     window.__ICM_TEST_HOOKS__.inspectSourceCitationsInBody = inspectSourceCitationsInBody;
+    window.__ICM_TEST_HOOKS__.inspectClientSourceDomainProvenance = inspectClientSourceDomainProvenance;
     window.__ICM_TEST_HOOKS__.buildCurationPrompts = buildCurationPrompts;
+    window.__ICM_TEST_HOOKS__.setReplaceSourceInStudio = setReplaceSourceInStudio;
     window.__ICM_TEST_HOOKS__.toggleRejectSourceInStudio = toggleRejectSourceInStudio;
     window.__ICM_TEST_HOOKS__.addSourceInStudio = addSourceInStudio;
     window.__ICM_TEST_HOOKS__.renderComponent = renderComponent;
@@ -13402,15 +13995,20 @@ const A2UI_STUDIO_JS = `
       if (resolvePointer(surface.dataModel, "/okf/rejectedSources") === undefined) {
         setPointer(surface.dataModel, "/okf/rejectedSources", []);
       }
+      if (resolvePointer(surface.dataModel, "/okf/replacedSources") === undefined) {
+        setPointer(surface.dataModel, "/okf/replacedSources", {});
+      }
       if (resolvePointer(surface.dataModel, "/okf/addedSources") === undefined) {
         setPointer(surface.dataModel, "/okf/addedSources", []);
       }
       const rejectedSources = (resolvePointer(surface.dataModel, "/okf/rejectedSources") || []).map(String);
       const rejectedSet = new Set(rejectedSources);
+      const replacedSources = resolvePointer(surface.dataModel, "/okf/replacedSources") || {};
       const addedSources = resolvePointer(surface.dataModel, "/okf/addedSources") || [];
-      const activeSourceCount = sources.filter(function (s) {
+      const activeSourcesList = sources.filter(function (s) {
         return s && !rejectedSet.has(String(s.id || ""));
-      }).length;
+      });
+      const activeSourceCount = activeSourcesList.length;
       const curationPrompts = buildCurationPrompts(surface);
 
       if (!viewingStub) {
@@ -13550,6 +14148,7 @@ const A2UI_STUDIO_JS = `
                 resolvePointer(surface.dataModel, "/okf/verifierActor") || verifierInput.value || ""
               ).trim(),
               rejectedSources: (resolvePointer(surface.dataModel, "/okf/rejectedSources") || []).map(String),
+              replacedSources: resolvePointer(surface.dataModel, "/okf/replacedSources") || {},
               addedSources: resolvePointer(surface.dataModel, "/okf/addedSources") || [],
               agyText: currentPrompts.agyText,
               cliText: currentPrompts.cliText,
@@ -13876,6 +14475,8 @@ const A2UI_STUDIO_JS = `
           : "";
         const citeStats = inspectSourceCitationsInBody(bodyMd, rawId, rejectedSources);
         statsMap[rawId] = citeStats;
+        const prov = inspectClientSourceDomainProvenance(src);
+        const replacedTarget = isRej ? String(replacedSources[rawId] || "").trim() : "";
 
         sc.id = "okf-src-" + rawId;
         const headerHtml =
@@ -13893,6 +14494,9 @@ const A2UI_STUDIO_JS = `
           (isRej
             ? ' <span class="src-chip rejected-badge">' + (isNo ? "🚫 AVVIST" : "🚫 REJECTED") + "</span>"
             : "") +
+          (replacedTarget
+            ? ' <span class="src-chip replaced-badge">🔀 → ' + escapeHtml(replacedTarget) + "</span>"
+            : "") +
           (src.addedByHuman
             ? ' <span class="src-chip added-badge">' + (isNo ? "➕ NY" : "➕ ADDED") + "</span>"
             : "") +
@@ -13906,6 +14510,20 @@ const A2UI_STUDIO_JS = `
               "</a></div>"
             : "") +
           "<div>" +
+          (prov.hostname
+            ? '<span class="src-chip domain-host">🌐 ' +
+              escapeHtml(prov.hostname) +
+              (prov.isDirectFileAsset ? " 📄" : "") +
+              "</span>"
+            : "") +
+          (prov.domainMismatch && prov.hostname && prov.claimedPublisher
+            ? '<span class="src-chip domain-mismatch">⚠️ ' +
+              (isNo ? "Domeneavvik: " : "Domain mismatch: ") +
+              escapeHtml(prov.hostname) +
+              ' ≠ "' +
+              escapeHtml(prov.claimedPublisher) +
+              '"</span>'
+            : "") +
           (src.retrieved_at
             ? '<span class="src-chip retrieved">retrieved: ' + escapeHtml(src.retrieved_at) + "</span>"
             : "") +
@@ -13917,7 +14535,7 @@ const A2UI_STUDIO_JS = `
           " " +
           (isNo ? "siteringer" : "citations") +
           "</span>" +
-          (citeStats.soleClaimLines.length > 0
+          (citeStats.soleClaimLines.length > 0 && !replacedTarget
             ? '<span class="src-chip sole-warning">⚠️ ' +
               (isNo
                 ? "Eneste kilde for " + citeStats.soleClaimLines.length + " punkt(er)"
@@ -13949,6 +14567,50 @@ const A2UI_STUDIO_JS = `
           });
           actionRow.appendChild(rejBtn);
           sc.appendChild(actionRow);
+
+          if (isRej && citeStats.mentionCount > 0 && activeSourcesList.length > 0) {
+            const replRow = document.createElement("div");
+            replRow.className = "okf-replace-row";
+            const replLbl = document.createElement("label");
+            replLbl.style.fontWeight = "600";
+            replLbl.textContent = isNo
+              ? "🔀 Erstatt " + citeStats.mentionCount + " sitering(er) med:"
+              : "🔀 Replace " + citeStats.mentionCount + " citation(s) with:";
+            const replSelect = document.createElement("select");
+            replSelect.className = "okf-replace-select";
+            replSelect.setAttribute("data-src-id", rawId);
+            const defaultOpt = document.createElement("option");
+            defaultOpt.value = "";
+            defaultOpt.textContent = isNo
+              ? "(La AGY velge / fjern fotnote)"
+              : "(Let AGY choose / strip footnote)";
+            replSelect.appendChild(defaultOpt);
+            activeSourcesList.forEach(function (actSrc) {
+              const actId = String(actSrc.id || "");
+              const actUrl = String(actSrc.url || actSrc.resource || "");
+              const optVal = actSrc.addedByHuman && actUrl ? actUrl : actId;
+              if (!optVal) return;
+              const opt = document.createElement("option");
+              opt.value = optVal;
+              const shortT = String(actSrc.title || actUrl || actId);
+              opt.textContent =
+                (actSrc.addedByHuman ? "➕ " : "") +
+                "[^" +
+                actId +
+                "] " +
+                (shortT.length > 52 ? shortT.slice(0, 52) + "…" : shortT);
+              if (replacedTarget === optVal || replacedTarget === actId) {
+                opt.selected = true;
+              }
+              replSelect.appendChild(opt);
+            });
+            replSelect.addEventListener("change", function () {
+              setReplaceSourceInStudio(surface, rawId, replSelect.value);
+            });
+            replRow.appendChild(replLbl);
+            replRow.appendChild(replSelect);
+            sc.appendChild(replRow);
+          }
         }
 
         if (citeStats.soleClaimLines.length > 0) {
@@ -14862,6 +15524,7 @@ export function generateA2uiSurface(
         sources: rSources,
         verifierActor: rVerifierActor,
         rejectedSources: [] as string[],
+        replacedSources: {} as Record<string, string>,
         addedSources: [] as Array<{ id: string; url: string; title: string }>,
         stage1Trace: rStage1Trace,
         body: rBody,
@@ -15859,6 +16522,7 @@ export function generateA2uiSurface(
       sourcesBadge: primarySourcesBadgeStr,
       sources: okfSources,
       rejectedSources: [] as string[],
+      replacedSources: {} as Record<string, string>,
       addedSources: [] as Array<{ id: string; url: string; title: string }>,
       stage1Trace,
       body: primaryBodyStr,
@@ -15963,12 +16627,17 @@ export function generateA2uiSurface(
     messages,
   };
 
-  fs.writeFileSync(surfaceJsonPath, JSON.stringify(surfaceJsonDoc, null, 2), 'utf-8');
-  fs.writeFileSync(
-    surfaceJsonlPath,
-    messages.map((m) => JSON.stringify(m)).join('\n') + '\n',
-    'utf-8'
-  );
+  const serializedSurfaceJson = JSON.stringify(surfaceJsonDoc, null, 2);
+  const serializedSurfaceJsonl = messages.map((m) => JSON.stringify(m)).join('\n') + '\n';
+  fs.writeFileSync(surfaceJsonPath, serializedSurfaceJson, 'utf-8');
+  fs.writeFileSync(surfaceJsonlPath, serializedSurfaceJsonl, 'utf-8');
+
+  // Also mirror `a2ui_surface.json` & `a2ui_surface.jsonl` at the run root (`workspace/runs/<runId>/`) alongside `a2ui.html`
+  if (resolvedRunDir && path.resolve(baseOutDir) !== path.resolve(stageOutDir)) {
+    fs.mkdirSync(baseOutDir, { recursive: true });
+    fs.writeFileSync(path.join(baseOutDir, 'a2ui_surface.json'), serializedSurfaceJson, 'utf-8');
+    fs.writeFileSync(path.join(baseOutDir, 'a2ui_surface.jsonl'), serializedSurfaceJsonl, 'utf-8');
+  }
 
   const clientPayload = {
     surfaceId,
@@ -18889,6 +19558,183 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         hasAntigravityBrowserCapability({ homeDir: mockAgyHomeDir }) === true,
       `hasAntigravityBrowserCapability returns true only when Antigravity 2.0 and /browser capabilities are installed`
     );
+
+    // Verify run-root mirror of `a2ui_surface.json` and `a2ui_surface.jsonl` alongside `a2ui.html`
+    assert(
+      fs.existsSync(path.join(s1UnverifiedDir, 'a2ui_surface.json')) &&
+        fs.existsSync(path.join(s1UnverifiedDir, 'a2ui_surface.jsonl')) &&
+        fs.existsSync(syncedArtifacts.surfaceJsonPath),
+      `generateA2uiSurface writes a2ui_surface.json and a2ui_surface.jsonl at both stages/<stage>/output/ and workspace/runs/<runId>/`
+    );
+
+    // Verify domain-neutral `inspectSourceDomainProvenance` & `inspectClientSourceDomainProvenance` across Norwegian, US, and umbrella domains
+    const provMirrorPdf = inspectSourceDomainProvenance({
+      id: 'barnehageloven-lovdata',
+      title: 'Lov om barnehager (barnehageloven) – Lovdata',
+      resource: 'https://dyrebo.barnehage.no/Getfile.aspx/123/Lov_om_barnehager.pdf',
+    });
+    const provS3Bucket = inspectSourceDomainProvenance({
+      id: 'forskrift-brannforebygging',
+      title: 'Forskrift om brannforebygging – Lovdata',
+      resource: 'https://secure.styret.com/s3assets-public/show/67781',
+    });
+    const provScribdSec = inspectSourceDomainProvenance({
+      id: 'form-10k-sec',
+      title: 'Annual Form 10-K – SEC',
+      resource: 'https://www.scribd.com/document/999/form-10k.pdf',
+    });
+    const provRealLovdata = inspectSourceDomainProvenance({
+      id: 'lovdata-brann',
+      title: 'Forskrift om brannforebygging – Lovdata',
+      resource: 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710',
+    });
+    const provDsbAcronym = inspectSourceDomainProvenance({
+      id: 'dsb-veiledning',
+      title: 'Veiledning om brannvern – Direktoratet for samfunnssikkerhet og beredskap (DSB)',
+      resource: 'https://www.dsb.no/lover/brannvern/',
+    });
+    const provUdirAbbrev = inspectSourceDomainProvenance({
+      id: 'udir-beredskap',
+      title: 'Beredskap i barnehagen – Utdanningsdirektoratet',
+      resource: 'https://www.udir.no/sikkerhet-og-beredskap/',
+    });
+    const provRegjeringenUmbrella = inspectSourceDomainProvenance({
+      id: 'kd-veileder',
+      title: 'Sikkerhet i barnehager – Kunnskapsdepartementet',
+      resource: 'https://www.regjeringen.no/no/dokumenter/id12345/',
+    });
+    const provRealSecGov = inspectSourceDomainProvenance({
+      id: 'sec-10k',
+      title: 'Form 10-K – U.S. Securities and Exchange Commission',
+      resource: 'https://www.sec.gov/ix?doc=/Archives/edgar/data/10k.htm',
+    });
+    const provGenericSubtitle = inspectSourceDomainProvenance({
+      id: 'brannvern-guide',
+      title: 'Brannvern i barnehagen – Praktisk veiledning',
+      resource: 'https://brannvernforeningen.no/barnehage',
+    });
+    const provHostPrefixedTitle = inspectSourceDomainProvenance({
+      id: 'dibk-no',
+      title: 'dibk.no – Byggteknisk forskrift tek17',
+      resource: 'https://dibk.no/regelverk/byggteknisk-forskrift-tek17/',
+    });
+    const clientProvMirror = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'barnehageloven-lovdata',
+      title: 'Lov om barnehager (barnehageloven) – Lovdata (via dyrebo.barnehage.no)',
+      url: 'https://dyrebo.barnehage.no/Getfile.aspx/123/Lov_om_barnehager.pdf',
+    });
+    const clientProvUdir = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'udir-beredskap',
+      title: 'Beredskap i barnehagen – Utdanningsdirektoratet',
+      url: 'https://www.udir.no/sikkerhet-og-beredskap/',
+    });
+    assert(
+      provMirrorPdf.domainMismatch === true &&
+        provMirrorPdf.hostname === 'dyrebo.barnehage.no' &&
+        provMirrorPdf.isDirectFileAsset === true &&
+        provMirrorPdf.claimedPublisher === 'Lovdata' &&
+        provS3Bucket.domainMismatch === true &&
+        provS3Bucket.hostname === 'secure.styret.com' &&
+        provScribdSec.domainMismatch === true &&
+        provRealLovdata.domainMismatch === false &&
+        provDsbAcronym.domainMismatch === false &&
+        provUdirAbbrev.domainMismatch === false &&
+        provRegjeringenUmbrella.domainMismatch === false &&
+        provRealSecGov.domainMismatch === false &&
+        provGenericSubtitle.domainMismatch === false &&
+        provHostPrefixedTitle.domainMismatch === false &&
+        clientProvMirror.domainMismatch === true &&
+        clientProvMirror.claimedPublisher === 'Lovdata' &&
+        clientProvUdir.domainMismatch === false,
+      `inspectSourceDomainProvenance and inspectClientSourceDomainProvenance flag third-party mirrors masquerading as authorities while allowing true domains, acronyms, compound abbreviations, host-prefixed slugs, and umbrella portals`
+    );
+
+    // Verify `cleanGroundingLinks()` annotates `(via <hostname>)` on masquerading mirror titles
+    const cleanedMasquerade = await cleanGroundingLinks(
+      [
+        '---',
+        'type: Research Concept',
+        'title: Provenance Test',
+        'sources:',
+        '  - id: barnehageloven-lovdata',
+        '    resource: https://dyrebo.barnehage.no/Getfile.aspx/Lov_om_barnehager.pdf',
+        '    title: Lov om barnehager (barnehageloven) – Lovdata',
+        '---',
+        'Barnehagen skal ha internkontroll[^barnehageloven-lovdata].',
+        '',
+        '[^barnehageloven-lovdata]: Lov om barnehager (barnehageloven) – Lovdata',
+      ].join('\n'),
+      []
+    );
+    assert(
+      cleanedMasquerade.includes('(via dyrebo.barnehage.no)'),
+      `cleanGroundingLinks appends (via <hostname>) when a source title claims a publisher that does not match its resolved host`
+    );
+
+    // Verify zero-token `--replace-source` (`replaceSourceMap`) re-anchoring to both existing IDs and newly added URLs
+    const replaceInputMd = [
+      '---',
+      'type: Research Concept',
+      'title: Re-Anchor Test',
+      'status: draft',
+      'sources:',
+      '  - id: dsb-veiledning',
+      '    title: Veiledning til forskrift om brannforebygging – DSB',
+      '    resource: https://www.dsb.no/lover/brannforebygging/',
+      '  - id: mirror-forskrift',
+      '    title: Forskrift om brannforebygging – Lovdata (via secure.styret.com)',
+      '    resource: https://secure.styret.com/s3assets-public/show/67781',
+      '  - id: mirror-barnehageloven',
+      '    title: Lov om barnehager – Lovdata (via dyrebo.barnehage.no)',
+      '    resource: https://dyrebo.barnehage.no/Getfile.aspx/Lov.pdf',
+      '---',
+      'Innledning med generell kontekst.',
+      '',
+      'Brannsikkerhet krever systematisk kartlegging[^mirror-forskrift].',
+      'Samme krav følger av veiledningen[^dsb-veiledning] [^mirror-forskrift].',
+      'Styrer har ansvar for internkontroll etter § 9[^mirror-barnehageloven].',
+      '',
+      '[^dsb-veiledning]: Veiledning til forskrift om brannforebygging – DSB',
+      '[^mirror-forskrift]: Forskrift om brannforebygging – Lovdata (via secure.styret.com)',
+      '[^mirror-barnehageloven]: Lov om barnehager – Lovdata (via dyrebo.barnehage.no)',
+      '',
+    ].join('\n');
+    const replacedCurated = curateOkfSources(replaceInputMd, {
+      rejectSourceIds: ['mirror-forskrift', 'mirror-barnehageloven'],
+      replaceSourceMap: {
+        'mirror-forskrift': 'dsb-veiledning',
+        'mirror-barnehageloven': 'https://lovdata.no/dokument/NL/lov/2005-06-17-64',
+      },
+      addSources: [
+        {
+          url: 'https://lovdata.no/dokument/NL/lov/2005-06-17-64',
+          title: 'Lov om barnehager (barnehageloven) – Lovdata',
+        },
+      ],
+    });
+    const newBarnehageSlug = replacedCurated.replacedMap['mirror-barnehageloven'];
+    assert(
+      replacedCurated.orphanClaimLines.length === 0 &&
+        replacedCurated.replacedMap['mirror-forskrift'] === 'dsb-veiledning' &&
+        Boolean(newBarnehageSlug) &&
+        replacedCurated.markdown.includes('kartlegging[^dsb-veiledning].') &&
+        replacedCurated.markdown.includes('veiledningen[^dsb-veiledning].') &&
+        !replacedCurated.markdown.includes('[^dsb-veiledning] [^dsb-veiledning]') &&
+        replacedCurated.markdown.includes(`§ 9[^${newBarnehageSlug}].`) &&
+        replacedCurated.markdown.includes('\nInnledning med generell kontekst.\n') &&
+        !replacedCurated.markdown.includes('mirror-forskrift') &&
+        !replacedCurated.markdown.includes('mirror-barnehageloven'),
+      `curateOkfSources replaceSourceMap re-anchors citations to existing IDs and newly added URLs with 0 orphan claims, deduplicated footnotes, and no dummy first-paragraph weave`
+    );
+
+    // Verify Studio `setReplaceSourceInStudio` + `buildCurationPrompts` + `.okf-replace-select` / `.domain-host` DOM rendering
+    s1Hooks.setReplaceSourceInStudio(s1SimSurface, 'svak-blogg-kilde', 'https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710');
+    const replPrompts = s1Hooks.buildCurationPrompts(s1SimSurface);
+    assert(
+      replPrompts.cliText.includes('--replace-source svak-blogg-kilde=https://lovdata.no/dokument/SF/forskrift/2015-12-17-1710') &&
+        replPrompts.agyText.includes('--replace-source'),
+      `setReplaceSourceInStudio and buildCurationPrompts emit --replace-source in CLI command and AGY reply`
+    );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
   }
@@ -19036,6 +19882,7 @@ if (
     }
 
     const rejectSourceIdsCli: string[] = [];
+    const replaceSourceMapCli: Record<string, string> = {};
     const rawAddSourceSpecsCli: string[] = [];
     for (let i = 0; i < process.argv.length; i++) {
       if (process.argv[i] === '--reject-source' && process.argv[i + 1]) {
@@ -19044,6 +19891,32 @@ if (
           .map((s) => s.trim())
           .filter(Boolean);
         rejectSourceIdsCli.push(...parts);
+        i++;
+      } else if (process.argv[i] === '--replace-source' && process.argv[i + 1]) {
+        const pairs = process.argv[i + 1]
+          .split(/,\s*(?=[A-Za-z0-9_\-\[\]\^]+\s*=)/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        for (const pair of pairs) {
+          const eqIdx = pair.indexOf('=');
+          if (eqIdx > 0) {
+            const oldKey = pair
+              .slice(0, eqIdx)
+              .trim()
+              .replace(/^\[\^/, '')
+              .replace(/\]$/, '')
+              .trim();
+            const newTarget = pair
+              .slice(eqIdx + 1)
+              .trim()
+              .replace(/^\[\^/, '')
+              .replace(/\]$/, '')
+              .trim();
+            if (oldKey && newTarget) {
+              replaceSourceMapCli[oldKey] = newTarget;
+            }
+          }
+        }
         i++;
       } else if (process.argv[i] === '--add-source' && process.argv[i + 1]) {
         const specs = process.argv[i + 1]
@@ -19059,7 +19932,14 @@ if (
       specs: string[]
     ): Promise<Array<{ url: string; title?: string; id?: string; lastModified?: string; last_modified?: string }>> => {
       const resolvedList: Array<{ url: string; title?: string; id?: string; lastModified?: string; last_modified?: string }> = [];
-      for (const spec of specs) {
+      for (const rawSpec of specs) {
+        let customId: string | undefined;
+        let spec = rawSpec.trim();
+        const idPrefixMatch = spec.match(/^id=([A-Za-z0-9_\-]+)\|([\s\S]+)$/i);
+        if (idPrefixMatch) {
+          customId = idPrefixMatch[1].trim();
+          spec = idPrefixMatch[2].trim();
+        }
         const pipeIdx = spec.indexOf('|');
         const rawUrl = (pipeIdx !== -1 ? spec.slice(0, pipeIdx) : spec).trim();
         const explicitTitle = pipeIdx !== -1 ? spec.slice(pipeIdx + 1).trim() : '';
@@ -19080,6 +19960,7 @@ if (
         resolvedList.push({
           url: finalUrl,
           title: explicitTitle || fetchedTitle || undefined,
+          ...(customId ? { id: customId } : {}),
           ...(lastModified ? { lastModified, last_modified: lastModified } : {}),
         });
       }
@@ -19098,6 +19979,7 @@ if (
         }
         if (
           rawArgs[i] === '--reject-source' ||
+          rawArgs[i] === '--replace-source' ||
           rawArgs[i] === '--add-source' ||
           rawArgs[i] === '--artifact-dir'
         ) {
@@ -19110,7 +19992,7 @@ if (
       const target = filteredArgs[0];
       if (!target) {
         console.error(
-          'Usage: npm run cli:verify -- <runIdOrConceptPath> [--reject-source id1,id2] [--add-source "<url>[|<title>]"] [--by human:<reviewer>] [--open] [--artifact-dir <dir>]'
+          'Usage: npm run cli:verify -- <runIdOrConceptPath> [--reject-source id1,id2] [--replace-source oldId=newIdOrUrl] [--add-source "<url>[|<title>]"] [--by human:<reviewer>] [--open] [--artifact-dir <dir>]'
         );
         process.exit(1);
       }
@@ -19119,6 +20001,7 @@ if (
         workspaceRoot: './workspace',
         by: verifierBy,
         rejectSourceIds: rejectSourceIdsCli,
+        replaceSourceMap: replaceSourceMapCli,
         addSources: addSourcesResolved,
       });
       if (hasViz) {
@@ -19145,6 +20028,7 @@ if (
       }
       if (
         token === '--reject-source' ||
+        token === '--replace-source' ||
         token === '--add-source' ||
         token === '--artifact-dir'
       ) {
@@ -19182,6 +20066,7 @@ if (
           workspaceRoot: './workspace',
           by: verifierBy,
           rejectSourceIds: rejectSourceIdsCli,
+          replaceSourceMap: replaceSourceMapCli,
           addSources: addSourcesResolved,
         });
       }
@@ -19266,6 +20151,7 @@ if (
               workspaceRoot: './workspace',
               by: verifierBy,
               rejectSourceIds: rejectSourceIdsCli,
+              replaceSourceMap: replaceSourceMapCli,
               addSources: addSourcesResolved,
             });
           }
@@ -19296,6 +20182,7 @@ if (
             workspaceRoot: './workspace',
             by: verifierBy,
             rejectSourceIds: rejectSourceIdsCli,
+            replaceSourceMap: replaceSourceMapCli,
             addSources: addSourcesResolved,
           });
         }
