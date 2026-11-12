@@ -40,6 +40,7 @@ In ICM, Stage 2 (`prompts/02_script.md`) consumes the physical file produced by 
 2. **Update Layer 0 & Layer 1 Only:**
    - Update [`workspace/GEMINI.md`](../../workspace/GEMINI.md) (Layer 0: Global Identity & Epistemic Rules).
    - Update [`workspace/CONTEXT.md`](../../workspace/CONTEXT.md) (Layer 1: Workspace Route Context).
+   - **No Unverified Parametric Document IDs Before Grounded Search:** When writing Layer 0, Layer 1, or `prompts/01_research.md` prior to Stage 1's Google Search run, refer to statutes, regulations, standards, or filings by their canonical titles (or exact identifiers explicitly provided by the user)—**never** hardcode unverified numeric statute/regulation/standard IDs or enactment dates from parametric memory into prompt templates, as Stage 1 may echo prompt-seeded codes even when search grounds the document under a different official identifier. Instruct Stage 1 to verify exact identifiers via Google Search.
    - Stop and ask Question 2 before touching `prompts/01_research.md`.
 
 ---

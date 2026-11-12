@@ -9978,6 +9978,7 @@ export function startA2uiPingPongListener(options?: {
   runId?: string;
   htmlPath?: string;
   force?: boolean;
+  onListening?: (port: number) => void;
 }): Promise<{
   skipped?: boolean;
   port: number;
@@ -10009,10 +10010,15 @@ export function startA2uiPingPongListener(options?: {
   return new Promise((resolve, reject) => {
     let handled = false;
     let retriedSupersede = false;
+    const transparentGif1x1 = Buffer.from(
+      'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+      'base64'
+    );
     const server = http.createServer((req, res) => {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Private-Network', 'true');
 
       if (req.method === 'OPTIONS') {
         res.writeHead(204);
@@ -10052,14 +10058,30 @@ export function startA2uiPingPongListener(options?: {
       }
 
       if (parsedUrl.pathname === '/ping-pong') {
+        const wantsGif =
+          parsedUrl.searchParams.get('format') === 'gif' ||
+          (req.method === 'GET' && /^image\//i.test(String(req.headers.accept || '')));
+        const sendAck = (bodyObj: Record<string, any>) => {
+          if (wantsGif) {
+            res.writeHead(200, {
+              'Content-Type': 'image/gif',
+              'Cache-Control': 'no-store, no-cache, must-revalidate',
+              'Content-Length': String(transparentGif1x1.length),
+            });
+            res.end(transparentGif1x1);
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(bodyObj));
+          }
+        };
+
         let body = '';
         req.on('data', (chunk) => {
           body += chunk.toString('utf-8');
         });
         req.on('end', () => {
           if (handled) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, duplicate: true }));
+            sendAck({ ok: true, duplicate: true });
             return;
           }
           handled = true;
@@ -10070,8 +10092,7 @@ export function startA2uiPingPongListener(options?: {
           } catch {
             parsed = { raw: rawPayload };
           }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, received: parsed }));
+          sendAck({ ok: true, received: parsed });
 
           console.log('\n=== [AGY PING-PONG REACTIVE WAKEUP TRIGGERED] ===');
           console.log(JSON.stringify(parsed, null, 2));
@@ -10093,6 +10114,9 @@ export function startA2uiPingPongListener(options?: {
       console.log(
         `[A2UI Ping-Pong Listener]: Waiting for button click on http://127.0.0.1:${boundPort}/ping-pong ...`
       );
+      if (typeof options?.onListening === 'function') {
+        options.onListening(boundPort);
+      }
     };
 
     server.on('error', (err: any) => {
@@ -12274,6 +12298,91 @@ const A2UI_STUDIO_JS = `
     return detectTextLang(text) === "no" ? "nb-NO" : "en-US";
   }
 
+  function resolveSpeechVoice(targetLang, availableVoices) {
+    const rawTarget = String(targetLang || "en-US").trim();
+    const targetNorm = rawTarget.replace(/_/g, "-").toLowerCase();
+    const baseLang = targetNorm.split("-")[0] || "en";
+    const isNorwegianTarget = baseLang === "nb" || baseLang === "no" || baseLang === "nn";
+    const voices = Array.isArray(availableVoices) ? availableVoices : [];
+    let bestVoice = null;
+    let bestScore = -1;
+
+    for (let i = 0; i < voices.length; i++) {
+      const v = voices[i];
+      if (!v) continue;
+      const vNorm = String(v.lang || "").trim().replace(/_/g, "-").toLowerCase();
+      const vBase = vNorm.split("-")[0] || "";
+      const nameLower = String(v.name || "").toLowerCase();
+      let langScore = 0;
+
+      if (isNorwegianTarget) {
+        if (vNorm === "nb-no" || vNorm === "no-no" || vNorm === "nb" || vNorm === "no") {
+          langScore = 50;
+        } else if (vNorm.indexOf("nb-") === 0 || vNorm.indexOf("no-") === 0) {
+          langScore = 45;
+        } else if (vNorm === "nn-no" || vNorm === "nn" || vNorm.indexOf("nn-") === 0) {
+          langScore = 35;
+        } else if (
+          !vNorm &&
+          (nameLower.indexOf("norwegian") !== -1 ||
+            nameLower.indexOf("norsk") !== -1 ||
+            nameLower.indexOf("bokmål") !== -1 ||
+            nameLower.indexOf("bokmal") !== -1)
+        ) {
+          langScore = 30;
+        }
+      } else {
+        if (vNorm === targetNorm) {
+          langScore = 50;
+        } else if (vBase === baseLang) {
+          langScore = 35;
+        }
+      }
+
+      if (langScore <= 0) continue;
+
+      let qualityBonus = 0;
+      if (
+        nameLower.indexOf("natural") !== -1 ||
+        nameLower.indexOf("neural") !== -1 ||
+        nameLower.indexOf("online") !== -1 ||
+        nameLower.indexOf("google") !== -1 ||
+        nameLower.indexOf("premium") !== -1 ||
+        nameLower.indexOf("enhanced") !== -1 ||
+        nameLower.indexOf("siri") !== -1 ||
+        nameLower.indexOf("nora") !== -1 ||
+        nameLower.indexOf("pernille") !== -1 ||
+        nameLower.indexOf("finn") !== -1 ||
+        nameLower.indexOf("iselin") !== -1 ||
+        nameLower.indexOf("henrik") !== -1
+      ) {
+        qualityBonus += 25;
+      }
+      if (v.localService === false) qualityBonus += 10;
+      if (v.default === true) qualityBonus += 5;
+      if (nameLower.indexOf("espeak") !== -1 || nameLower.indexOf("compact") !== -1) {
+        qualityBonus -= 20;
+      }
+
+      const totalScore = langScore + qualityBonus;
+      if (totalScore > bestScore) {
+        bestScore = totalScore;
+        bestVoice = v;
+      }
+    }
+
+    const effectiveLang =
+      bestVoice && bestVoice.lang
+        ? String(bestVoice.lang).trim().replace(/_/g, "-")
+        : rawTarget;
+
+    return {
+      voice: bestVoice,
+      matchedTargetLanguage: Boolean(bestVoice),
+      effectiveLang: effectiveLang,
+    };
+  }
+
   function stripClientFootnotesPreservingBoundaries(text) {
     return String(text || "")
       .replace(/([A-Za-z0-9\\u00C0-\\u024F)%°²³¹⁰⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉])(?:\\[\\^[^\\r\\n\\]]+\\][ \\t]*)+(?=[A-Za-z0-9\\u00C0-\\u024F($~€£])/g, "$1 ")
@@ -13548,6 +13657,7 @@ const A2UI_STUDIO_JS = `
     window.__ICM_TEST_HOOKS__.isInlineLatexMath = isInlineLatexMath;
     window.__ICM_TEST_HOOKS__.replaceInlineLatexSpans = replaceInlineLatexSpans;
     window.__ICM_TEST_HOOKS__.detectSpeechLang = detectSpeechLang;
+    window.__ICM_TEST_HOOKS__.resolveSpeechVoice = resolveSpeechVoice;
     window.__ICM_TEST_HOOKS__.normalizeTextForTts = normalizeTextForTts;
     window.__ICM_TEST_HOOKS__.resolvePointer = resolvePointer;
     window.__ICM_TEST_HOOKS__.setPointer = setPointer;
@@ -14225,14 +14335,71 @@ const A2UI_STUDIO_JS = `
     );
   }
 
-  function speakNarration(text) {
+  if (typeof window !== "undefined" && window.speechSynthesis && typeof window.speechSynthesis.getVoices === "function") {
+    try {
+      window.speechSynthesis.getVoices();
+      if (typeof window.speechSynthesis.addEventListener === "function") {
+        window.speechSynthesis.addEventListener("voiceschanged", function () {
+          try {
+            window.speechSynthesis.getVoices();
+          } catch (_e) {}
+        });
+      }
+    } catch (_e) {}
+  }
+
+  function speakNarration(text, onVoiceResolved) {
     if (!window.speechSynthesis || !text) return;
     window.speechSynthesis.cancel();
     const lang = detectSpeechLang(text);
     const spokenText = normalizeTextForTts(text, lang);
-    const utter = new SpeechSynthesisUtterance(spokenText);
-    utter.lang = lang;
-    window.speechSynthesis.speak(utter);
+
+    function startUtterance(voicesList) {
+      const resolved = resolveSpeechVoice(lang, voicesList);
+      const utter = new SpeechSynthesisUtterance(spokenText);
+      utter.lang = resolved.effectiveLang;
+      if (resolved.voice) {
+        utter.voice = resolved.voice;
+      }
+      if (typeof onVoiceResolved === "function") {
+        onVoiceResolved({
+          targetLang: lang,
+          effectiveLang: resolved.effectiveLang,
+          voice: resolved.voice,
+          matchedTargetLanguage: resolved.matchedTargetLanguage,
+          totalVoicesAvailable: Array.isArray(voicesList) ? voicesList.length : 0,
+        });
+      }
+      window.speechSynthesis.speak(utter);
+    }
+
+    let initialVoices = [];
+    try {
+      initialVoices = window.speechSynthesis.getVoices() || [];
+    } catch (_e) {}
+
+    if (initialVoices.length > 0 || typeof window.speechSynthesis.addEventListener !== "function") {
+      startUtterance(initialVoices);
+      return;
+    }
+
+    let didStart = false;
+    function onVoicesReady() {
+      if (didStart) return;
+      didStart = true;
+      try {
+        window.speechSynthesis.removeEventListener("voiceschanged", onVoicesReady);
+      } catch (_e) {}
+      let loadedVoices = [];
+      try {
+        loadedVoices = window.speechSynthesis.getVoices() || [];
+      } catch (_e) {}
+      startUtterance(loadedVoices);
+    }
+    try {
+      window.speechSynthesis.addEventListener("voiceschanged", onVoicesReady);
+    } catch (_e) {}
+    setTimeout(onVoicesReady, 250);
   }
 
   function downloadJson(filename, content) {
@@ -14910,18 +15077,46 @@ const A2UI_STUDIO_JS = `
         audio.src = String(url);
         wrap.appendChild(audio);
       } else {
+        wrap.style.flexWrap = "wrap";
+        wrap.style.alignItems = "center";
+        wrap.style.gap = "8px";
+        const voiceNote = document.createElement("span");
+        voiceNote.className = "a2ui-tts-voice-status";
+        voiceNote.style.fontSize = "12px";
+        voiceNote.style.display = "none";
+
         const playBtn = document.createElement("button");
         playBtn.className = "a2ui-btn primary";
         playBtn.textContent = isNo
           ? "🔊 Spill av opplesning (" + desc + ")"
           : "🔊 Listen to narration (" + desc + ")";
-        playBtn.addEventListener("click", () => speakNarration(textToSpeak));
+        playBtn.addEventListener("click", () => {
+          speakNarration(textToSpeak, function (info) {
+            voiceNote.style.display = "inline-block";
+            if (info && info.matchedTargetLanguage && info.voice) {
+              voiceNote.style.color = "var(--muted, #64748b)";
+              voiceNote.textContent =
+                "🎙️ " + String(info.voice.name || info.effectiveLang) + " (" + info.effectiveLang + ")";
+            } else if (info && info.targetLang === "nb-NO") {
+              voiceNote.style.color = "#b45309";
+              voiceNote.textContent =
+                "⚠️ Ingen norsk TTS-stemme (nb-NO/no-NO) på denne enheten — bruker systemstemme (kjør Stage 4 gemini-3.8-flash-tts for ekte norsk studiostemme)";
+            } else {
+              voiceNote.style.color = "var(--muted, #64748b)";
+              voiceNote.textContent = "🎙️ " + String((info && info.effectiveLang) || "TTS");
+            }
+          });
+        });
         const stopBtn = document.createElement("button");
         stopBtn.className = "a2ui-btn";
         stopBtn.textContent = isNo ? "⏹ Stopp" : "⏹ Stop";
-        stopBtn.addEventListener("click", () => stopActiveSpeech());
+        stopBtn.addEventListener("click", () => {
+          stopActiveSpeech();
+          voiceNote.style.display = "none";
+        });
         wrap.appendChild(playBtn);
         wrap.appendChild(stopBtn);
+        wrap.appendChild(voiceNote);
       }
       return wrap;
     }
@@ -15736,40 +15931,69 @@ const A2UI_STUDIO_JS = `
               navigator.clipboard.writeText(currentPrompts.agyText).catch(function () {});
             }
             pingPongBtn.textContent = isNo ? "⏳ Sender til AGY..." : "⏳ Sending to AGY...";
-            let sentOk = false;
-            fetch(url, {
+
+            let settled = false;
+            function markDelivered() {
+              if (settled) return;
+              settled = true;
+              pingPongBtn.textContent = isNo
+                ? "✅ Sendt til AGY! (Sjekk chatten)"
+                : "✅ Sent to AGY! (Check chat)";
+            }
+            function markClipboardFallback() {
+              if (settled) return;
+              settled = true;
+              pingPongBtn.textContent = isNo
+                ? "📋 Kopiert! Lim inn i AGY-chatten"
+                : "📋 Copied! Paste in AGY chat";
+            }
+
+            const fetchOpts = {
               method: "POST",
-              mode: "no-cors",
+              mode: "cors",
               headers: { "Content-Type": "text/plain;charset=utf-8" },
               body: jsonStr,
-            })
-              .then(function () {
-                sentOk = true;
-                pingPongBtn.textContent = isNo
-                  ? "✅ Sendt til AGY! (Sjekk chatten)"
-                  : "✅ Sent to AGY! (Check chat)";
+            };
+            let abortTimer = null;
+            if (typeof AbortController !== "undefined") {
+              const ctrl = new AbortController();
+              fetchOpts.signal = ctrl.signal;
+              abortTimer = setTimeout(function () {
+                try {
+                  ctrl.abort();
+                } catch (_e) {}
+              }, 1200);
+            }
+
+            fetch(url, fetchOpts)
+              .then(function (res) {
+                if (abortTimer) clearTimeout(abortTimer);
+                if (res && res.ok) {
+                  markDelivered();
+                } else {
+                  throw new Error("Non-OK Ping-Pong status");
+                }
               })
               .catch(function () {
+                if (abortTimer) clearTimeout(abortTimer);
                 try {
                   const img = new Image();
-                  img.src = url;
-                  pingPongBtn.textContent = isNo
-                    ? "✅ Sendt via beacon! (Sjekk chatten)"
-                    : "✅ Sent via beacon! (Check chat)";
+                  const beaconTimer = setTimeout(function () {
+                    markClipboardFallback();
+                  }, 900);
+                  img.onload = function () {
+                    clearTimeout(beaconTimer);
+                    markDelivered();
+                  };
+                  img.onerror = function () {
+                    clearTimeout(beaconTimer);
+                    markClipboardFallback();
+                  };
+                  img.src = url + "&format=gif";
                 } catch (_e) {
-                  pingPongBtn.textContent = isNo
-                    ? "📋 Kopiert (lim inn i AGY)"
-                    : "📋 Copied (paste in AGY)";
+                  markClipboardFallback();
                 }
               });
-            setTimeout(function () {
-              if (!sentOk) {
-                try {
-                  const img = new Image();
-                  img.src = url;
-                } catch (_e) {}
-              }
-            }, 400);
           });
           bannerRight.appendChild(pingPongBtn);
         }
@@ -21920,6 +22144,60 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         ) &&
         !lexicalWeaved.markdown.includes(`kommunen[^dsb-veiledning][^${amlSlug}].`),
       `curateOkfSources weaves standalone added sources onto the lexically matching claim line rather than blindly attaching to paragraph 1`
+    );
+
+    // Verify `resolveSpeechVoice` across Norwegian BCP-47 / Android underscore tags (`nb-NO`, `no-NO`, `no_NO`, `nn-NO`), neural ranking, and missing-voice Web Remote fallback
+    const mockVoicesWithAndroidNo = [
+      { name: 'Google US English', lang: 'en-US', localService: false, default: true },
+      { name: 'eSpeak nb', lang: 'nb', localService: true, default: false },
+      { name: 'Google norsk', lang: 'no_NO', localService: false, default: false },
+    ];
+    const resolvedNoAndroid = s1Hooks.resolveSpeechVoice('nb-NO', mockVoicesWithAndroidNo);
+    const mockEnglishOnlyVoices = [
+      { name: 'Samantha', lang: 'en-US', localService: true, default: true },
+      { name: 'Daniel', lang: 'en-GB', localService: true, default: false },
+    ];
+    const resolvedMissingNo = s1Hooks.resolveSpeechVoice('nb-NO', mockEnglishOnlyVoices);
+    const resolvedEnMatch = s1Hooks.resolveSpeechVoice('en-US', mockEnglishOnlyVoices);
+    assert(
+      resolvedNoAndroid.matchedTargetLanguage === true &&
+        resolvedNoAndroid.voice?.name === 'Google norsk' &&
+        resolvedNoAndroid.effectiveLang === 'no-NO' &&
+        resolvedMissingNo.matchedTargetLanguage === false &&
+        resolvedMissingNo.voice === null &&
+        resolvedMissingNo.effectiveLang === 'nb-NO' &&
+        resolvedEnMatch.matchedTargetLanguage === true &&
+        resolvedEnMatch.voice?.name === 'Samantha',
+      `resolveSpeechVoice binds Norwegian voices across nb-NO/no-NO/no_NO, prefers neural/cloud over eSpeak, and reports matchedTargetLanguage=false without binding English voices when remote client lacks Norwegian TTS`
+    );
+
+    // Verify `startA2uiPingPongListener` GIF beacon mode (`format=gif`) + `Access-Control-Allow-Private-Network: true`
+    let pingPongBoundPort = 0;
+    const pingPongPromise = startA2uiPingPongListener({
+      port: 0,
+      force: true,
+      workspaceRoot: tmpStage1ReviewDir,
+      onListening: (p) => {
+        pingPongBoundPort = p;
+      },
+    });
+    for (let waitIdx = 0; waitIdx < 40 && pingPongBoundPort === 0; waitIdx++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const gifRes = await fetch(
+      `http://127.0.0.1:${pingPongBoundPort}/ping-pong?payload=${encodeURIComponent(
+        JSON.stringify({ runId: 'test-gif-run', verifierActor: 'human:tester' })
+      )}&format=gif`
+    );
+    const gifBytes = Buffer.from(await gifRes.arrayBuffer());
+    const pingPongOut = await pingPongPromise;
+    assert(
+      gifRes.status === 200 &&
+        gifRes.headers.get('content-type') === 'image/gif' &&
+        gifRes.headers.get('access-control-allow-private-network') === 'true' &&
+        gifBytes.subarray(0, 6).toString('ascii') === 'GIF89a' &&
+        pingPongOut.payload?.runId === 'test-gif-run',
+      `startA2uiPingPongListener serves valid 1x1 GIF89a with Access-Control-Allow-Private-Network header on format=gif so img.onload/onerror accurately distinguishes local wakeup from Web Remote / CSP fallback`
     );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
