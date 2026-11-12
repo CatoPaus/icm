@@ -3871,8 +3871,9 @@ export function curateOkfSources(
         return;
       }
       const lines = proseText.split(/\r?\n/);
-      let targetIdx = -1;
-      let fallbackListIdx = -1;
+      let firstProseIdx = -1;
+      let firstListIdx = -1;
+      const candidateIndices: number[] = [];
       let inFence = false;
       for (let i = 0; i < lines.length; i++) {
         const t = lines[i].trim();
@@ -3889,19 +3890,86 @@ export function curateOkfSources(
           /^---+\s*$/.test(t) ||
           t.startsWith('|') ||
           t.startsWith('>') ||
-          /^\[\^[A-Za-z0-9_\-]+\]:/.test(t)
+          /^\[\^[A-Za-z0-9_\-]+\]:/.test(t) ||
+          /^(?:[-*+]|\d+[.)])\s+\[[ xX]\]\s+/.test(t)
         ) {
           continue;
         }
-        if (/^(?:[-*+]|\d+\.)\s+/.test(t)) {
-          if (fallbackListIdx < 0) fallbackListIdx = i;
-          continue;
+        candidateIndices.push(i);
+        if (/^(?:[-*+]|\d+[.)])\s+/.test(t)) {
+          if (firstListIdx < 0) firstListIdx = i;
+        } else if (firstProseIdx < 0) {
+          firstProseIdx = i;
         }
-        targetIdx = i;
-        break;
       }
-      if (targetIdx < 0 && fallbackListIdx >= 0) {
-        targetIdx = fallbackListIdx;
+
+      let targetIdx = -1;
+      const srcMeta = remainingSources.find((s) => s && s.id === fnId);
+      if (srcMeta && candidateIndices.length > 1) {
+        const cleanQueryBasis = `${String(srcMeta.title || '').replace(/\s*\(via\s+[^)]+\)\s*$/i, '')} ${fnId.replace(/-/g, ' ')}`;
+        const rawWords = cleanQueryBasis.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) || [];
+        const rawSections = (cleanQueryBasis.match(/§+\s*\d+(?:-\d+)?/g) || []).map((sec) =>
+          sec.replace(/\s+/g, '').toLowerCase()
+        );
+        const uniqueWords = Array.from(new Set(rawWords));
+        const uniqueSections = Array.from(new Set(rawSections));
+        if (uniqueWords.length > 0 || uniqueSections.length > 0) {
+          const lineEntries = candidateIndices.map((lineIdx) => {
+            const stripped = lines[lineIdx]
+              .replace(/\[\^[A-Za-z0-9_\-]+\]/g, ' ')
+              .toLowerCase();
+            const wordSet = new Set(stripped.match(/[\p{L}\p{N}]{4,}/gu) || []);
+            const compactSec = stripped.replace(/\s+/g, '');
+            return { lineIdx, stripped, wordSet, compactSec };
+          });
+          const nCand = lineEntries.length;
+          const scores = new Array<number>(nCand).fill(0);
+          for (const qt of uniqueWords) {
+            let df = 0;
+            for (const entry of lineEntries) {
+              if (entry.wordSet.has(qt) || (qt.length >= 6 && entry.stripped.includes(qt))) {
+                df++;
+              }
+            }
+            if (df === 0 || (nCand >= 4 && df > nCand * 0.6)) continue;
+            const idf = Math.log((nCand + 1) / (df + 0.5));
+            for (let k = 0; k < nCand; k++) {
+              if (lineEntries[k].wordSet.has(qt)) {
+                scores[k] += 1.5 * idf;
+              } else if (qt.length >= 6 && lineEntries[k].stripped.includes(qt)) {
+                scores[k] += 0.75 * idf;
+              }
+            }
+          }
+          for (const sec of uniqueSections) {
+            let df = 0;
+            for (const entry of lineEntries) {
+              if (entry.compactSec.includes(sec)) df++;
+            }
+            if (df === 0) continue;
+            const idf = Math.log((nCand + 1) / (df + 0.5));
+            for (let k = 0; k < nCand; k++) {
+              if (lineEntries[k].compactSec.includes(sec)) {
+                scores[k] += 3.0 * idf;
+              }
+            }
+          }
+          let bestScore = 0;
+          let bestLineIdx = -1;
+          for (let k = 0; k < nCand; k++) {
+            if (scores[k] > bestScore) {
+              bestScore = scores[k];
+              bestLineIdx = lineEntries[k].lineIdx;
+            }
+          }
+          if (bestScore >= 1.0 && bestLineIdx >= 0) {
+            targetIdx = bestLineIdx;
+          }
+        }
+      }
+
+      if (targetIdx < 0) {
+        targetIdx = firstProseIdx >= 0 ? firstProseIdx : firstListIdx;
       }
       if (targetIdx >= 0) {
         lines[targetIdx] = lines[targetIdx].replace(
@@ -8079,6 +8147,7 @@ const OKF_VIZ_JS = `
 
   if (typeof window !== "undefined" && window.__ICM_TEST_HOOKS__) {
     window.__ICM_TEST_HOOKS__.renderMarkdownWithOkfFootnotes = renderMarkdownWithOkfFootnotes;
+    window.__ICM_TEST_HOOKS__.parseBuiltInVizMarkdown = parseBuiltInVizMarkdown;
     window.__ICM_TEST_HOOKS__.isInlineLatexMath = isInlineLatexMath;
     window.__ICM_TEST_HOOKS__.replaceInlineLatexSpans = replaceInlineLatexSpans;
     window.__ICM_TEST_HOOKS__.detectTextLang = detectTextLang;
@@ -8186,17 +8255,7 @@ const OKF_VIZ_JS = `
           layout: { name: "cose", animate: false, padding: 30 },
           wheelSensitivity: 0.2,
         })
-      : {
-          on: () => {},
-          layout: () => ({ run: () => {} }),
-          fit: () => {},
-          elements: () => noopCollection,
-          nodes: () => noopCollection,
-          edges: () => noopCollection,
-          getElementById: () => noopCollection,
-          animate: () => {},
-          zoom: () => 1,
-        };
+      : createSvgGraphFallback(document.getElementById("graph"), bundle.nodes || [], bundle.edges || []);
 
   cy.on("tap", "node", (evt) => showDetail(evt.target.id()));
   cy.on("tap", (evt) => {
@@ -8347,6 +8406,347 @@ const OKF_VIZ_JS = `
     }
   }
 
+  function parseBuiltInVizMarkdown(rawMd) {
+    const stash = [];
+    function putStash(htmlFrag) {
+      const idx = stash.length;
+      stash.push(htmlFrag);
+      return "\\x00STASH_" + idx + "\\x00";
+    }
+    let text = String(rawMd || "").replace(/\\r\\n/g, "\\n");
+    text = text.replace(
+      /<sup class="fn-ref[^"]*"><a [^>]+>\\[[^\\]]+\\]<\\/a><\\/sup>|<(?:sub|sup|code)>[^<]*<\\/(?:sub|sup|code)>|<a href="[^"]+"><code>[^<]+<\\/code><\\/a>/g,
+      function (m) { return putStash(m); }
+    );
+    const fenceStash = [];
+    text = text.replace(/^\\x60\\x60\\x60[^\\n]*\\n([\\s\\S]*?)^\\x60\\x60\\x60\\s*$/gm, function (_m, codeBody) {
+      const idx = fenceStash.length;
+      fenceStash.push("<pre><code>" + escapeHtmlAttr(codeBody.replace(/\\n$/, "")) + "</code></pre>");
+      return "\\x00FENCE_" + idx + "\\x00";
+    });
+    function formatInline(s) {
+      let line = String(s || "");
+      line = line.replace(/\\x60(\\/[A-Za-z0-9_\\-\\/]+\\.md)\\x60/g, function (_m, p) {
+        return putStash('<a href="' + escapeHtmlAttr(p) + '"><code>' + escapeHtmlAttr(p) + "</code></a>");
+      });
+      line = line.replace(/\\x60([^\\x60\\n]+)\\x60/g, function (_m, code) {
+        return putStash("<code>" + escapeHtmlAttr(code) + "</code>");
+      });
+      line = line
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+      line = line.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, function (_m, lbl, rawHref) {
+        const cleanHref = rawHref.replace(/&amp;/g, "&");
+        const isExt = /^https?:\\/\\//i.test(cleanHref);
+        const safeHref = /^(?:https?:\\/\\/|mailto:|\\/|\\.\\/|\\.\\.\\/|#|[A-Za-z0-9_\\-\\/]+\\.md)/i.test(cleanHref)
+          ? escapeHtmlAttr(cleanHref)
+          : "#";
+        const extAttrs = isExt ? ' class="external" target="_blank" rel="noopener noreferrer"' : "";
+        return putStash("<a" + extAttrs + ' href="' + safeHref + '">' + formatInline(lbl.replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")) + "</a>");
+      });
+      line = line
+        .replace(/\\*\\*\\*([^*\\n]+?)\\*\\*\\*/g, "<strong><em>$1</em></strong>")
+        .replace(/\\*\\*([^*\\n]+?)\\*\\*/g, "<strong>$1</strong>")
+        .replace(/(^|[\\s(])__([^_\\n]+?)__(?=$|[\\s).,;:!?])/g, "$1<strong>$2</strong>")
+        .replace(/(^|[^*])\\*([^\\s*][^*\\n]*?)\\*(?!\\*)/g, "$1<em>$2</em>")
+        .replace(/(^|[\\s(])_([^\\s_][^_\\n]*?)_(?=$|[\\s).,;:!?])/g, "$1<em>$2</em>")
+        .replace(/~~([^~\\n]+?)~~/g, "<del>$1</del>");
+      for (let pass = 0; pass < 3; pass++) {
+        if (line.indexOf("\\x00STASH_") === -1) break;
+        line = line.replace(/\\x00STASH_(\\d+)\\x00/g, function (_m, n) {
+          return stash[Number(n)] || "";
+        });
+      }
+      return line;
+    }
+    const lines = text.split("\\n");
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const rawLine = lines[i];
+      const trimmed = rawLine.trim();
+      if (!trimmed) { i++; continue; }
+      const fenceM = trimmed.match(/^\\x00FENCE_(\\d+)\\x00$/);
+      if (fenceM) { out.push(fenceStash[Number(fenceM[1])] || ""); i++; continue; }
+      if (/^(?:---+|\\*\\*\\*+|___+)$/.test(trimmed)) { out.push("<hr>"); i++; continue; }
+      const hM = trimmed.match(/^(#{1,6})\\s+(.+?)\\s*#*\\s*$/);
+      if (hM) {
+        const lvl = hM[1].length;
+        out.push("<h" + lvl + ">" + formatInline(hM[2]) + "</h" + lvl + ">");
+        i++;
+        continue;
+      }
+      if (
+        trimmed.indexOf("|") !== -1 &&
+        i + 1 < lines.length &&
+        /^\\s*\\|?\\s*:?-{2,}:?(?:\\s*\\|\\s*:?-{2,}:?)+\\s*\\|?\\s*$/.test(lines[i + 1])
+      ) {
+        const splitCells = function (rowStr) {
+          return rowStr.trim().replace(/^\\|/, "").replace(/\\|$/, "").split("|").map(function (c) { return c.trim(); });
+        };
+        const headers = splitCells(rawLine);
+        i += 2;
+        let tbl = "<table><thead><tr>" + headers.map(function (h) { return "<th>" + formatInline(h) + "</th>"; }).join("") + "</tr></thead><tbody>";
+        while (i < lines.length && lines[i].trim() && lines[i].indexOf("|") !== -1) {
+          const cells = splitCells(lines[i]);
+          tbl += "<tr>" + headers.map(function (_h, cIdx) { return "<td>" + formatInline(cells[cIdx] || "") + "</td>"; }).join("") + "</tr>";
+          i++;
+        }
+        tbl += "</tbody></table>";
+        out.push(tbl);
+        continue;
+      }
+      if (/^>\\s?/.test(trimmed)) {
+        const qLines = [];
+        while (i < lines.length && /^\\s*>\\s?/.test(lines[i])) {
+          qLines.push(lines[i].replace(/^\\s*>\\s?/, ""));
+          i++;
+        }
+        out.push("<blockquote>" + parseBuiltInVizMarkdown(qLines.join("\\n")) + "</blockquote>");
+        continue;
+      }
+      const listM = rawLine.match(/^(\\s*)([-*+]|\\d+[.)])\\s+(.*)$/);
+      if (listM) {
+        const renderListBlock = function (baseIndent) {
+          const firstM = lines[i].match(/^(\\s*)([-*+]|\\d+[.)])\\s+(.*)$/);
+          const isOrd = /^\\d/.test(firstM[2]);
+          const tag = isOrd ? "ol" : "ul";
+          let listHtml = "<" + tag + ">";
+          while (i < lines.length) {
+            if (!lines[i].trim()) {
+              if (i + 1 < lines.length && /^(\\s*)([-*+]|\\d+[.)])\\s+/.test(lines[i + 1])) { i++; continue; }
+              break;
+            }
+            const m = lines[i].match(/^(\\s*)([-*+]|\\d+[.)])\\s+(.*)$/);
+            if (!m) break;
+            const ind = m[1].length;
+            if (ind < baseIndent) break;
+            if (ind > baseIndent) {
+              listHtml = listHtml.replace(/<\\/li>$/, "") + renderListBlock(ind) + "</li>";
+              continue;
+            }
+            let itemBody = m[3];
+            const taskM = itemBody.match(/^\\[([ xX])\\]\\s+(.*)$/);
+            let prefix = "";
+            if (taskM) {
+              prefix = '<input type="checkbox" disabled' + (taskM[1].toLowerCase() === "x" ? " checked" : "") + "> ";
+              itemBody = taskM[2];
+            }
+            i++;
+            while (
+              i < lines.length &&
+              lines[i].trim() &&
+              !/^\\s*([-*+]|\\d+[.)])\\s+/.test(lines[i]) &&
+              !/^\\s*(?:#{1,6}\\s+|---+|\\*\\*\\*+|>|\\x60\\x60\\x60|\\x00FENCE_)/.test(lines[i])
+            ) {
+              itemBody += " " + lines[i].trim();
+              i++;
+            }
+            let subHtml = "";
+            if (i < lines.length) {
+              const nextM = lines[i].match(/^(\\s*)([-*+]|\\d+[.)])\\s+/);
+              if (nextM && nextM[1].length > baseIndent) {
+                subHtml = renderListBlock(nextM[1].length);
+              }
+            }
+            listHtml += "<li>" + prefix + formatInline(itemBody) + subHtml + "</li>";
+          }
+          listHtml += "</" + tag + ">";
+          return listHtml;
+        };
+        out.push(renderListBlock(listM[1].length));
+        continue;
+      }
+      const pLines = [];
+      while (
+        i < lines.length &&
+        lines[i].trim() &&
+        !/^\\s*(?:#{1,6}\\s+|---+|\\*\\*\\*+|___+|>\\s?|[-*+]\\s+|\\d+[.)]\\s+|\\x00FENCE_)/.test(lines[i]) &&
+        !(lines[i].indexOf("|") !== -1 && i + 1 < lines.length && /^\\s*\\|?\\s*:?-{2,}:?(?:\\s*\\|\\s*:?-{2,}:?)+\\s*\\|?\\s*$/.test(lines[i + 1]))
+      ) {
+        pLines.push(lines[i].trim());
+        i++;
+      }
+      if (pLines.length > 0) {
+        out.push("<p>" + formatInline(pLines.join(" ")) + "</p>");
+      } else {
+        i++;
+      }
+    }
+    return out.join("\\n");
+  }
+
+  function createSvgGraphFallback(container, nodes, edges) {
+    const tapNodeHandlers = [];
+    const tapBgHandlers = [];
+    const nodeWrappers = {};
+    const edgeWrappers = [];
+    let selectedId = null;
+    const ns = "http://www.w3.org/2000/svg";
+    const W = 820;
+    const H = 560;
+    const svg = container ? document.createElementNS(ns, "svg") : null;
+    if (svg && container) {
+      container.innerHTML = "";
+      svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+      svg.style.width = "100%";
+      svg.style.height = "100%";
+      svg.style.display = "block";
+      svg.style.userSelect = "none";
+      const concepts = nodes.filter(function (n) { return n && n.data && n.data.group !== "source"; });
+      const sources = nodes.filter(function (n) { return n && n.data && n.data.group === "source"; });
+      const posById = {};
+      concepts.forEach(function (c, idx) {
+        if (concepts.length === 1) {
+          posById[c.data.id] = { x: W / 2, y: H / 2 };
+        } else {
+          const ang = (2 * Math.PI * idx) / concepts.length - Math.PI / 2;
+          posById[c.data.id] = { x: W / 2 + 115 * Math.cos(ang), y: H / 2 + 95 * Math.sin(ang) };
+        }
+      });
+      sources.forEach(function (s, idx) {
+        const ang = (2 * Math.PI * idx) / Math.max(1, sources.length) - Math.PI / 2;
+        posById[s.data.id] = { x: W / 2 + 300 * Math.cos(ang), y: H / 2 + 215 * Math.sin(ang) };
+      });
+      const edgeGroup = document.createElementNS(ns, "g");
+      const nodeGroup = document.createElementNS(ns, "g");
+      svg.appendChild(edgeGroup);
+      svg.appendChild(nodeGroup);
+
+      nodes.forEach(function (n) {
+        if (!n || !n.data) return;
+        const d = n.data;
+        const p = posById[d.id] || { x: W / 2, y: H / 2 };
+        const g = document.createElementNS(ns, "g");
+        g.style.cursor = "pointer";
+        const r = Math.max(11, Math.min(24, Number(d.size || 24) / 2));
+        const circle = document.createElementNS(ns, "circle");
+        circle.setAttribute("cx", String(p.x));
+        circle.setAttribute("cy", String(p.y));
+        circle.setAttribute("r", String(r));
+        circle.setAttribute("fill", d.color || "#0284c7");
+        circle.setAttribute("stroke", "#0f172a");
+        circle.setAttribute("stroke-width", "1.5");
+        const label = document.createElementNS(ns, "text");
+        label.setAttribute("x", String(p.x));
+        label.setAttribute("y", String(p.y + r + 13));
+        label.setAttribute("text-anchor", "middle");
+        label.setAttribute("font-size", "10.5");
+        label.setAttribute("fill", "#0f172a");
+        const rawLbl = String(d.label || d.id || "");
+        label.textContent = rawLbl.length > 26 ? rawLbl.slice(0, 25) + "…" : rawLbl;
+        g.appendChild(circle);
+        g.appendChild(label);
+        nodeGroup.appendChild(g);
+        let dimmed = false;
+        const wrapper = {
+          id: function () { return d.id; },
+          data: function (k) { return k ? d[k] : d; },
+          hasClass: function (cls) { return cls === "dim" ? dimmed : false; },
+          toggleClass: function (cls, state) {
+            if (cls === "dim") {
+              dimmed = Boolean(state);
+              g.style.opacity = dimmed ? "0.15" : "1";
+            }
+          },
+          removeClass: function (cls) {
+            if (cls === "dim") { dimmed = false; g.style.opacity = "1"; }
+          },
+          select: function () {
+            selectedId = d.id;
+            Object.keys(nodeWrappers).forEach(function (k) {
+              const nw = nodeWrappers[k];
+              nw._circle.setAttribute("stroke", k === selectedId ? "#f59e0b" : "#0f172a");
+              nw._circle.setAttribute("stroke-width", k === selectedId ? "3.5" : "1.5");
+            });
+          },
+          _circle: circle,
+        };
+        nodeWrappers[d.id] = wrapper;
+        g.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          tapNodeHandlers.forEach(function (fn) { fn({ target: wrapper }); });
+        });
+      });
+
+      edges.forEach(function (e) {
+        if (!e || !e.data) return;
+        const sp = posById[e.data.source];
+        const tp = posById[e.data.target];
+        if (!sp || !tp) return;
+        const line = document.createElementNS(ns, "line");
+        line.setAttribute("x1", String(sp.x));
+        line.setAttribute("y1", String(sp.y));
+        line.setAttribute("x2", String(tp.x));
+        line.setAttribute("y2", String(tp.y));
+        line.setAttribute("stroke", "#cbd5e1");
+        line.setAttribute("stroke-width", "1.5");
+        edgeGroup.appendChild(line);
+        edgeWrappers.push({
+          source: function () { return nodeWrappers[e.data.source] || { hasClass: function () { return false; } }; },
+          target: function () { return nodeWrappers[e.data.target] || { hasClass: function () { return false; } }; },
+          toggleClass: function (cls, state) {
+            if (cls === "dim") line.style.opacity = state ? "0.15" : "1";
+          },
+          removeClass: function (cls) {
+            if (cls === "dim") line.style.opacity = "1";
+          },
+        });
+      });
+
+      svg.addEventListener("click", function () {
+        tapBgHandlers.forEach(function (fn) { fn({ target: api }); });
+      });
+      container.appendChild(svg);
+    }
+    const api = {
+      on: function (evtName, selOrFn, maybeFn) {
+        if (evtName === "tap" && selOrFn === "node" && typeof maybeFn === "function") {
+          tapNodeHandlers.push(maybeFn);
+        } else if (evtName === "tap" && typeof selOrFn === "function") {
+          tapBgHandlers.push(selOrFn);
+        }
+      },
+      layout: function () { return { run: function () {} }; },
+      fit: function () {},
+      elements: function () {
+        return {
+          unselect: function () {
+            selectedId = null;
+            Object.keys(nodeWrappers).forEach(function (k) {
+              nodeWrappers[k]._circle.setAttribute("stroke", "#0f172a");
+              nodeWrappers[k]._circle.setAttribute("stroke-width", "1.5");
+            });
+          },
+          removeClass: function (cls) {
+            Object.keys(nodeWrappers).forEach(function (k) { nodeWrappers[k].removeClass(cls); });
+            edgeWrappers.forEach(function (ew) { ew.removeClass(cls); });
+          },
+        };
+      },
+      nodes: function () {
+        return {
+          forEach: function (fn) {
+            Object.keys(nodeWrappers).forEach(function (k) { fn(nodeWrappers[k]); });
+          },
+        };
+      },
+      edges: function () {
+        return {
+          forEach: function (fn) { edgeWrappers.forEach(fn); },
+        };
+      },
+      getElementById: function (id) {
+        return nodeWrappers[id] || noopCollection;
+      },
+      animate: function () {},
+      zoom: function () { return 1; },
+    };
+    return api;
+  }
+
   function renderMarkdownWithOkfFootnotes(rawBody, sources) {
     const srcById = {};
     for (const s of sources || []) {
@@ -8489,9 +8889,7 @@ const OKF_VIZ_JS = `
     let html =
       typeof marked !== "undefined" && marked && typeof marked.parse === "function"
         ? marked.parse(bodyWithSup, { breaks: false, gfm: true })
-        : bodyWithSup
-            .replace(/\\x60(\\/[A-Za-z0-9_\\-\\/]+\\.md)\\x60/g, '<a href="$1"><code>$1</code></a>')
-            .replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, '<a href="$2">$1</a>');
+        : parseBuiltInVizMarkdown(bodyWithSup);
     if (fnDefs.length > 0) {
       const items = fnDefs
         .map((fn) => {
@@ -11348,6 +11746,15 @@ body {
   line-height: 1.65;
   color: var(--text);
 }
+.okf-md-body > p:first-child, .okf-md-body > ul:first-child, .okf-md-body > ol:first-child { margin-top: 0; }
+.okf-md-body > p:last-child, .okf-md-body > ul:last-child, .okf-md-body > ol:last-child { margin-bottom: 0; }
+.okf-md-body blockquote {
+  margin: 10px 0;
+  padding: 8px 14px;
+  border-left: 3px solid var(--primary);
+  background: var(--surface-subtle);
+  border-radius: 0 6px 6px 0;
+}
 .okf-md-body h1 { font-size: 20px; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-top: 20px; }
 .okf-md-body h2 { font-size: 17px; margin-top: 18px; color: #1e293b; }
 .okf-md-body h3 { font-size: 15px; margin-top: 14px; color: #334155; }
@@ -12860,6 +13267,9 @@ const A2UI_STUDIO_JS = `
     window.__ICM_TEST_HOOKS__.toggleReplacePanelInStudio = toggleReplacePanelInStudio;
     window.__ICM_TEST_HOOKS__.toggleRejectSourceInStudio = toggleRejectSourceInStudio;
     window.__ICM_TEST_HOOKS__.addSourceInStudio = addSourceInStudio;
+    window.__ICM_TEST_HOOKS__.parseBuiltInMarkdown = parseBuiltInMarkdown;
+    window.__ICM_TEST_HOOKS__.renderMarkdownBlock = renderMarkdownBlock;
+    window.__ICM_TEST_HOOKS__.renderInlineMarkdown = renderInlineMarkdown;
     window.__ICM_TEST_HOOKS__.renderComponent = renderComponent;
     window.__ICM_TEST_HOOKS__.renderSurface = renderSurface;
     window.__ICM_TEST_HOOKS__.mountSurface = mountSurface;
@@ -13689,14 +14099,273 @@ const A2UI_STUDIO_JS = `
         "]</a></sup>"
       );
     });
-    if (!window.marked) {
-      out = out.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, '<a href="$2">$1</a>');
-      out = out.replace(/^(\\s*[-*+]\\s+)\\[([ xX])\\]\\s+(.+)$/gm, function (_, prefix, mark, text) {
-        const isChecked = mark.toLowerCase() === "x" ? " checked" : "";
-        return prefix + '<input type="checkbox" disabled' + isChecked + "> " + text;
+    return out;
+  }
+
+  function renderInlineMarkdown(rawText) {
+    const stash = [];
+    function putStash(htmlFrag) {
+      const idx = stash.length;
+      stash.push(htmlFrag);
+      return "\\x00ISTASH_" + idx + "\\x00";
+    }
+    let s = replaceInlineLatexSpans(String(rawText == null ? "" : rawText), function (_m, inner) {
+      return escapeHtml(inner);
+    });
+    s = s.replace(/\\x60([^\\x60\\r\\n]+)\\x60/g, function (_m, code) {
+      return putStash("<code>" + escapeHtml(code) + "</code>");
+    });
+    s = escapeHtml(s);
+    s = s.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, function (_m, lbl, rawHref) {
+      const cleanHref = rawHref.replace(/&amp;/g, "&").replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+      const isExt = /^https?:\\/\\//i.test(cleanHref);
+      const safeHref = /^(?:https?:\\/\\/|mailto:|\\/|\\.\\/|\\.\\.\\/|#|[A-Za-z0-9_\\-\\/]+\\.md)/i.test(cleanHref)
+        ? escapeHtml(cleanHref)
+        : "#";
+      const extAttrs = isExt ? ' target="_blank" rel="noopener noreferrer"' : "";
+      return putStash("<a" + extAttrs + ' href="' + safeHref + '">' + lbl + "</a>");
+    });
+    s = s
+      .replace(/\\*\\*\\*([^*\\r\\n]+?)\\*\\*\\*/g, "<strong><em>$1</em></strong>")
+      .replace(/\\*\\*([^*\\r\\n]+?)\\*\\*/g, "<strong>$1</strong>")
+      .replace(/(^|[\\s(])__([^_\\r\\n]+?)__(?=$|[\\s).,;:!?])/g, "$1<strong>$2</strong>")
+      .replace(/(^|[^*])\\*([^\\s*][^*\\r\\n]*?)\\*(?!\\*)/g, "$1<em>$2</em>")
+      .replace(/(^|[\\s(])_([^\\s_][^_\\r\\n]*?)_(?=$|[\\s).,;:!?])/g, "$1<em>$2</em>")
+      .replace(/~~([^~\\r\\n]+?)~~/g, "<del>$1</del>");
+    for (let pass = 0; pass < 3; pass++) {
+      if (s.indexOf("\\x00ISTASH_") === -1) break;
+      s = s.replace(/\\x00ISTASH_(\\d+)\\x00/g, function (_m, n) {
+        return stash[Number(n)] || "";
       });
     }
-    return out;
+    return s;
+  }
+
+  function parseBuiltInMarkdown(rawMd) {
+    const stash = [];
+    function putStash(htmlFrag) {
+      const idx = stash.length;
+      stash.push(htmlFrag);
+      return "\\x00STASH_" + idx + "\\x00";
+    }
+    let text = String(rawMd || "").replace(/\\r\\n/g, "\\n");
+    // Preserve trusted inline HTML emitted by formatInlineLatexAndFootnotes before escaping
+    text = text.replace(
+      /<sup class="fn-ref[^"]*"><a [^>]+>\\[[^\\]]+\\]<\\/a><\\/sup>|<(?:sub|sup|code)>[^<]*<\\/(?:sub|sup|code)>|<a href="[^"]+"><code>[^<]+<\\/code><\\/a>/g,
+      function (m) {
+        return putStash(m);
+      }
+    );
+    const fenceStash = [];
+    text = text.replace(/^\\x60\\x60\\x60[^\\n]*\\n([\\s\\S]*?)^\\x60\\x60\\x60\\s*$/gm, function (_m, codeBody) {
+      const idx = fenceStash.length;
+      fenceStash.push("<pre><code>" + escapeHtml(codeBody.replace(/\\n$/, "")) + "</code></pre>");
+      return "\\x00FENCE_" + idx + "\\x00";
+    });
+    function formatInline(s) {
+      let line = String(s || "");
+      line = line.replace(/\\x60([^\\x60\\n]+)\\x60/g, function (_m, code) {
+        return putStash("<code>" + escapeHtml(code) + "</code>");
+      });
+      line = line
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+      line = line.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, function (_m, lbl, rawHref) {
+        const cleanHref = rawHref.replace(/&amp;/g, "&").replace(/&quot;/g, '"');
+        const isExt = /^https?:\\/\\//i.test(cleanHref);
+        const safeHref = /^(?:https?:\\/\\/|mailto:|\\/|\\.\\/|\\.\\.\\/|#|[A-Za-z0-9_\\-\\/]+\\.md)/i.test(cleanHref)
+          ? escapeHtml(cleanHref)
+          : "#";
+        const extAttrs = isExt ? ' target="_blank" rel="noopener noreferrer"' : "";
+        const unescapedLbl = lbl
+          .replace(/&quot;/g, '"')
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&amp;/g, "&");
+        return putStash("<a" + extAttrs + ' href="' + safeHref + '">' + formatInline(unescapedLbl) + "</a>");
+      });
+      line = line
+        .replace(/\\*\\*\\*([^*\\n]+?)\\*\\*\\*/g, "<strong><em>$1</em></strong>")
+        .replace(/\\*\\*([^*\\n]+?)\\*\\*/g, "<strong>$1</strong>")
+        .replace(/(^|[\\s(])__([^_\\n]+?)__(?=$|[\\s).,;:!?])/g, "$1<strong>$2</strong>")
+        .replace(/(^|[^*])\\*([^\\s*][^*\\n]*?)\\*(?!\\*)/g, "$1<em>$2</em>")
+        .replace(/(^|[\\s(])_([^\\s_][^_\\n]*?)_(?=$|[\\s).,;:!?])/g, "$1<em>$2</em>")
+        .replace(/~~([^~\\n]+?)~~/g, "<del>$1</del>");
+      for (let pass = 0; pass < 3; pass++) {
+        if (line.indexOf("\\x00STASH_") === -1) break;
+        line = line.replace(/\\x00STASH_(\\d+)\\x00/g, function (_m, n) {
+          return stash[Number(n)] || "";
+        });
+      }
+      return line;
+    }
+    const lines = text.split("\\n");
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const rawLine = lines[i];
+      const trimmed = rawLine.trim();
+      if (!trimmed) {
+        i++;
+        continue;
+      }
+      const fenceM = trimmed.match(/^\\x00FENCE_(\\d+)\\x00$/);
+      if (fenceM) {
+        out.push(fenceStash[Number(fenceM[1])] || "");
+        i++;
+        continue;
+      }
+      if (/^(?:---+|\\*\\*\\*+|___+)$/.test(trimmed)) {
+        out.push("<hr>");
+        i++;
+        continue;
+      }
+      const hM = trimmed.match(/^(#{1,6})\\s+(.+?)\\s*#*\\s*$/);
+      if (hM) {
+        const lvl = hM[1].length;
+        out.push("<h" + lvl + ">" + formatInline(hM[2]) + "</h" + lvl + ">");
+        i++;
+        continue;
+      }
+      if (
+        trimmed.indexOf("|") !== -1 &&
+        i + 1 < lines.length &&
+        /^\\s*\\|?\\s*:?-{2,}:?(?:\\s*\\|\\s*:?-{2,}:?)+\\s*\\|?\\s*$/.test(lines[i + 1])
+      ) {
+        const splitCells = function (rowStr) {
+          return rowStr
+            .trim()
+            .replace(/^\\|/, "")
+            .replace(/\\|$/, "")
+            .split("|")
+            .map(function (c) {
+              return c.trim();
+            });
+        };
+        const headers = splitCells(rawLine);
+        i += 2;
+        let tbl =
+          "<table><thead><tr>" +
+          headers
+            .map(function (h) {
+              return "<th>" + formatInline(h) + "</th>";
+            })
+            .join("") +
+          "</tr></thead><tbody>";
+        while (i < lines.length && lines[i].trim() && lines[i].indexOf("|") !== -1) {
+          const cells = splitCells(lines[i]);
+          tbl +=
+            "<tr>" +
+            headers
+              .map(function (_h, cIdx) {
+                return "<td>" + formatInline(cells[cIdx] || "") + "</td>";
+              })
+              .join("") +
+            "</tr>";
+          i++;
+        }
+        tbl += "</tbody></table>";
+        out.push(tbl);
+        continue;
+      }
+      if (/^>\\s?/.test(trimmed)) {
+        const qLines = [];
+        while (i < lines.length && /^\\s*>\\s?/.test(lines[i])) {
+          qLines.push(lines[i].replace(/^\\s*>\\s?/, ""));
+          i++;
+        }
+        out.push("<blockquote>" + parseBuiltInMarkdown(qLines.join("\\n")) + "</blockquote>");
+        continue;
+      }
+      const listM = rawLine.match(/^(\\s*)([-*+]|\\d+[.)])\\s+(.*)$/);
+      if (listM) {
+        const renderListBlock = function (baseIndent) {
+          const firstM = lines[i].match(/^(\\s*)([-*+]|\\d+[.)])\\s+(.*)$/);
+          const isOrd = /^\\d/.test(firstM[2]);
+          const tag = isOrd ? "ol" : "ul";
+          let listHtml = "<" + tag + ">";
+          while (i < lines.length) {
+            if (!lines[i].trim()) {
+              if (i + 1 < lines.length && /^(\\s*)([-*+]|\\d+[.)])\\s+/.test(lines[i + 1])) {
+                i++;
+                continue;
+              }
+              break;
+            }
+            const m = lines[i].match(/^(\\s*)([-*+]|\\d+[.)])\\s+(.*)$/);
+            if (!m) break;
+            const ind = m[1].length;
+            if (ind < baseIndent) break;
+            if (ind > baseIndent) {
+              listHtml = listHtml.replace(/<\\/li>$/, "") + renderListBlock(ind) + "</li>";
+              continue;
+            }
+            let itemBody = m[3];
+            const taskM = itemBody.match(/^\\[([ xX])\\]\\s+(.*)$/);
+            let prefix = "";
+            if (taskM) {
+              prefix =
+                '<input type="checkbox" disabled' +
+                (taskM[1].toLowerCase() === "x" ? " checked" : "") +
+                "> ";
+              itemBody = taskM[2];
+            }
+            i++;
+            while (
+              i < lines.length &&
+              lines[i].trim() &&
+              !/^\\s*([-*+]|\\d+[.)])\\s+/.test(lines[i]) &&
+              !/^\\s*(?:#{1,6}\\s+|---+|\\*\\*\\*+|>|\\x60\\x60\\x60|\\x00FENCE_)/.test(lines[i])
+            ) {
+              itemBody += " " + lines[i].trim();
+              i++;
+            }
+            let subHtml = "";
+            if (i < lines.length) {
+              const nextM = lines[i].match(/^(\\s*)([-*+]|\\d+[.)])\\s+/);
+              if (nextM && nextM[1].length > baseIndent) {
+                subHtml = renderListBlock(nextM[1].length);
+              }
+            }
+            listHtml += "<li>" + prefix + formatInline(itemBody) + subHtml + "</li>";
+          }
+          listHtml += "</" + tag + ">";
+          return listHtml;
+        };
+        out.push(renderListBlock(listM[1].length));
+        continue;
+      }
+      const pLines = [];
+      while (
+        i < lines.length &&
+        lines[i].trim() &&
+        !/^\\s*(?:#{1,6}\\s+|---+|\\*\\*\\*+|___+|>\\s?|[-*+]\\s+|\\d+[.)]\\s+|\\x00FENCE_)/.test(lines[i]) &&
+        !(
+          lines[i].indexOf("|") !== -1 &&
+          i + 1 < lines.length &&
+          /^\\s*\\|?\\s*:?-{2,}:?(?:\\s*\\|\\s*:?-{2,}:?)+\\s*\\|?\\s*$/.test(lines[i + 1])
+        )
+      ) {
+        pLines.push(lines[i].trim());
+        i++;
+      }
+      if (pLines.length > 0) {
+        out.push("<p>" + formatInline(pLines.join(" ")) + "</p>");
+      } else {
+        i++;
+      }
+    }
+    return out.join("\\n");
+  }
+
+  function renderMarkdownBlock(rawMd, sources, rejectedSourceIds) {
+    const formatted = formatInlineLatexAndFootnotes(rawMd, sources || [], rejectedSourceIds);
+    if (typeof window !== "undefined" && window.marked && typeof window.marked.parse === "function") {
+      return window.marked.parse(formatted);
+    }
+    return parseBuiltInMarkdown(formatted);
   }
 
   // Component Renderer (Tier 1 Basic Catalog + Tier 2 ICM/OKF Domain Catalog)
@@ -13775,8 +14444,12 @@ const A2UI_STUDIO_JS = `
       const tagMap = { h1: "h1", h2: "h2", h3: "h3", h4: "h4", h5: "h5", caption: "p", body: "div" };
       const el = document.createElement(tagMap[variant] || "div");
       el.className = "a2ui-" + (tagMap[variant] ? variant : "body");
-      if (comp.markdown && window.marked) {
-        el.innerHTML = window.marked.parse(formatInlineLatexAndFootnotes(rawText, []));
+      if (comp.markdown) {
+        el.style.whiteSpace = "normal";
+        el.classList.add("okf-md-body");
+        el.innerHTML = renderMarkdownBlock(rawText, []);
+      } else if (variant === "body" && /(\\*\\*[^*]+\\*\\*|\\x60[^\\x60]+\\x60|\\[[^\\]]+\\]\\([^)\\s]+\\))/.test(rawText)) {
+        el.innerHTML = renderInlineMarkdown(rawText);
       } else {
         el.textContent = rawText;
       }
@@ -14257,17 +14930,13 @@ const A2UI_STUDIO_JS = `
 
       if (mod.narration) {
         const narBox = document.createElement("div");
-        narBox.className = "a2ui-body";
+        narBox.className = "a2ui-body okf-md-body";
         narBox.style.padding = "14px 16px";
         narBox.style.background = "var(--bg)";
         narBox.style.borderRadius = "8px";
         narBox.style.borderLeft = "4px solid var(--primary)";
-        if (window.marked && typeof window.marked.parse === "function") {
-          narBox.style.whiteSpace = "normal";
-          narBox.innerHTML = window.marked.parse(formatInlineLatexAndFootnotes(mod.narration, []));
-        } else {
-          narBox.textContent = mod.narration;
-        }
+        narBox.style.whiteSpace = "normal";
+        narBox.innerHTML = renderMarkdownBlock(mod.narration, []);
         card.appendChild(narBox);
 
         const ttsPlayer = renderComponent(surface, {
@@ -14297,7 +14966,7 @@ const A2UI_STUDIO_JS = `
         ul.style.margin = "0";
         mod.bullets.forEach((bText) => {
           const li = document.createElement("li");
-          li.textContent = bText;
+          li.innerHTML = renderInlineMarkdown(bText);
           ul.appendChild(li);
         });
         ulWrap.appendChild(ul);
@@ -14320,8 +14989,8 @@ const A2UI_STUDIO_JS = `
         actBox.innerHTML =
           "<strong>" +
           actTitle +
-          "</strong><div style='margin-top:4px'>" +
-          escapeHtml(mod.actionItem) +
+          "</strong><div class='okf-md-body' style='margin-top:4px'>" +
+          renderMarkdownBlock(mod.actionItem, []) +
           "</div>";
         card.appendChild(actBox);
       }
@@ -14412,7 +15081,7 @@ const A2UI_STUDIO_JS = `
         qHeadRow.className = "a2ui-row justify-between";
         const qHead = document.createElement("h3");
         qHead.className = "a2ui-h3";
-        qHead.textContent = (qIdx + 1) + ". " + q.question;
+        qHead.innerHTML = renderInlineMarkdown((qIdx + 1) + ". " + q.question);
         qHeadRow.appendChild(qHead);
         if (q.sourceModule) {
           const srcModBadge = document.createElement("span");
@@ -14450,7 +15119,7 @@ const A2UI_STUDIO_JS = `
                 ? "✗ Ikke helt."
                 : "✗ Not quite.") +
             "</strong> " +
-            escapeHtml(q.explanation || "");
+            renderInlineMarkdown(q.explanation || "");
           qCard.appendChild(fb);
         }
         wrap.appendChild(qCard);
@@ -14491,8 +15160,9 @@ const A2UI_STUDIO_JS = `
         card.appendChild(top);
 
         const scen = document.createElement("div");
-        scen.className = "a2ui-body";
-        scen.textContent = c.scenario;
+        scen.className = "a2ui-body okf-md-body";
+        scen.style.whiteSpace = "normal";
+        scen.innerHTML = renderMarkdownBlock(c.scenario, []);
         card.appendChild(scen);
 
         const tf = renderComponent(surface, {
@@ -14542,8 +15212,8 @@ const A2UI_STUDIO_JS = `
             rec.innerHTML =
               "<strong>" +
               recHeader +
-              "</strong><div style='margin-top:6px;white-space:pre-wrap'>" +
-              escapeHtml(c.recommendedAction) +
+              "</strong><div class='okf-md-body' style='margin-top:6px'>" +
+              renderMarkdownBlock(c.recommendedAction, []) +
               "</div>";
             card.appendChild(rec);
           }
@@ -14953,8 +15623,7 @@ const A2UI_STUDIO_JS = `
       } else {
         const mdBody = document.createElement("div");
         mdBody.className = "okf-md-body";
-        const formatted = formatInlineLatexAndFootnotes(bodyMd, sources, rejectedSources);
-        mdBody.innerHTML = window.marked ? window.marked.parse(formatted) : formatted;
+        mdBody.innerHTML = renderMarkdownBlock(bodyMd, sources, rejectedSources);
         // Wire internal /research/*.md concept links & [^id] footnote scroll/highlight
         mdBody.querySelectorAll("a[href]").forEach((a) => {
           const href = a.getAttribute("href") || "";
@@ -15512,7 +16181,9 @@ const A2UI_STUDIO_JS = `
           headerHtml +
           "<hr class='a2ui-divider'>" +
           '<div class="okf-md-body">' +
-          (window.marked ? window.marked.parse(formattedBody) : formattedBody) +
+          (window.marked && typeof window.marked.parse === "function"
+            ? window.marked.parse(formattedBody)
+            : parseBuiltInMarkdown(formattedBody)) +
           "</div>" +
           footerHtml;
 
@@ -15619,13 +16290,112 @@ const A2UI_STUDIO_JS = `
 
       setTimeout(() => {
         if (!window.cytoscape) {
-          canvas.innerHTML =
-            '<div style="padding:20px" class="a2ui-caption">' +
-            (isNo
-              ? "Cytoscape.js ikke lastet (offline). Antall noder i bundle: "
-              : "Cytoscape.js not loaded (offline). Nodes in bundle: ") +
-            (bundleGraph.nodes || []).length +
-            "</div>";
+          const allNodes = bundleGraph.nodes || [];
+          const allEdges = bundleGraph.edges || [];
+          if (allNodes.length === 0) {
+            canvas.innerHTML =
+              '<div style="padding:20px" class="a2ui-caption">' +
+              (isNo ? "Ingen noder i OKF-kunnskapsgrafen ennå." : "No nodes in OKF knowledge graph yet.") +
+              "</div>";
+            return;
+          }
+          const ns = "http://www.w3.org/2000/svg";
+          const W = 760;
+          const H = 520;
+          const svg = document.createElementNS(ns, "svg");
+          svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+          svg.style.width = "100%";
+          svg.style.height = "100%";
+          svg.style.display = "block";
+          svg.style.userSelect = "none";
+          const concepts = allNodes.filter((n) => n && n.data && n.data.group !== "source");
+          const sources = allNodes.filter((n) => n && n.data && n.data.group === "source");
+          const posById = {};
+          concepts.forEach((c, idx) => {
+            if (concepts.length === 1) {
+              posById[c.data.id] = { x: W / 2, y: H / 2 };
+            } else {
+              const ang = (2 * Math.PI * idx) / concepts.length - Math.PI / 2;
+              posById[c.data.id] = { x: W / 2 + 110 * Math.cos(ang), y: H / 2 + 90 * Math.sin(ang) };
+            }
+          });
+          sources.forEach((s, idx) => {
+            const ang = (2 * Math.PI * idx) / Math.max(1, sources.length) - Math.PI / 2;
+            posById[s.data.id] = { x: W / 2 + 270 * Math.cos(ang), y: H / 2 + 195 * Math.sin(ang) };
+          });
+          const edgeGroup = document.createElementNS(ns, "g");
+          const nodeGroup = document.createElementNS(ns, "g");
+          svg.appendChild(edgeGroup);
+          svg.appendChild(nodeGroup);
+          allEdges.forEach((e) => {
+            if (!e || !e.data) return;
+            const sp = posById[e.data.source];
+            const tp = posById[e.data.target];
+            if (!sp || !tp) return;
+            const line = document.createElementNS(ns, "line");
+            line.setAttribute("x1", String(sp.x));
+            line.setAttribute("y1", String(sp.y));
+            line.setAttribute("x2", String(tp.x));
+            line.setAttribute("y2", String(tp.y));
+            line.setAttribute("stroke", "#94a3b8");
+            line.setAttribute("stroke-width", "1.75");
+            edgeGroup.appendChild(line);
+          });
+          const circleById = {};
+          allNodes.forEach((n) => {
+            if (!n || !n.data) return;
+            const d = n.data;
+            const p = posById[d.id] || { x: W / 2, y: H / 2 };
+            const r = Math.max(11, Math.min(24, Number(d.size || 24) / 2));
+            const g = document.createElementNS(ns, "g");
+            g.style.cursor = "pointer";
+            const circle = document.createElementNS(ns, "circle");
+            circle.setAttribute("cx", String(p.x));
+            circle.setAttribute("cy", String(p.y));
+            circle.setAttribute("r", String(r));
+            circle.setAttribute("fill", d.color || "#2563eb");
+            circle.setAttribute("stroke", d.id === currentSelectedNodeId ? "#1d4ed8" : "#0f172a");
+            circle.setAttribute("stroke-width", d.id === currentSelectedNodeId ? "3.5" : "1.5");
+            circleById[d.id] = circle;
+            const lbl = document.createElementNS(ns, "text");
+            lbl.setAttribute("x", String(p.x));
+            lbl.setAttribute("y", String(p.y + r + 13));
+            lbl.setAttribute("text-anchor", "middle");
+            lbl.setAttribute("font-size", "10.5");
+            lbl.setAttribute("fill", "#0f172a");
+            const rawLbl = String(d.label || d.id || "");
+            lbl.textContent = rawLbl.length > 26 ? rawLbl.slice(0, 25) + "…" : rawLbl;
+            g.appendChild(circle);
+            g.appendChild(lbl);
+            g.addEventListener("click", () => {
+              Object.keys(circleById).forEach((k) => {
+                circleById[k].setAttribute("stroke", k === d.id ? "#1d4ed8" : "#0f172a");
+                circleById[k].setAttribute("stroke-width", k === d.id ? "3.5" : "1.5");
+              });
+              renderGraphNodeDetail(d);
+            });
+            nodeGroup.appendChild(g);
+          });
+          cy = {
+            elements: () => ({
+              unselect: () => {
+                Object.keys(circleById).forEach((k) => {
+                  circleById[k].setAttribute("stroke", "#0f172a");
+                  circleById[k].setAttribute("stroke-width", "1.5");
+                });
+              },
+            }),
+            getElementById: (id) => ({
+              select: () => {
+                if (circleById[id]) {
+                  circleById[id].setAttribute("stroke", "#1d4ed8");
+                  circleById[id].setAttribute("stroke-width", "3.5");
+                }
+              },
+            }),
+          };
+          canvas.innerHTML = "";
+          canvas.appendChild(svg);
           return;
         }
         cy = window.cytoscape({
@@ -17146,6 +17916,14 @@ export function generateA2uiSurface(
     okfDoc.body ||
     (isNo ? '*Ingen Stage 1 OKF-kropp funnet.*' : '*No Stage 1 OKF body found.*');
   const primaryStatusStr = String(okfDoc.frontmatter.status || 'draft');
+  const primaryVerifiedList = normalizeVerified(okfDoc.frontmatter);
+  const primaryNonDefaultVerifier = [...primaryVerifiedList]
+    .reverse()
+    .find((v) => v.by && v.by !== 'human:styrer' && v.by !== 'human:reviewer');
+  const primaryVerifierActor =
+    primaryNonDefaultVerifier?.by ||
+    primaryVerifiedList[primaryVerifiedList.length - 1]?.by ||
+    (isNo ? 'human:styrer' : 'human:reviewer');
   const primaryStatusBadgeStr = `status: ${primaryStatusStr}`;
   const primaryTrustBadgeStr = `trust: ${okfTrustTier}`;
   const primaryFreshnessBadgeStr = okfStale ? 'stale' : 'fresh';
@@ -17221,6 +17999,7 @@ export function generateA2uiSurface(
       status: primaryStatusStr,
       trustTier: okfTrustTier,
       isStale: okfStale,
+      verifierActor: primaryVerifierActor,
       statusBadge: primaryStatusBadgeStr,
       trustBadge: primaryTrustBadgeStr,
       freshnessBadge: primaryFreshnessBadgeStr,
@@ -18518,14 +19297,15 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   );
   assert(
     !renderedVizPreview.includes('# Systematisk brannforebyggende arbeid') &&
-      renderedVizPreview.includes('## 1. Tekniske krav') &&
+      !renderedVizPreview.includes('Systematisk brannforebyggende arbeid</h1>') &&
+      renderedVizPreview.includes('<h2>1. Tekniske krav</h2>') &&
       renderedVizPreview.includes('800 m²') &&
       renderedVizPreview.includes('CO₂-slokkere') &&
       renderedVizPreview.includes('H₂O') &&
       renderedVizPreview.includes('100 m³') &&
       renderedVizPreview.includes('2 h⁻¹') &&
       renderedVizPreview.includes('20°C') &&
-      renderedVizPreview.includes('areal > 800 m² i bygg') &&
+      renderedVizPreview.includes('areal &gt; 800 m² i bygg') &&
       renderedVizPreview.includes('NOₓ') &&
       !renderedVizPreview.includes('$800') &&
       !renderedVizPreview.includes('<code>800') &&
@@ -18729,7 +19509,8 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       formattedTableA2ui.includes('(1+r)⁻ᵗ') &&
       formattedTableA2ui.includes('≥ $68/month') &&
       !formattedTableA2ui.includes('<code>') &&
-      renderedTableViz.includes('**$800.0B**') &&
+      renderedTableViz.includes('<table>') &&
+      renderedTableViz.includes('<strong>$800.0B</strong>') &&
       renderedTableViz.includes('~$420.00 (Pre-Split)') &&
       renderedTableViz.includes('$150 billion to $180 billion') &&
       renderedTableViz.includes('$185/sh to $212/sh') &&
@@ -20637,6 +21418,81 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         s1HtmlRendered.includes('color-scheme: light;') &&
         /\.okf-add-source-box input\s*\{[^}]*color:\s*#0f172a;/.test(s1HtmlRendered),
       `toggleReplacePanelInStudio, setReplaceSourceInStudio, and buildCurationPrompts support 1-click direct source swap (without requiring Reject first), 1-step inline URLs, jump-to-sources button, BPE bold-space normalization, and explicit dark-webview input contrast`
+    );
+
+    // Verify zero-CDN / sandboxed Auxiliary Pane CSP Markdown rendering (`window.marked === undefined`)
+    const cspOverviewRendered = s1Hooks.renderMarkdownBlock(
+      '**Trygghet når sekundene teller:** I en barnehage har vi omsorg for samfunnets aller yngste borgere fra 0 til 6 år.\n\n**Ansvarsdeling og systematisk HMS-arbeid:** Norsk lovverk skiller tydelig mellom byggeier og bruker.',
+      []
+    );
+    const cspComplexRendered = s1Hooks.renderMarkdownBlock(
+      '## 1. Hovedkrav\n\n1. **Brannvernleder**: utpekes av styrer[^dsb-veiledning].\n2. **Rømningsvei**: holdes fri.\n\n| Krav | Hjemmel |\n| --- | --- |\n| **Risikoklasse 3** | `TEK17 § 11-2` |',
+      [{ id: 'dsb-veiledning', title: 'DSB Veiledning', resource: 'https://www.dsb.no/' }]
+    );
+    const cspInlineRendered = s1Hooks.renderInlineMarkdown(
+      '• **Ansvarsdeling (§§ 4–13):** Bruk `brannperm` og se [Lovdata](https://lovdata.no).'
+    );
+    assert(
+      cspOverviewRendered.includes('<p><strong>Trygghet når sekundene teller:</strong> I en barnehage') &&
+        cspOverviewRendered.includes('<p><strong>Ansvarsdeling og systematisk HMS-arbeid:</strong> Norsk lovverk') &&
+        !cspOverviewRendered.includes('**Trygghet') &&
+        cspComplexRendered.includes('<h2>1. Hovedkrav</h2>') &&
+        cspComplexRendered.includes('<ol><li><strong>Brannvernleder</strong>:') &&
+        cspComplexRendered.includes('data-fn="dsb-veiledning"') &&
+        cspComplexRendered.includes('<table><thead><tr><th>Krav</th><th>Hjemmel</th></tr></thead>') &&
+        cspComplexRendered.includes('<td><strong>Risikoklasse 3</strong></td><td><code>TEK17 § 11-2</code></td>') &&
+        cspInlineRendered.includes('<strong>Ansvarsdeling (§§ 4–13):</strong>') &&
+        cspInlineRendered.includes('<code>brannperm</code>'),
+      `renderMarkdownBlock and renderInlineMarkdown render bold lead-ins, paragraphs, headings, lists, GFM tables, inline code, and OKF footnotes cleanly when external CDN marked.js is blocked by CSP or offline`
+    );
+
+    // Verify primary `updateDataModel` (`dataModel.okf.verifierActor`) parity with `bundleRuns`
+    const s1UpdatedSurfaceJson = JSON.parse(
+      fs.readFileSync(path.join(s1UnverifiedDir, 'a2ui_surface.json'), 'utf-8')
+    );
+    const s1PrimaryDataModelMsg = (s1UpdatedSurfaceJson.messages || []).find(
+      (m: any) => m && m.updateDataModel
+    );
+    assert(
+      s1PrimaryDataModelMsg?.updateDataModel?.value?.okf?.verifierActor === 'human:Cato Paus Skrede',
+      `generateA2uiSurface populates primary dataModel.okf.verifierActor directly in a2ui_surface.json`
+    );
+
+    // Verify IDF-weighted lexical line matching in `curateOkfSources` for standalone `--add-source`
+    const lexicalWeaveInput = [
+      '---',
+      'type: Research Concept',
+      'title: Brannvern i barnehage',
+      'status: draft',
+      'sources:',
+      '  - id: dsb-veiledning',
+      '    title: Veiledning til forskrift om brannforebygging – DSB',
+      '    resource: https://www.dsb.no/lover/brannforebygging/',
+      '---',
+      'Generell innledning om barnehagebygg, rømningsveier og slokkeutstyr i kommunen[^dsb-veiledning].',
+      '',
+      '1. **Brann- og eksplosjonsvernloven**: Stiller krav til aktsomhet[^dsb-veiledning].',
+      '2. **Internkontrollforskriften og arbeidsmiljøloven § 3-1**: Styrer skal dokumentere HMS-arbeidet systematisk.',
+      '',
+      '[^dsb-veiledning]: Veiledning til forskrift om brannforebygging – DSB',
+      '',
+    ].join('\n');
+    const lexicalWeaved = curateOkfSources(lexicalWeaveInput, {
+      addSources: [
+        {
+          url: 'https://lovdata.no/dokument/NL/lov/2005-06-17-62',
+          title: 'Lov om arbeidsmiljø, arbeidstid og stillingsvern mv. (arbeidsmiljøloven)',
+        },
+      ],
+    });
+    const amlSlug = lexicalWeaved.addedSources[0]?.id;
+    assert(
+      Boolean(amlSlug) &&
+        lexicalWeaved.markdown.includes(
+          `arbeidsmiljøloven § 3-1**: Styrer skal dokumentere HMS-arbeidet systematisk[^${amlSlug}].`
+        ) &&
+        !lexicalWeaved.markdown.includes(`kommunen[^dsb-veiledning][^${amlSlug}].`),
+      `curateOkfSources weaves standalone added sources onto the lexically matching claim line rather than blindly attaching to paragraph 1`
     );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
