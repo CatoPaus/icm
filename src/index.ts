@@ -9669,29 +9669,52 @@ ${OKF_VIZ_JS}
 }
 
 // ============================================================================
-// 3.9 A2UI v0.9.1 Catalog + Surface Compiler & Bi-Directional Studio Renderer
+// 3.9 A2UI v1.0 Catalog + Surface Compiler & Bi-Directional Studio Renderer
 // ============================================================================
 
-export const A2UI_PROTOCOL_VERSION = 'v0.9.1';
+export const A2UI_PROTOCOL_VERSION = '1.0';
+export const A2UI_MIME_TYPE = 'application/a2ui+json';
 export const A2UI_BASIC_CATALOG_ID =
-  'https://a2ui.org/specification/v0_9_1/catalogs/basic/catalog.json';
+  'https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json';
 export const A2UI_ICM_CATALOG_ID =
-  'https://a2ui.org/specification/v0_9_1/catalogs/icm-okf-v0.2/catalog.json';
+  'https://a2ui.org/specification/v1_0/catalogs/icm-okf-v0.2/catalog.json';
+
+export interface A2uiDataBinding {
+  '@path': string;
+}
+
+export interface A2uiFunctionCall {
+  '@call': string;
+  catalogId?: string;
+  args?: Record<string, unknown>;
+}
 
 export type A2uiDynamicValue<T = unknown> =
   | T
-  | { path: string }
-  | { call: string; args?: Record<string, unknown>; returnType?: string };
+  | A2uiDataBinding
+  | A2uiFunctionCall;
 
 export type A2uiChildList = string[] | { path: string; componentId: string };
+
+export interface A2uiCheckRule {
+  condition: A2uiDataBinding | A2uiFunctionCall;
+  message?: string;
+}
 
 export interface A2uiComponent {
   id: string;
   component: string;
+  '@catalogId'?: string;
   weight?: number;
-  accessibility?: {
+  '@accessibility'?: {
     label?: A2uiDynamicValue<string>;
     description?: A2uiDynamicValue<string>;
+    live?: 'off' | 'polite' | 'assertive';
+    hidden?: A2uiDynamicValue<boolean>;
+  };
+  '@checks'?: A2uiCheckRule[];
+  '@metadata'?: {
+    extensions?: Record<string, unknown>;
   };
   [key: string]: unknown;
 }
@@ -9700,13 +9723,13 @@ export interface A2uiCreateSurfaceMessage {
   version: typeof A2UI_PROTOCOL_VERSION;
   createSurface: {
     surfaceId: string;
-    catalogId: string;
-    theme?: {
-      primaryColor?: string;
-      iconUrl?: string;
-      agentDisplayName?: string;
-    };
+    catalogId?: string;
     sendDataModel?: boolean;
+    components?: A2uiComponent[];
+    dataModel?: Record<string, unknown>;
+    metadata?: {
+      extensions?: Record<string, unknown>;
+    };
   };
 }
 
@@ -9723,7 +9746,7 @@ export interface A2uiUpdateDataModelMessage {
   updateDataModel: {
     surfaceId: string;
     path?: string;
-    value?: unknown;
+    value: unknown;
   };
 }
 
@@ -9734,11 +9757,31 @@ export interface A2uiDeleteSurfaceMessage {
   };
 }
 
+export interface A2uiCallRendererFunctionMessage {
+  version: typeof A2UI_PROTOCOL_VERSION;
+  callRendererFunction: {
+    surfaceId: string;
+    functionCallId: string;
+    callFunction: A2uiFunctionCall;
+  };
+}
+
+export interface A2uiAgentFunctionResponseMessage {
+  version: typeof A2UI_PROTOCOL_VERSION;
+  agentFunctionResponse: {
+    functionCallId: string;
+    value?: unknown;
+    error?: { code: string; message: string };
+  };
+}
+
 export type A2uiEnvelopeMessage =
   | A2uiCreateSurfaceMessage
   | A2uiUpdateComponentsMessage
   | A2uiUpdateDataModelMessage
-  | A2uiDeleteSurfaceMessage;
+  | A2uiDeleteSurfaceMessage
+  | A2uiCallRendererFunctionMessage
+  | A2uiAgentFunctionResponseMessage;
 
 export interface A2uiChecklistItem {
   id: string;
@@ -9870,7 +9913,7 @@ export function syncA2uiToArtifactDir(input: {
     const labelTitle = input.title || input.runId || 'ICM Run';
     const stageDesc = input.isStage1Only
       ? 'Stage 1 Intermission OKF v0.2 Source Curation & Review Studio'
-      : 'Full Stage 1 + Stage 2 A2UI v0.9.1 Interactive Surface Studio';
+      : 'Full Stage 1 + Stage 2 A2UI v1.0 Interactive Surface Studio';
 
     if (input.htmlOutputPath && fs.existsSync(input.htmlOutputPath)) {
       artifactHtmlPath = path.join(resolvedDir, 'a2ui_studio.html');
@@ -9967,10 +10010,8 @@ export function hasAntigravityBrowserCapability(options?: {
 /**
  * Starts a zero-dependency one-shot HTTP loopback listener (`127.0.0.1:44820` by default)
  * for Antigravity 2.0's Reactive Wakeup ("Ping-Pong") workflow.
- * Only activates if Antigravity 2.0 with `/browser` capability is installed (or `force: true` in tests).
- * When the user clicks `🚀 Godkjenn & Send til AGY` in `a2ui.html` / `a2ui_studio.html`, the listener
- * receives the JSON curation payload, logs it to stdout, closes the server, and resolves so the
- * background CLI process exits `0` and wakes up the active Antigravity 2.0 chat.
+ * Supports both A2UI v1.0 `callAgentFunction` (`verifyOkfSources`) RPC envelopes (returning a
+ * canonical `agentFunctionResponse` envelope) and 1x1 GIF query-string beacons (`?payload=...&format=gif`).
  */
 export function startA2uiPingPongListener(options?: {
   port?: number;
@@ -10085,19 +10126,46 @@ export function startA2uiPingPongListener(options?: {
             return;
           }
           handled = true;
-          const rawPayload = parsedUrl.searchParams.get('payload') || body || '{}';
+          const rawBodyPayload = body || parsedUrl.searchParams.get('payload') || '{}';
           let parsed: Record<string, any> = {};
           try {
-            parsed = JSON.parse(rawPayload);
+            parsed = JSON.parse(rawBodyPayload);
           } catch {
-            parsed = { raw: rawPayload };
+            const queryFallback = parsedUrl.searchParams.get('payload');
+            if (queryFallback) {
+              try {
+                parsed = JSON.parse(queryFallback);
+              } catch {
+                parsed = { raw: rawBodyPayload };
+              }
+            } else {
+              parsed = { raw: rawBodyPayload };
+            }
           }
-          sendAck({ ok: true, received: parsed });
+          const fnCallId =
+            typeof parsed?.callAgentFunction?.functionCallId === 'string'
+              ? parsed.callAgentFunction.functionCallId
+              : '';
+          const normalizedPayload: Record<string, any> =
+            parsed?.callAgentFunction?.callFunction?.args &&
+            typeof parsed.callAgentFunction.callFunction.args === 'object'
+              ? parsed.callAgentFunction.callFunction.args
+              : parsed;
+          const ackBody = fnCallId
+            ? {
+                version: A2UI_PROTOCOL_VERSION,
+                agentFunctionResponse: {
+                  functionCallId: fnCallId,
+                  value: { ok: true, received: normalizedPayload },
+                },
+              }
+            : { ok: true, received: normalizedPayload };
+          sendAck(ackBody);
 
           console.log('\n=== [AGY PING-PONG REACTIVE WAKEUP TRIGGERED] ===');
-          console.log(JSON.stringify(parsed, null, 2));
+          console.log(JSON.stringify(normalizedPayload, null, 2));
           server.close(() => {
-            resolve({ port: boundPort, payload: parsed });
+            resolve({ port: boundPort, payload: normalizedPayload });
           });
         });
         return;
@@ -10161,16 +10229,158 @@ export function startA2uiPingPongListener(options?: {
 }
 
 /**
- * Two-Tier A2UI Catalog Schema combining Tier 1 (A2UI v0.9.1 Basic Catalog Primitives)
- * and Tier 2 (ICM + OKF v0.2 Domain Custom Components).
+ * Checks `specification/UPSTREAM_LOCK.json` against upstream `google/A2UI` (`versions.json` + `main` HEAD)
+ * at zero dependency cost so maintainers can detect new A2UI specification releases (`npm run spec:check`).
+ */
+export async function checkUpstreamA2uiSpec(options?: {
+  lockPath?: string;
+  timeoutMs?: number;
+}): Promise<{
+  status: 'up-to-date' | 'commit-drift' | 'new-protocol-version' | 'offline';
+  pinnedProtocolVersion: string;
+  upstreamCurrentVersion?: string;
+  pinnedCommit: string;
+  upstreamHeadCommit?: string;
+  message: string;
+}> {
+  const lockCandidates = options?.lockPath
+    ? [path.resolve(options.lockPath)]
+    : [
+        path.resolve(process.cwd(), 'specification', 'UPSTREAM_LOCK.json'),
+        path.resolve(
+          path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')),
+          '..',
+          'specification',
+          'UPSTREAM_LOCK.json'
+        ),
+      ];
+  const resolvedLock = lockCandidates.find((p) => fs.existsSync(p));
+  if (!resolvedLock) {
+    throw new Error('Missing specification/UPSTREAM_LOCK.json');
+  }
+  const lockJson = JSON.parse(fs.readFileSync(resolvedLock, 'utf-8'));
+  const pinnedProtocolVersion = String(lockJson?.a2ui?.protocolVersion || A2UI_PROTOCOL_VERSION);
+  const pinnedCommit = String(lockJson?.a2ui?.commit || '');
+  const versionsUrl = String(
+    lockJson?.a2ui?.versionsUrl ||
+      'https://raw.githubusercontent.com/google/A2UI/main/specification/versions.json'
+  );
+  const repoSlug = String(lockJson?.a2ui?.repository || 'google/A2UI');
+  const branch = String(lockJson?.a2ui?.branch || 'main');
+  const timeoutMs = options?.timeoutMs ?? 6000;
+
+  try {
+    const headers = {
+      Accept: 'application/json',
+      'User-Agent': 'open-knowledge-studio-spec-check',
+    };
+    const verRes = await fetch(versionsUrl, {
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!verRes.ok) {
+      return {
+        status: 'offline',
+        pinnedProtocolVersion,
+        pinnedCommit,
+        message: `Unable to fetch upstream versions.json (HTTP ${verRes.status}); local pin is A2UI v${pinnedProtocolVersion} @ ${pinnedCommit.slice(0, 12)}.`,
+      };
+    }
+    const versionsList = (await verRes.json()) as Array<{ version?: string; status?: string }>;
+    const currentEntry = Array.isArray(versionsList)
+      ? versionsList.find((v) => v?.status === 'current')
+      : undefined;
+    const upstreamCurrentVersion = String(currentEntry?.version || '').replace(/^v/i, '');
+
+    const trackedPaths: string[] = Array.isArray(lockJson?.a2ui?.trackedPaths) &&
+      lockJson.a2ui.trackedPaths.length > 0
+      ? lockJson.a2ui.trackedPaths.map((p: unknown) => String(p))
+      : ['specification', 'catalogs/basic/v1'];
+
+    let upstreamHeadCommit: string | undefined;
+    try {
+      const pathResults = await Promise.all(
+        trackedPaths.map(async (trackedPath) => {
+          const commitRes = await fetch(
+            `https://api.github.com/repos/${repoSlug}/commits?sha=${encodeURIComponent(branch)}&path=${encodeURIComponent(trackedPath)}&per_page=1`,
+            {
+              headers,
+              signal: AbortSignal.timeout(timeoutMs),
+            }
+          );
+          if (!commitRes.ok) return undefined;
+          const commitArr = (await commitRes.json()) as Array<{
+            sha?: string;
+            commit?: { committer?: { date?: string } };
+          }>;
+          const top = Array.isArray(commitArr) ? commitArr[0] : undefined;
+          if (!top || typeof top.sha !== 'string') return undefined;
+          return {
+            sha: top.sha,
+            dateMs: top.commit?.committer?.date ? Date.parse(top.commit.committer.date) || 0 : 0,
+          };
+        })
+      );
+      const validCommits = pathResults.filter(
+        (c): c is { sha: string; dateMs: number } => Boolean(c)
+      );
+      if (validCommits.length > 0) {
+        validCommits.sort((a, b) => b.dateMs - a.dateMs);
+        upstreamHeadCommit = validCommits[0].sha;
+      }
+    } catch {
+      // GitHub API rate-limit or restricted network; versions.json already succeeded
+    }
+
+    if (upstreamCurrentVersion && upstreamCurrentVersion !== pinnedProtocolVersion) {
+      return {
+        status: 'new-protocol-version',
+        pinnedProtocolVersion,
+        upstreamCurrentVersion,
+        pinnedCommit,
+        upstreamHeadCommit,
+        message: `New upstream A2UI current version available: v${upstreamCurrentVersion} (local pin: v${pinnedProtocolVersion} @ ${pinnedCommit.slice(0, 12)}).`,
+      };
+    }
+    if (upstreamHeadCommit && pinnedCommit && upstreamHeadCommit !== pinnedCommit) {
+      return {
+        status: 'commit-drift',
+        pinnedProtocolVersion,
+        upstreamCurrentVersion: upstreamCurrentVersion || pinnedProtocolVersion,
+        pinnedCommit,
+        upstreamHeadCommit,
+        message: `A2UI v${pinnedProtocolVersion} is current, with newer upstream commit(s) on ${repoSlug}@${branch}: ${upstreamHeadCommit.slice(0, 12)} (local pin: ${pinnedCommit.slice(0, 12)}).`,
+      };
+    }
+    return {
+      status: 'up-to-date',
+      pinnedProtocolVersion,
+      upstreamCurrentVersion: upstreamCurrentVersion || pinnedProtocolVersion,
+      pinnedCommit,
+      upstreamHeadCommit,
+      message: `Vendored A2UI v${pinnedProtocolVersion} specification is up to date with ${repoSlug}@${branch} (${(upstreamHeadCommit || pinnedCommit).slice(0, 12)}).`,
+    };
+  } catch (err: any) {
+    return {
+      status: 'offline',
+      pinnedProtocolVersion,
+      pinnedCommit,
+      message: `Offline or unreachable (${err?.message || 'network error'}); local pin is A2UI v${pinnedProtocolVersion} @ ${pinnedCommit.slice(0, 12)}.`,
+    };
+  }
+}
+
+/**
+ * Two-Tier A2UI v1.0 Catalog Descriptor combining Tier 1 (A2UI v1.0 Basic Catalog Primitives)
+ * and Tier 2 (ICM + OKF v0.2 Domain Custom Components mixed via `@catalogId`).
  */
 export const A2UI_ICM_CATALOG_SCHEMA = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   $id: A2UI_ICM_CATALOG_ID,
   catalogId: A2UI_ICM_CATALOG_ID,
-  extendsCatalogId: A2UI_BASIC_CATALOG_ID,
-  version: A2UI_PROTOCOL_VERSION,
-  title: 'ICM + OKF v0.2 Two-Tier A2UI Component Catalog',
+  basicCatalogId: A2UI_BASIC_CATALOG_ID,
+  protocolVersion: A2UI_PROTOCOL_VERSION,
+  title: 'ICM + OKF v0.2 Two-Tier A2UI v1.0 Component Catalog',
   tier1BasicComponents: [
     'Text',
     'Image',
@@ -10190,9 +10400,18 @@ export const A2UI_ICM_CATALOG_SCHEMA = {
     'DateTimeInput',
     'ChoicePicker',
     'Slider',
-    'Badge',
   ],
   tier2DomainComponents: {
+    Badge: {
+      description:
+        'Renders a semantic status pill badge (e.g. status: stable, trust: human-reviewed, fresh).',
+      properties: ['text', 'tone'],
+    },
+    SpeechPlayer: {
+      description:
+        'Synthesizes spoken narration via Web Speech API with automatic BCP-47 voice binding (nb-NO/no-NO/en-US) or plays an optional pre-rendered Stage 4 audio URL.',
+      properties: ['ttsText', 'description', 'audioUrl'],
+    },
     OkfMarkdown: {
       description:
         'Renders OKF v0.2 Markdown with clickable [^id] footnotes, retrieved_at & last_modified source badges, trust-tier & staleness headers, Layer 4 raw Markdown editor, and internal /research/*.md concept navigation.',
@@ -10210,7 +10429,7 @@ export const A2UI_ICM_CATALOG_SCHEMA = {
     },
     ModuleCarousel: {
       description:
-        'Renders Stage 2 trainingModules, lessons, modules, or slides with step-by-step navigation, regulatory/concept metadata, slide cues, action items, and Web Speech TTS narration.',
+        'Renders Stage 2 trainingModules, lessons, modules, or slides with step-by-step navigation, regulatory/concept metadata, slide cues, action items, and SpeechPlayer TTS narration.',
       properties: ['title', 'modulesPath', 'activeIndexPath'],
     },
     QuizRunner: {
@@ -11328,9 +11547,9 @@ function cloneJsonValue<T>(val: T): T {
  * Updates an RFC 6901 JSON Pointer path (`/a/b/0`) on a root data model object in-place.
  * Deep-clones assigned object/array values so mutating the live surface data model never
  * mutates historical `updateDataModel` message envelopes by reference aliasing.
- * Follows A2UI v0.9.1 upsert & delete semantics:
+ * Follows A2UI v1.0 upsert & delete semantics:
  * - If pointer is omitted or `'/'`, replaces the entire root data model in-place.
- * - If `value === undefined`, deletes the key on objects (or sets index to `undefined` on arrays, preserving length).
+ * - If `value === null` or `value === undefined`, deletes the key on objects (or sets index to `undefined` on arrays, preserving length).
  */
 export function setJsonPointer(rootModel: Record<string, any>, pointer: string, value: unknown): void {
   if (!pointer || pointer === '/') {
@@ -11354,7 +11573,7 @@ export function setJsonPointer(rootModel: Record<string, any>, pointer: string, 
     current = current[seg];
   }
   const lastSeg = segments[segments.length - 1];
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     if (Array.isArray(current) && /^\d+$/.test(lastSeg)) {
       current[Number(lastSeg)] = undefined;
     } else if (current && typeof current === 'object') {
@@ -11365,33 +11584,65 @@ export function setJsonPointer(rootModel: Record<string, any>, pointer: string, 
   }
 }
 
-let cachedCatalogReqs: Map<string, { required: string[]; properties: Set<string> }> | null = null;
+/**
+ * Enforces the A2UI v1.0 Basic Catalog media URL scheme allowlist:
+ * permits `http:`, `https:`, `data:`, and relative URLs, while rejecting
+ * arbitrary/unsafe schemes such as `tts:`, `javascript:`, `vbscript:`, or `file:`.
+ */
+export function isAllowedA2uiMediaUrl(rawUrl: string): boolean {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return false;
+  if (/^(?:https?:|data:)/i.test(trimmed)) return true;
+  if (trimmed.startsWith('//')) return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) return false;
+  return true;
+}
+
+let cachedCatalogReqs: Map<
+  string,
+  { catalogId: string; required: string[]; properties: Set<string> }
+> | null = null;
 
 /**
- * Loads and merges Tier 1 (`specification/v0_9_1/catalogs/basic/catalog.json`) and
- * Tier 2 (`specification/v0_9_1/catalogs/icm-okf-v0.2/catalog.json`) A2UI component schemas.
+ * Loads and indexes Tier 1 (`specification/v1_0/catalogs/basic/catalog.json`) and
+ * Tier 2 (`specification/v1_0/catalogs/icm-okf-v0.2/catalog.json`) A2UI v1.0 component schemas.
  */
 export function loadA2uiCatalogComponentRequirements(): Map<
   string,
-  { required: string[]; properties: Set<string> }
+  { catalogId: string; required: string[]; properties: Set<string> }
 > {
   if (cachedCatalogReqs) return cachedCatalogReqs;
-  const map = new Map<string, { required: string[]; properties: Set<string> }>();
+  const map = new Map<string, { catalogId: string; required: string[]; properties: Set<string> }>();
   const specRootCandidates = [
-    path.resolve(process.cwd(), 'specification', 'v0_9_1', 'catalogs'),
-    path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..', 'specification', 'v0_9_1', 'catalogs'),
+    path.resolve(process.cwd(), 'specification', 'v1_0', 'catalogs'),
+    path.resolve(
+      path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')),
+      '..',
+      'specification',
+      'v1_0',
+      'catalogs'
+    ),
   ];
   const specCatalogDir = specRootCandidates.find((d) => fs.existsSync(d));
 
-  const parseCatalogFile = (filePath: string) => {
+  const parseCatalogFile = (filePath: string, fallbackCatalogId: string) => {
     if (!fs.existsSync(filePath)) return;
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      const catalogId = String(parsed?.catalogId || fallbackCatalogId);
       const comps = parsed?.components;
       if (!comps || typeof comps !== 'object') return;
       for (const [compName, compDef] of Object.entries<any>(comps)) {
         const reqSet = new Set<string>(['id', 'component']);
-        const propSet = new Set<string>(['id', 'component', 'weight', 'accessibility']);
+        const propSet = new Set<string>([
+          'id',
+          'component',
+          '@catalogId',
+          'weight',
+          '@accessibility',
+          '@checks',
+          '@metadata',
+        ]);
         const branches = Array.isArray(compDef?.allOf) ? compDef.allOf : [compDef];
         for (const b of branches) {
           if (Array.isArray(b?.required)) {
@@ -11401,7 +11652,11 @@ export function loadA2uiCatalogComponentRequirements(): Map<
             for (const p of Object.keys(b.properties)) propSet.add(p);
           }
         }
-        map.set(compName, { required: Array.from(reqSet), properties: propSet });
+        map.set(compName, {
+          catalogId,
+          required: Array.from(reqSet),
+          properties: propSet,
+        });
       }
     } catch {
       // Fallback handled below
@@ -11409,21 +11664,29 @@ export function loadA2uiCatalogComponentRequirements(): Map<
   };
 
   if (specCatalogDir) {
-    parseCatalogFile(path.join(specCatalogDir, 'basic', 'catalog.json'));
-    parseCatalogFile(path.join(specCatalogDir, 'icm-okf-v0.2', 'catalog.json'));
+    parseCatalogFile(path.join(specCatalogDir, 'basic', 'catalog.json'), A2UI_BASIC_CATALOG_ID);
+    parseCatalogFile(
+      path.join(specCatalogDir, 'icm-okf-v0.2', 'catalog.json'),
+      A2UI_ICM_CATALOG_ID
+    );
   }
 
   // Ensure fallback entries if run outside repo root
   for (const t1 of A2UI_ICM_CATALOG_SCHEMA.tier1BasicComponents) {
     if (!map.has(t1)) {
-      map.set(t1, { required: ['id', 'component'], properties: new Set(['id', 'component']) });
+      map.set(t1, {
+        catalogId: A2UI_BASIC_CATALOG_ID,
+        required: ['id', 'component'],
+        properties: new Set(['id', 'component', '@catalogId']),
+      });
     }
   }
   for (const [t2Name, t2Def] of Object.entries(A2UI_ICM_CATALOG_SCHEMA.tier2DomainComponents)) {
     if (!map.has(t2Name)) {
       map.set(t2Name, {
+        catalogId: A2UI_ICM_CATALOG_ID,
         required: ['id', 'component'],
-        properties: new Set(['id', 'component', ...t2Def.properties]),
+        properties: new Set(['id', 'component', '@catalogId', ...t2Def.properties]),
       });
     }
   }
@@ -11433,23 +11696,250 @@ export function loadA2uiCatalogComponentRequirements(): Map<
 }
 
 /**
- * Validates an array of A2UI v0.9.1 server-to-client messages for protocol structural integrity:
- * - Envelope version === 'v0.9.1'
- * - Exactly one of `createSurface`, `updateComponents`, `updateDataModel`, or `deleteSurface` per message
- * - `createSurface` precedes `updateComponents`, `updateDataModel`, and `deleteSurface` for the same `surfaceId`,
- *   and duplicate `createSurface` without an intervening `deleteSurface` is rejected
- * - Component adjacency list contains a `root` component (`id: "root"`), no duplicate IDs,
- *   all component types and required properties match the merged Tier 1 (`basic/catalog.json`) +
- *   Tier 2 (`icm-okf-v0.2/catalog.json`) schemas, all child component ID references exist,
- *   and there are no circular parent-child references.
+ * Validates an array of A2UI v1.0 agent-to-renderer messages for protocol structural integrity:
+ * - Envelope `version === "1.0"`
+ * - Exactly one of `createSurface`, `updateComponents`, `updateDataModel`, `deleteSurface`,
+ *   `callRendererFunction`, or `agentFunctionResponse` per message
+ * - `createSurface` allows only v1.0 properties (`surfaceId`, `catalogId`, `sendDataModel`,
+ *   `components`, `dataModel`, `metadata` — rejects removed v0.9 `theme`)
+ * - `updateDataModel` requires `value` (`null` deletes)
+ * - Multi-catalog `@catalogId` resolution: components belonging to a catalog other than the surface's
+ *   default `catalogId` must explicitly declare `@catalogId`
+ * - `@`-prefixed directives (`@path`, `@call`, `@accessibility`, `@checks`) enforced over legacy v0.9 keys
+ * - Basic `Text` enforces `variant: "body" | "caption"` (headings use Markdown `# `..`##### `),
+ *   and literal media URLs pass `isAllowedA2uiMediaUrl()`.
  */
 export function validateA2uiSurfaceMessages(messages: A2uiEnvelopeMessage[]): {
   valid: boolean;
   errors: string[];
 } {
   const errors: string[] = [];
-  const createdSurfaces = new Set<string>();
+  const createdSurfaces = new Map<string, { defaultCatalogId: string }>();
   const catalogReqs = loadA2uiCatalogComponentRequirements();
+  const allowedCreateSurfaceKeys = new Set([
+    'surfaceId',
+    'catalogId',
+    'sendDataModel',
+    'components',
+    'dataModel',
+    'metadata',
+  ]);
+  const envelopeActionKeys = [
+    'createSurface',
+    'updateComponents',
+    'updateDataModel',
+    'deleteSurface',
+    'callRendererFunction',
+    'agentFunctionResponse',
+  ];
+
+  const inspectLegacyDynamicObject = (
+    compId: string,
+    propPath: string,
+    val: unknown
+  ): void => {
+    if (!val || typeof val !== 'object') return;
+    if (Array.isArray(val)) {
+      val.forEach((item, idx) => inspectLegacyDynamicObject(compId, `${propPath}[${idx}]`, item));
+      return;
+    }
+    const obj = val as Record<string, unknown>;
+    const keys = Object.keys(obj);
+    if (keys.length === 1 && typeof obj.path === 'string') {
+      errors.push(
+        `Component "${compId}" property "${propPath}" uses legacy "{ path }" binding; use "{ \\"@path\\": ... }" in A2UI v1.0`
+      );
+      return;
+    }
+    if ('call' in obj && typeof obj.call === 'string' && !('@call' in obj)) {
+      errors.push(
+        `Component "${compId}" property "${propPath}" uses legacy "{ call }" function invocation; use "{ \\"@call\\": ... }" in A2UI v1.0`
+      );
+      return;
+    }
+    for (const [k, v] of Object.entries(obj)) {
+      inspectLegacyDynamicObject(compId, `${propPath}.${k}`, v);
+    }
+  };
+
+  const validateComponentArray = (
+    msgIdx: number,
+    surfaceId: string,
+    defaultCatalogId: string,
+    components: A2uiComponent[]
+  ): void => {
+    if (!Array.isArray(components) || components.length === 0) {
+      errors.push(`Message[${msgIdx}] components for surface "${surfaceId}" must be a non-empty array`);
+      return;
+    }
+
+    const byId = new Map<string, A2uiComponent>();
+    for (const comp of components) {
+      if (!comp.id || typeof comp.id !== 'string') {
+        errors.push(`Component missing string id`);
+        continue;
+      }
+      if ('accessibility' in comp) {
+        errors.push(
+          `Component "${comp.id}" uses legacy "accessibility" property; use "@accessibility" in A2UI v1.0`
+        );
+      }
+      if ('checks' in comp) {
+        errors.push(
+          `Component "${comp.id}" uses legacy "checks" property; use "@checks" in A2UI v1.0`
+        );
+      }
+
+      const effectiveCatalogId =
+        typeof comp['@catalogId'] === 'string' && comp['@catalogId'].trim()
+          ? comp['@catalogId'].trim()
+          : defaultCatalogId;
+
+      if (!comp.component || typeof comp.component !== 'string') {
+        errors.push(`Component "${comp.id}" missing component type name`);
+      } else {
+        const schemaEntry = catalogReqs.get(comp.component);
+        if (!schemaEntry) {
+          errors.push(
+            `Component "${comp.id}" uses unknown component type "${comp.component}" not present in Basic or ICM/OKF catalog`
+          );
+        } else {
+          if (effectiveCatalogId !== schemaEntry.catalogId) {
+            errors.push(
+              `Component "${comp.id}" (${comp.component}) belongs to catalog "${schemaEntry.catalogId}", but resolved catalog is "${effectiveCatalogId}" (set "@catalogId": "${schemaEntry.catalogId}")`
+            );
+          }
+          for (const reqProp of schemaEntry.required) {
+            if (!(reqProp in comp) || comp[reqProp] === undefined) {
+              errors.push(
+                `Component "${comp.id}" (${comp.component}) missing required catalog property "${reqProp}"`
+              );
+            }
+          }
+        }
+      }
+
+      if (effectiveCatalogId === A2UI_BASIC_CATALOG_ID && comp.component === 'Text') {
+        if ('markdown' in comp) {
+          errors.push(
+            `Component "${comp.id}" (Basic Text) must not specify non-standard "markdown" property in A2UI v1.0`
+          );
+        }
+        if (
+          typeof comp.variant === 'string' &&
+          comp.variant !== 'body' &&
+          comp.variant !== 'caption'
+        ) {
+          errors.push(
+            `Component "${comp.id}" (Basic Text) has invalid variant "${comp.variant}"; A2UI v1.0 Basic Text allows only "body" | "caption" (use Markdown "# ".."##### " inside text for headings)`
+          );
+        }
+      }
+
+      if (
+        comp.component === 'Image' ||
+        comp.component === 'Video' ||
+        comp.component === 'AudioPlayer'
+      ) {
+        if (typeof comp.url === 'string' && !isAllowedA2uiMediaUrl(comp.url)) {
+          errors.push(
+            `Component "${comp.id}" (${comp.component}) has disallowed media URL scheme "${comp.url}"`
+          );
+        }
+        if (typeof comp.posterUrl === 'string' && !isAllowedA2uiMediaUrl(comp.posterUrl)) {
+          errors.push(
+            `Component "${comp.id}" (${comp.component}) has disallowed posterUrl scheme "${comp.posterUrl}"`
+          );
+        }
+      } else if (comp.component === 'SpeechPlayer') {
+        if (
+          typeof comp.audioUrl === 'string' &&
+          comp.audioUrl.trim().length > 0 &&
+          !isAllowedA2uiMediaUrl(comp.audioUrl)
+        ) {
+          errors.push(
+            `Component "${comp.id}" (SpeechPlayer) has disallowed audioUrl scheme "${comp.audioUrl}"`
+          );
+        }
+      }
+
+      for (const [propKey, propVal] of Object.entries(comp)) {
+        if (
+          propKey === 'id' ||
+          propKey === 'component' ||
+          propKey === '@catalogId' ||
+          propKey === 'children'
+        ) {
+          continue;
+        }
+        inspectLegacyDynamicObject(comp.id, propKey, propVal);
+      }
+
+      if (byId.has(comp.id)) {
+        errors.push(`Duplicate component id "${comp.id}" in surface "${surfaceId}"`);
+      }
+      byId.set(comp.id, comp);
+    }
+
+    if (!byId.has('root')) {
+      errors.push(`Surface "${surfaceId}" is missing required component with id="root"`);
+    }
+
+    // Check child references & cycle detection
+    const getChildIds = (comp: A2uiComponent): string[] => {
+      const refs: string[] = [];
+      if (typeof comp.child === 'string') refs.push(comp.child);
+      if (typeof comp.trigger === 'string') refs.push(comp.trigger);
+      if (typeof comp.content === 'string') refs.push(comp.content);
+      if (Array.isArray(comp.children)) {
+        for (const c of comp.children) {
+          if (typeof c === 'string') refs.push(c);
+        }
+      } else if (
+        comp.children &&
+        typeof comp.children === 'object' &&
+        typeof (comp.children as any).componentId === 'string'
+      ) {
+        refs.push((comp.children as any).componentId);
+      }
+      if (Array.isArray(comp.tabs)) {
+        for (const tab of comp.tabs as any[]) {
+          if (tab && typeof tab.child === 'string') refs.push(tab.child);
+        }
+      }
+      return refs;
+    };
+
+    for (const [id, comp] of byId.entries()) {
+      for (const childId of getChildIds(comp)) {
+        if (!byId.has(childId)) {
+          errors.push(`Component "${id}" references non-existent child component "${childId}"`);
+        }
+      }
+    }
+
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const dfs = (nodeId: string) => {
+      if (visiting.has(nodeId)) {
+        errors.push(`Circular component reference detected involving "${nodeId}"`);
+        return;
+      }
+      if (visited.has(nodeId)) return;
+      visiting.add(nodeId);
+      const comp = byId.get(nodeId);
+      if (comp) {
+        for (const childId of getChildIds(comp)) {
+          if (byId.has(childId)) dfs(childId);
+        }
+      }
+      visiting.delete(nodeId);
+      visited.add(nodeId);
+    };
+    if (byId.has('root')) {
+      dfs('root');
+    }
+  };
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -11458,35 +11948,62 @@ export function validateA2uiSurfaceMessages(messages: A2uiEnvelopeMessage[]): {
       continue;
     }
     if (msg.version !== A2UI_PROTOCOL_VERSION) {
-      errors.push(`Message[${i}] has invalid version "${(msg as any).version}", expected "${A2UI_PROTOCOL_VERSION}"`);
+      errors.push(
+        `Message[${i}] has invalid version "${(msg as any).version}", expected "${A2UI_PROTOCOL_VERSION}"`
+      );
     }
 
-    const msgKeys = ['createSurface', 'updateComponents', 'updateDataModel', 'deleteSurface'].filter(
-      (k) => k in msg
-    );
+    const msgKeys = envelopeActionKeys.filter((k) => k in msg);
     if (msgKeys.length !== 1) {
       errors.push(
-        `Message[${i}] must contain exactly one envelope action (createSurface | updateComponents | updateDataModel | deleteSurface), found ${msgKeys.length}`
+        `Message[${i}] must contain exactly one envelope action (${envelopeActionKeys.join(' | ')}), found ${msgKeys.length}`
       );
       continue;
     }
 
     if ('createSurface' in msg) {
-      const { surfaceId, catalogId } = msg.createSurface;
+      const cs = msg.createSurface as Record<string, unknown>;
+      const surfaceId = typeof cs?.surfaceId === 'string' ? cs.surfaceId : '';
+      const defaultCatalogId =
+        typeof cs?.catalogId === 'string' && cs.catalogId.trim()
+          ? cs.catalogId.trim()
+          : A2UI_BASIC_CATALOG_ID;
       if (!surfaceId) errors.push(`Message[${i}] createSurface missing surfaceId`);
-      if (!catalogId) errors.push(`Message[${i}] createSurface missing catalogId`);
+      for (const key of Object.keys(cs || {})) {
+        if (!allowedCreateSurfaceKeys.has(key)) {
+          errors.push(
+            `Message[${i}] createSurface contains unsupported A2UI v1.0 property "${key}"`
+          );
+        }
+      }
       if (surfaceId && createdSurfaces.has(surfaceId)) {
         errors.push(
           `Message[${i}] duplicate createSurface for active surface "${surfaceId}" without prior deleteSurface`
         );
       }
-      if (surfaceId) createdSurfaces.add(surfaceId);
+      if (surfaceId) {
+        createdSurfaces.set(surfaceId, { defaultCatalogId });
+      }
+      if (cs?.components !== undefined) {
+        validateComponentArray(
+          i,
+          surfaceId || 'unknown',
+          defaultCatalogId,
+          cs.components as A2uiComponent[]
+        );
+      }
     } else if ('updateDataModel' in msg) {
-      const { surfaceId } = msg.updateDataModel;
+      const udm = msg.updateDataModel as Record<string, unknown>;
+      const surfaceId = typeof udm?.surfaceId === 'string' ? udm.surfaceId : '';
       if (!surfaceId) {
         errors.push(`Message[${i}] updateDataModel missing surfaceId`);
       } else if (!createdSurfaces.has(surfaceId)) {
         errors.push(`Message[${i}] updateDataModel references uncreated surface "${surfaceId}"`);
+      }
+      if (!udm || !('value' in udm) || udm.value === undefined) {
+        errors.push(
+          `Message[${i}] updateDataModel missing required "value" property (pass null to delete in A2UI v1.0)`
+        );
       }
     } else if ('deleteSurface' in msg) {
       const { surfaceId } = msg.deleteSurface;
@@ -11497,100 +12014,41 @@ export function validateA2uiSurfaceMessages(messages: A2uiEnvelopeMessage[]): {
       } else {
         createdSurfaces.delete(surfaceId);
       }
+    } else if ('callRendererFunction' in msg) {
+      const crf = msg.callRendererFunction;
+      if (!crf?.surfaceId) {
+        errors.push(`Message[${i}] callRendererFunction missing surfaceId`);
+      } else if (!createdSurfaces.has(crf.surfaceId)) {
+        errors.push(
+          `Message[${i}] callRendererFunction references uncreated surface "${crf.surfaceId}"`
+        );
+      }
+      if (!crf?.functionCallId) {
+        errors.push(`Message[${i}] callRendererFunction missing functionCallId`);
+      }
+      if (!crf?.callFunction || typeof crf.callFunction['@call'] !== 'string') {
+        errors.push(`Message[${i}] callRendererFunction missing callFunction["@call"]`);
+      }
+    } else if ('agentFunctionResponse' in msg) {
+      const afr = msg.agentFunctionResponse;
+      if (!afr?.functionCallId) {
+        errors.push(`Message[${i}] agentFunctionResponse missing functionCallId`);
+      }
+      if (afr && !('value' in afr) && !('error' in afr)) {
+        errors.push(`Message[${i}] agentFunctionResponse must include "value" or "error"`);
+      }
     } else if ('updateComponents' in msg) {
       const { surfaceId, components } = msg.updateComponents;
-      if (!createdSurfaces.has(surfaceId)) {
+      const surfaceState = createdSurfaces.get(surfaceId);
+      if (!surfaceState) {
         errors.push(`Message[${i}] updateComponents references uncreated surface "${surfaceId}"`);
       }
-      if (!Array.isArray(components) || components.length === 0) {
-        errors.push(`Message[${i}] updateComponents.components must be a non-empty array`);
-        continue;
-      }
-
-      const byId = new Map<string, A2uiComponent>();
-      for (const comp of components) {
-        if (!comp.id || typeof comp.id !== 'string') {
-          errors.push(`Component missing string id`);
-          continue;
-        }
-        if (!comp.component || typeof comp.component !== 'string') {
-          errors.push(`Component "${comp.id}" missing component type name`);
-        } else {
-          const schemaEntry = catalogReqs.get(comp.component);
-          if (!schemaEntry) {
-            errors.push(
-              `Component "${comp.id}" uses unknown component type "${comp.component}" not present in Basic or ICM/OKF catalog`
-            );
-          } else {
-            for (const reqProp of schemaEntry.required) {
-              if (!(reqProp in comp) || comp[reqProp] === undefined) {
-                errors.push(
-                  `Component "${comp.id}" (${comp.component}) missing required catalog property "${reqProp}"`
-                );
-              }
-            }
-          }
-        }
-        if (byId.has(comp.id)) {
-          errors.push(`Duplicate component id "${comp.id}" in surface "${surfaceId}"`);
-        }
-        byId.set(comp.id, comp);
-      }
-
-      if (!byId.has('root')) {
-        errors.push(`Surface "${surfaceId}" is missing required component with id="root"`);
-      }
-
-      // Check child references & cycle detection
-      const getChildIds = (comp: A2uiComponent): string[] => {
-        const refs: string[] = [];
-        if (typeof comp.child === 'string') refs.push(comp.child);
-        if (typeof comp.trigger === 'string') refs.push(comp.trigger);
-        if (typeof comp.content === 'string') refs.push(comp.content);
-        if (Array.isArray(comp.children)) {
-          for (const c of comp.children) {
-            if (typeof c === 'string') refs.push(c);
-          }
-        } else if (comp.children && typeof comp.children === 'object' && typeof (comp.children as any).componentId === 'string') {
-          refs.push((comp.children as any).componentId);
-        }
-        if (Array.isArray(comp.tabs)) {
-          for (const tab of comp.tabs as any[]) {
-            if (tab && typeof tab.child === 'string') refs.push(tab.child);
-          }
-        }
-        return refs;
-      };
-
-      for (const [id, comp] of byId.entries()) {
-        for (const childId of getChildIds(comp)) {
-          if (!byId.has(childId)) {
-            errors.push(`Component "${id}" references non-existent child component "${childId}"`);
-          }
-        }
-      }
-
-      const visiting = new Set<string>();
-      const visited = new Set<string>();
-      const dfs = (nodeId: string) => {
-        if (visiting.has(nodeId)) {
-          errors.push(`Circular component reference detected involving "${nodeId}"`);
-          return;
-        }
-        if (visited.has(nodeId)) return;
-        visiting.add(nodeId);
-        const comp = byId.get(nodeId);
-        if (comp) {
-          for (const childId of getChildIds(comp)) {
-            if (byId.has(childId)) dfs(childId);
-          }
-        }
-        visiting.delete(nodeId);
-        visited.add(nodeId);
-      };
-      if (byId.has('root')) {
-        dfs('root');
-      }
+      validateComponentArray(
+        i,
+        surfaceId,
+        surfaceState?.defaultCatalogId || A2UI_BASIC_CATALOG_ID,
+        components
+      );
     }
   }
 
@@ -12686,7 +13144,7 @@ const A2UI_STUDIO_JS = `
         topbarTitleEl.textContent = String(nextTitle);
       }
       if (document.title) {
-        document.title = String(nextTitle) + " — A2UI v0.9.1 Studio";
+        document.title = String(nextTitle) + " — A2UI v1.0 Studio";
       }
       const switcherEl = document.getElementById("a2ui-run-switcher-select");
       if (switcherEl && switcherEl.value !== targetRunId) {
@@ -13680,6 +14138,11 @@ const A2UI_STUDIO_JS = `
     window.__ICM_TEST_HOOKS__.renderComponent = renderComponent;
     window.__ICM_TEST_HOOKS__.renderSurface = renderSurface;
     window.__ICM_TEST_HOOKS__.mountSurface = mountSurface;
+    window.__ICM_TEST_HOOKS__.resolveDynamic = resolveDynamic;
+    window.__ICM_TEST_HOOKS__.evaluateFunctionCall = evaluateFunctionCall;
+    window.__ICM_TEST_HOOKS__.isAllowedMediaUrl = isAllowedMediaUrl;
+    window.__ICM_TEST_HOOKS__.processMessage = processMessage;
+    window.__ICM_TEST_HOOKS__.surfaces = surfaces;
     return;
   }
 
@@ -13690,6 +14153,15 @@ const A2UI_STUDIO_JS = `
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  function isAllowedMediaUrl(rawUrl) {
+    const trimmed = String(rawUrl || "").trim();
+    if (!trimmed) return false;
+    if (/^(?:https?:|data:)/i.test(trimmed)) return true;
+    if (trimmed.indexOf("//") === 0) return false;
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) return false;
+    return true;
   }
 
   function resolvePointer(root, pointer, scopeData) {
@@ -13775,27 +14247,38 @@ const A2UI_STUDIO_JS = `
     return String(val);
   }
 
-  function evaluateFunctionCall(fnObj, surface, scopeData) {
-    const callName = fnObj.call;
+  function evaluateFunctionCall(fnObj, surface, scopeData, itemIndex) {
+    const callName = fnObj["@call"] || fnObj.call;
     const args = fnObj.args || {};
+    if (callName === "@index") {
+      const offsetRaw =
+        args.offset !== undefined
+          ? resolveDynamic(args.offset, surface, scopeData, itemIndex)
+          : 0;
+      const offsetNum = Number(offsetRaw || 0);
+      return (typeof itemIndex === "number" ? itemIndex : 0) + (Number.isNaN(offsetNum) ? 0 : offsetNum);
+    }
     if (callName === "formatString") {
       const rawTemplate = String(args.value ?? "");
       return rawTemplate.replace(/(\\\\?)\\$\\{([^}]+)\\}/g, function (match, esc, expr) {
         if (esc === "\\\\") return match.slice(1);
         const trimmed = String(expr || "").trim();
+        if (trimmed === "@index") {
+          return String(typeof itemIndex === "number" ? itemIndex : 0);
+        }
         const resolved = resolvePointer(surface.dataModel, trimmed, scopeData);
         return stringifyInterpolated(resolved);
       });
     }
     if (callName === "required") {
-      const v = resolveDynamic(args.value, surface, scopeData);
+      const v = resolveDynamic(args.value, surface, scopeData, itemIndex);
       if (v === null || v === undefined) return false;
       if (typeof v === "string") return v.trim().length > 0;
       if (Array.isArray(v)) return v.length > 0;
       return Boolean(v);
     }
     if (callName === "regex") {
-      const v = String(resolveDynamic(args.value, surface, scopeData) ?? "");
+      const v = String(resolveDynamic(args.value, surface, scopeData, itemIndex) ?? "");
       try {
         return new RegExp(String(args.pattern || "")).test(v);
       } catch {
@@ -13803,35 +14286,35 @@ const A2UI_STUDIO_JS = `
       }
     }
     if (callName === "length") {
-      const v = String(resolveDynamic(args.value, surface, scopeData) ?? "");
+      const v = String(resolveDynamic(args.value, surface, scopeData, itemIndex) ?? "");
       if (typeof args.min === "number" && v.length < args.min) return false;
       if (typeof args.max === "number" && v.length > args.max) return false;
       return true;
     }
     if (callName === "numeric") {
-      const n = Number(resolveDynamic(args.value, surface, scopeData));
+      const n = Number(resolveDynamic(args.value, surface, scopeData, itemIndex));
       if (Number.isNaN(n)) return false;
       if (typeof args.min === "number" && n < args.min) return false;
       if (typeof args.max === "number" && n > args.max) return false;
       return true;
     }
     if (callName === "email") {
-      const v = String(resolveDynamic(args.value, surface, scopeData) ?? "");
+      const v = String(resolveDynamic(args.value, surface, scopeData, itemIndex) ?? "");
       return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(v);
     }
     if (callName === "and") {
       const list = Array.isArray(args.values) ? args.values : [];
-      return list.every((item) => Boolean(resolveDynamic(item, surface, scopeData)));
+      return list.every((item) => Boolean(resolveDynamic(item, surface, scopeData, itemIndex)));
     }
     if (callName === "or") {
       const list = Array.isArray(args.values) ? args.values : [];
-      return list.some((item) => Boolean(resolveDynamic(item, surface, scopeData)));
+      return list.some((item) => Boolean(resolveDynamic(item, surface, scopeData, itemIndex)));
     }
     if (callName === "not") {
-      return !Boolean(resolveDynamic(args.value, surface, scopeData));
+      return !Boolean(resolveDynamic(args.value, surface, scopeData, itemIndex));
     }
     if (callName === "openUrl") {
-      const url = String(resolveDynamic(args.url, surface, scopeData) || "");
+      const url = String(resolveDynamic(args.url, surface, scopeData, itemIndex) || "");
       if (url && typeof window !== "undefined" && window.open) {
         window.open(url, "_blank", "noopener");
       }
@@ -13840,30 +14323,48 @@ const A2UI_STUDIO_JS = `
     return "";
   }
 
-  function resolveDynamic(val, surface, scopeData) {
+  function resolveDynamic(val, surface, scopeData, itemIndex) {
     if (val && typeof val === "object" && !Array.isArray(val)) {
-      if (typeof val.path === "string") {
-        return resolvePointer(surface.dataModel, val.path, scopeData);
+      const dynPath =
+        typeof val["@path"] === "string"
+          ? val["@path"]
+          : typeof val.path === "string"
+            ? val.path
+            : undefined;
+      if (dynPath !== undefined) {
+        return resolvePointer(surface.dataModel, dynPath, scopeData);
       }
-      if (typeof val.call === "string") {
-        return evaluateFunctionCall(val, surface, scopeData);
+      const dynCall =
+        typeof val["@call"] === "string"
+          ? val["@call"]
+          : typeof val.call === "string"
+            ? val.call
+            : undefined;
+      if (dynCall !== undefined) {
+        return evaluateFunctionCall(val, surface, scopeData, itemIndex);
       }
     }
     return val;
   }
 
-  // Process A2UI v0.9.1 Server-to-Client Message Stream
+  // Process A2UI v1.0 (with v0.9.1 backward-compat) Agent-to-Renderer Message Stream
   function processMessage(msg) {
-    if (!msg || (msg.version !== "v0.9.1" && msg.version !== "v0.9")) return;
+    if (!msg || (msg.version !== "1.0" && msg.version !== "v0.9.1" && msg.version !== "v0.9")) return;
     if (msg.createSurface) {
       const s = msg.createSurface;
+      const initialComponents = {};
+      if (Array.isArray(s.components)) {
+        for (const c of s.components) {
+          if (c && c.id) initialComponents[c.id] = cloneDataValue(c);
+        }
+      }
       surfaces[s.surfaceId] = {
         surfaceId: s.surfaceId,
-        catalogId: s.catalogId,
-        theme: cloneDataValue(s.theme || {}),
+        catalogId: s.catalogId || "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json",
         sendDataModel: !!s.sendDataModel,
-        components: {},
-        dataModel: {},
+        metadata: cloneDataValue(s.metadata || {}),
+        components: initialComponents,
+        dataModel: s.dataModel && typeof s.dataModel === "object" ? cloneDataValue(s.dataModel) : {},
         runStates: {},
         uiState: { activeTabs: {} },
       };
@@ -13878,9 +14379,15 @@ const A2UI_STUDIO_JS = `
       const s = surfaces[msg.updateDataModel.surfaceId];
       if (!s) return;
       const p = msg.updateDataModel.path || "/";
-      setPointer(s.dataModel, p, cloneDataValue(msg.updateDataModel.value));
+      const rawVal = msg.updateDataModel.value;
+      setPointer(s.dataModel, p, rawVal === null ? undefined : cloneDataValue(rawVal));
     } else if (msg.deleteSurface) {
       delete surfaces[msg.deleteSurface.surfaceId];
+    } else if (msg.callRendererFunction) {
+      const s = surfaces[msg.callRendererFunction.surfaceId];
+      if (s && msg.callRendererFunction.callFunction) {
+        evaluateFunctionCall(msg.callRendererFunction.callFunction, s, undefined, undefined);
+      }
     }
   }
 
@@ -14278,7 +14785,7 @@ const A2UI_STUDIO_JS = `
 
   function dispatchClientAction(surface, sourceComponentId, name, contextObj) {
     const evt = {
-      version: "v0.9.1",
+      version: "1.0",
       action: {
         name: name,
         surfaceId: surface.surfaceId,
@@ -14410,12 +14917,14 @@ const A2UI_STUDIO_JS = `
     a.click();
   }
 
-  function formatInlineLatexAndFootnotes(md, sources, rejectedSourceIds) {
+  function formatInlineLatexAndFootnotes(md, sources, rejectedSourceIds, preserveLeadingH1) {
     const supMap = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾", a: "ᵃ", b: "ᵇ", c: "ᶜ", d: "ᵈ", e: "ᵉ", f: "ᶠ", g: "ᵍ", h: "ʰ", i: "ⁱ", j: "ʲ", k: "ᵏ", l: "ˡ", m: "ᵐ", n: "ⁿ", o: "ᵒ", p: "ᵖ", r: "ʳ", s: "ˢ", t: "ᵗ", u: "ᵘ", v: "ᵛ", w: "ʷ", x: "ˣ", y: "ʸ", z: "ᶻ" };
     const subMap = { "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉", "+": "₊", "-": "₋", a: "ₐ", e: "ₑ", h: "ₕ", i: "ᵢ", j: "ⱼ", k: "ₖ", l: "ₗ", m: "ₘ", n: "ₙ", o: "ₒ", p: "ₚ", r: "ᵣ", s: "ₛ", t: "ₜ", u: "ᵤ", v: "ᵥ", x: "ₓ" };
     let out = String(md || "");
-    // Strip redundant leading H1 heading (# <Title>) since the concept title is already rendered in the card/panel header
-    out = out.replace(/^\\s*#\\s+[^\\r\\n]+(?:\\r?\\n+---(?=\\r?\\n|$))?\\r?\\n*/, "");
+    // Strip redundant leading H1 heading (# <Title>) in OkfMarkdown since the concept title is rendered in the card/panel header
+    if (!preserveLeadingH1) {
+      out = out.replace(/^\\s*#\\s+[^\\r\\n]+(?:\\r?\\n+---(?=\\r?\\n|$))?\\r?\\n*/, "");
+    }
     // Strip standalone bottom footnote definitions ([^id]: Title) so they don't render as raw lines below prose
     out = out.replace(/^\\s*\\[\\^([A-Za-z0-9_\\-]+)\\]:\\s*(.+)$/gm, "");
     out = out.replace(/\\r?\\n+---\\s*$/g, "");
@@ -14824,16 +15333,16 @@ const A2UI_STUDIO_JS = `
     return out.join("\\n");
   }
 
-  function renderMarkdownBlock(rawMd, sources, rejectedSourceIds) {
-    const formatted = formatInlineLatexAndFootnotes(rawMd, sources || [], rejectedSourceIds);
+  function renderMarkdownBlock(rawMd, sources, rejectedSourceIds, preserveLeadingH1) {
+    const formatted = formatInlineLatexAndFootnotes(rawMd, sources || [], rejectedSourceIds, preserveLeadingH1);
     if (typeof window !== "undefined" && window.marked && typeof window.marked.parse === "function") {
       return window.marked.parse(formatted);
     }
     return parseBuiltInMarkdown(formatted);
   }
 
-  // Component Renderer (Tier 1 Basic Catalog + Tier 2 ICM/OKF Domain Catalog)
-  function renderComponentById(surface, compId, scopeData, scopePath) {
+  // Component Renderer (Tier 1 A2UI v1.0 Basic Catalog + Tier 2 ICM/OKF Domain Catalog)
+  function renderComponentById(surface, compId, scopeData, scopePath, itemIndex) {
     const comp = surface.components[compId];
     if (!comp) {
       const missing = document.createElement("div");
@@ -14841,47 +15350,47 @@ const A2UI_STUDIO_JS = `
       missing.textContent = "[Missing component: " + compId + "]";
       return missing;
     }
-    return renderComponent(surface, comp, scopeData, scopePath);
+    return renderComponent(surface, comp, scopeData, scopePath, itemIndex);
   }
 
-  function renderChildList(surface, childrenSpec, containerEl, scopeData, scopePath) {
+  function renderChildList(surface, childrenSpec, containerEl, scopeData, scopePath, itemIndex) {
     if (Array.isArray(childrenSpec)) {
       for (const childId of childrenSpec) {
-        containerEl.appendChild(renderComponentById(surface, childId, scopeData, scopePath));
+        containerEl.appendChild(renderComponentById(surface, childId, scopeData, scopePath, itemIndex));
       }
     } else if (childrenSpec && typeof childrenSpec === "object" && childrenSpec.path && childrenSpec.componentId) {
       const listData = resolvePointer(surface.dataModel, childrenSpec.path, scopeData);
       if (Array.isArray(listData)) {
         listData.forEach((itemData, idx) => {
           const itemScopePath = (childrenSpec.path.startsWith("/") ? childrenSpec.path : (scopePath || "") + "/" + childrenSpec.path) + "/" + idx;
-          containerEl.appendChild(renderComponentById(surface, childrenSpec.componentId, itemData, itemScopePath));
+          containerEl.appendChild(renderComponentById(surface, childrenSpec.componentId, itemData, itemScopePath, idx));
         });
       }
     }
   }
 
-  function renderComponent(surface, comp, scopeData, scopePath) {
+  function renderComponent(surface, comp, scopeData, scopePath, itemIndex) {
     const type = comp.component;
 
-    // --- TIER 1: A2UI v0.9.1 BASIC CATALOG PRIMITIVES ---
+    // --- TIER 1: A2UI v1.0 BASIC CATALOG PRIMITIVES ---
     if (type === "Column") {
       const el = document.createElement("div");
       el.className = "a2ui-col";
-      renderChildList(surface, comp.children, el, scopeData, scopePath);
+      renderChildList(surface, comp.children, el, scopeData, scopePath, itemIndex);
       return el;
     }
 
     if (type === "Row") {
       const el = document.createElement("div");
       el.className = "a2ui-row" + (comp.justify === "spaceBetween" ? " justify-between" : "");
-      renderChildList(surface, comp.children, el, scopeData, scopePath);
+      renderChildList(surface, comp.children, el, scopeData, scopePath, itemIndex);
       return el;
     }
 
     if (type === "List") {
       const el = document.createElement("div");
       el.className = comp.direction === "horizontal" ? "a2ui-row" : "a2ui-col";
-      renderChildList(surface, comp.children, el, scopeData, scopePath);
+      renderChildList(surface, comp.children, el, scopeData, scopePath, itemIndex);
       return el;
     }
 
@@ -14889,9 +15398,9 @@ const A2UI_STUDIO_JS = `
       const el = document.createElement("div");
       el.className = "a2ui-card";
       if (typeof comp.child === "string") {
-        el.appendChild(renderComponentById(surface, comp.child, scopeData, scopePath));
+        el.appendChild(renderComponentById(surface, comp.child, scopeData, scopePath, itemIndex));
       } else if (comp.children) {
-        renderChildList(surface, comp.children, el, scopeData, scopePath);
+        renderChildList(surface, comp.children, el, scopeData, scopePath, itemIndex);
       }
       return el;
     }
@@ -14903,15 +15412,30 @@ const A2UI_STUDIO_JS = `
     }
 
     if (type === "Text") {
-      const variant = resolveDynamic(comp.variant, surface, scopeData) || "body";
-      const rawText = String(resolveDynamic(comp.text, surface, scopeData) ?? "");
+      const variant = resolveDynamic(comp.variant, surface, scopeData, itemIndex) || "body";
+      const rawText = String(resolveDynamic(comp.text, surface, scopeData, itemIndex) ?? "");
+      if (variant === "body" && rawText.indexOf("\\n") === -1 && rawText.indexOf("\\r") === -1) {
+        const headingMatch = rawText.match(/^\\s*(#{1,5})\\s+(.+?)\\s*#*\\s*$/);
+        if (headingMatch) {
+          const hLvl = headingMatch[1].length;
+          const hEl = document.createElement("h" + hLvl);
+          hEl.className = "a2ui-h" + hLvl;
+          hEl.innerHTML = renderInlineMarkdown(headingMatch[2]);
+          return hEl;
+        }
+      }
       const tagMap = { h1: "h1", h2: "h2", h3: "h3", h4: "h4", h5: "h5", caption: "p", body: "div" };
       const el = document.createElement(tagMap[variant] || "div");
       el.className = "a2ui-" + (tagMap[variant] ? variant : "body");
-      if (comp.markdown) {
+      if (
+        comp.markdown ||
+        (variant === "body" &&
+          (/[\\r\\n]/.test(rawText) ||
+            /^(?:#{1,6}\\s+|[-*+]\\s+|\\d+[.)]\\s+|>\\s?|---+)/.test(rawText.trim())))
+      ) {
         el.style.whiteSpace = "normal";
         el.classList.add("okf-md-body");
-        el.innerHTML = renderMarkdownBlock(rawText, []);
+        el.innerHTML = renderMarkdownBlock(rawText, [], undefined, true);
       } else if (variant === "body" && /(\\*\\*[^*]+\\*\\*|\\x60[^\\x60]+\\x60|\\[[^\\]]+\\]\\([^)\\s]+\\))/.test(rawText)) {
         el.innerHTML = renderInlineMarkdown(rawText);
       } else {
@@ -14922,9 +15446,9 @@ const A2UI_STUDIO_JS = `
 
     if (type === "Badge") {
       const el = document.createElement("span");
-      const tone = resolveDynamic(comp.tone, surface, scopeData) || "neutral";
+      const tone = resolveDynamic(comp.tone, surface, scopeData, itemIndex) || "neutral";
       el.className = "a2ui-badge " + tone;
-      el.textContent = String(resolveDynamic(comp.text, surface, scopeData) ?? "");
+      el.textContent = String(resolveDynamic(comp.text, surface, scopeData, itemIndex) ?? "");
       return el;
     }
 
@@ -14933,20 +15457,20 @@ const A2UI_STUDIO_JS = `
       const variant = comp.variant || "default";
       btn.className = "a2ui-btn " + variant;
       if (typeof comp.child === "string") {
-        btn.appendChild(renderComponentById(surface, comp.child, scopeData, scopePath));
+        btn.appendChild(renderComponentById(surface, comp.child, scopeData, scopePath, itemIndex));
       } else {
-        btn.textContent = String(resolveDynamic(comp.label ?? comp.text, surface, scopeData) || "Action");
+        btn.textContent = String(resolveDynamic(comp.label ?? comp.text, surface, scopeData, itemIndex) || "Action");
       }
       btn.addEventListener("click", () => {
         if (comp.action && comp.action.event) {
           const ctx = {};
           const rawCtx = comp.action.event.context || {};
           for (const k of Object.keys(rawCtx)) {
-            ctx[k] = resolveDynamic(rawCtx[k], surface, scopeData);
+            ctx[k] = resolveDynamic(rawCtx[k], surface, scopeData, itemIndex);
           }
           dispatchClientAction(surface, comp.id, comp.action.event.name, ctx);
         } else if (comp.action && comp.action.functionCall) {
-          evaluateFunctionCall(comp.action.functionCall, surface, scopeData);
+          evaluateFunctionCall(comp.action.functionCall, surface, scopeData, itemIndex);
         }
       });
       return btn;
@@ -14954,20 +15478,24 @@ const A2UI_STUDIO_JS = `
 
     if (type === "CheckBox") {
       const labelEl = document.createElement("label");
-      const checkedVal = Boolean(resolveDynamic(comp.value, surface, scopeData));
+      const checkedVal = Boolean(resolveDynamic(comp.value, surface, scopeData, itemIndex));
       labelEl.className = "a2ui-checkbox-label" + (checkedVal ? " checked" : "");
       const input = document.createElement("input");
       input.type = "checkbox";
       input.checked = checkedVal;
       const span = document.createElement("span");
-      span.textContent = String(resolveDynamic(comp.label, surface, scopeData) ?? "");
+      span.textContent = String(resolveDynamic(comp.label, surface, scopeData, itemIndex) ?? "");
       input.addEventListener("change", () => {
-        if (comp.value && typeof comp.value === "object" && comp.value.path) {
-          setPointer(surface.dataModel, comp.value.path, input.checked, scopePath);
+        const bindPath =
+          comp.value && typeof comp.value === "object"
+            ? comp.value["@path"] || comp.value.path
+            : undefined;
+        if (bindPath) {
+          setPointer(surface.dataModel, bindPath, input.checked, scopePath);
           recomputeChecklistSummary(surface);
           syncChecklistToOkfBody(surface);
           dispatchClientAction(surface, comp.id, "checkboxChanged", {
-            path: comp.value.path,
+            path: bindPath,
             checked: input.checked,
           });
           renderSurface();
@@ -14981,7 +15509,7 @@ const A2UI_STUDIO_JS = `
     if (type === "TextField") {
       const wrap = document.createElement("div");
       wrap.className = "a2ui-textfield";
-      const lbl = resolveDynamic(comp.label, surface, scopeData);
+      const lbl = resolveDynamic(comp.label, surface, scopeData, itemIndex);
       if (lbl) {
         const l = document.createElement("label");
         l.textContent = String(lbl);
@@ -14998,12 +15526,16 @@ const A2UI_STUDIO_JS = `
       } else {
         input.type = "text";
       }
-      input.value = String(resolveDynamic(comp.value, surface, scopeData) ?? "");
+      input.value = String(resolveDynamic(comp.value, surface, scopeData, itemIndex) ?? "");
       if (comp.placeholder) input.placeholder = String(comp.placeholder);
       input.addEventListener("input", () => {
-        if (comp.value && typeof comp.value === "object" && comp.value.path) {
+        const bindPath =
+          comp.value && typeof comp.value === "object"
+            ? comp.value["@path"] || comp.value.path
+            : undefined;
+        if (bindPath) {
           const nextVal = comp.variant === "number" ? Number(input.value) : input.value;
-          setPointer(surface.dataModel, comp.value.path, nextVal, scopePath);
+          setPointer(surface.dataModel, bindPath, nextVal, scopePath);
         }
       });
       wrap.appendChild(input);
@@ -15013,15 +15545,15 @@ const A2UI_STUDIO_JS = `
     if (type === "ChoicePicker") {
       const wrap = document.createElement("div");
       wrap.className = "a2ui-choice-group";
-      const lbl = resolveDynamic(comp.label, surface, scopeData);
+      const lbl = resolveDynamic(comp.label, surface, scopeData, itemIndex);
       if (lbl) {
         const l = document.createElement("div");
         l.className = "a2ui-h4";
         l.textContent = String(lbl);
         wrap.appendChild(l);
       }
-      const options = resolveDynamic(comp.options, surface, scopeData) || [];
-      const currentVal = resolveDynamic(comp.value, surface, scopeData);
+      const options = resolveDynamic(comp.options, surface, scopeData, itemIndex) || [];
+      const currentVal = resolveDynamic(comp.value, surface, scopeData, itemIndex);
       const isMulti = comp.variant === "multipleSelection";
       const selectedArr = Array.isArray(currentVal)
         ? currentVal.map(String)
@@ -15038,7 +15570,11 @@ const A2UI_STUDIO_JS = `
         inp.type = isMulti ? "checkbox" : "radio";
         inp.checked = isSel;
         inp.addEventListener("change", () => {
-          if (comp.value && typeof comp.value === "object" && comp.value.path) {
+          const bindPath =
+            comp.value && typeof comp.value === "object"
+              ? comp.value["@path"] || comp.value.path
+              : undefined;
+          if (bindPath) {
             if (isMulti) {
               const nextSet = new Set(selectedArr);
               if (inp.checked) {
@@ -15046,17 +15582,17 @@ const A2UI_STUDIO_JS = `
               } else {
                 nextSet.delete(valStr);
               }
-              setPointer(surface.dataModel, comp.value.path, Array.from(nextSet), scopePath);
+              setPointer(surface.dataModel, bindPath, Array.from(nextSet), scopePath);
             } else if (Array.isArray(currentVal)) {
-              setPointer(surface.dataModel, comp.value.path, [valStr], scopePath);
+              setPointer(surface.dataModel, bindPath, [valStr], scopePath);
             } else {
-              setPointer(surface.dataModel, comp.value.path, valStr, scopePath);
+              setPointer(surface.dataModel, bindPath, valStr, scopePath);
             }
             renderSurface();
           }
         });
         const txt = document.createElement("span");
-        txt.textContent = String(resolveDynamic(opt.label, surface, scopeData) ?? opt.value);
+        txt.textContent = String(resolveDynamic(opt.label, surface, scopeData, itemIndex) ?? opt.value);
         row.appendChild(inp);
         row.appendChild(txt);
         wrap.appendChild(row);
@@ -15064,19 +15600,24 @@ const A2UI_STUDIO_JS = `
       return wrap;
     }
 
-    if (type === "AudioPlayer") {
+    if (type === "SpeechPlayer" || type === "AudioPlayer") {
       const isNo = isNorwegianSurface(surface);
       const wrap = document.createElement("div");
       wrap.className = "a2ui-row";
-      const desc = String(resolveDynamic(comp.description, surface, scopeData) || "Audio Narration");
-      const textToSpeak = String(resolveDynamic(comp.ttsText, surface, scopeData) || "");
-      const url = resolveDynamic(comp.url, surface, scopeData);
-      if (url && !String(url).startsWith("tts://")) {
+      const desc = String(resolveDynamic(comp.description, surface, scopeData, itemIndex) || "Audio Narration");
+      const textToSpeak = String(resolveDynamic(comp.ttsText, surface, scopeData, itemIndex) || "");
+      const rawUrl = resolveDynamic(
+        type === "SpeechPlayer" ? comp.audioUrl ?? comp.url : comp.url,
+        surface,
+        scopeData,
+        itemIndex
+      );
+      if (rawUrl && isAllowedMediaUrl(rawUrl)) {
         const audio = document.createElement("audio");
         audio.controls = true;
-        audio.src = String(url);
+        audio.src = String(rawUrl);
         wrap.appendChild(audio);
-      } else {
+      } else if (type === "SpeechPlayer" || textToSpeak) {
         wrap.style.flexWrap = "wrap";
         wrap.style.alignItems = "center";
         wrap.style.gap = "8px";
@@ -15123,8 +15664,11 @@ const A2UI_STUDIO_JS = `
 
     if (type === "Image") {
       const img = document.createElement("img");
-      img.src = String(resolveDynamic(comp.url, surface, scopeData) || "");
-      img.alt = String(resolveDynamic(comp.description ?? comp.alt, surface, scopeData) || "");
+      const rawImgUrl = String(resolveDynamic(comp.url, surface, scopeData, itemIndex) || "");
+      if (isAllowedMediaUrl(rawImgUrl)) {
+        img.src = rawImgUrl;
+      }
+      img.alt = String(resolveDynamic(comp.description ?? comp.alt, surface, scopeData, itemIndex) || "");
       img.style.maxWidth = "100%";
       img.style.borderRadius = "8px";
       if (comp.fit) img.style.objectFit = String(comp.fit);
@@ -15134,15 +15678,25 @@ const A2UI_STUDIO_JS = `
     if (type === "Icon") {
       const span = document.createElement("span");
       span.className = "a2ui-badge neutral";
-      const iconName = resolveDynamic(comp.name, surface, scopeData);
-      span.textContent = typeof iconName === "object" && iconName && iconName.path ? iconName.path : String(iconName || "•");
+      const iconName = resolveDynamic(comp.name, surface, scopeData, itemIndex);
+      span.textContent =
+        typeof iconName === "object" && iconName && (iconName["@path"] || iconName.path)
+          ? iconName["@path"] || iconName.path
+          : String(iconName || "•");
       return span;
     }
 
     if (type === "Video") {
       const video = document.createElement("video");
       video.controls = true;
-      video.src = String(resolveDynamic(comp.url, surface, scopeData) || "");
+      const rawVidUrl = String(resolveDynamic(comp.url, surface, scopeData, itemIndex) || "");
+      if (isAllowedMediaUrl(rawVidUrl)) {
+        video.src = rawVidUrl;
+      }
+      const rawPosterUrl = String(resolveDynamic(comp.posterUrl, surface, scopeData, itemIndex) || "");
+      if (rawPosterUrl && isAllowedMediaUrl(rawPosterUrl)) {
+        video.poster = rawPosterUrl;
+      }
       video.style.maxWidth = "100%";
       video.style.borderRadius = "8px";
       return video;
@@ -15151,8 +15705,8 @@ const A2UI_STUDIO_JS = `
     if (type === "Slider") {
       const wrap = document.createElement("div");
       wrap.className = "a2ui-textfield";
-      const lbl = resolveDynamic(comp.label, surface, scopeData);
-      const curVal = Number(resolveDynamic(comp.value, surface, scopeData) ?? comp.min ?? 0);
+      const lbl = resolveDynamic(comp.label, surface, scopeData, itemIndex);
+      const curVal = Number(resolveDynamic(comp.value, surface, scopeData, itemIndex) ?? comp.min ?? 0);
       if (lbl) {
         const l = document.createElement("label");
         l.textContent = String(lbl) + ": " + curVal;
@@ -15164,8 +15718,12 @@ const A2UI_STUDIO_JS = `
       inp.max = String(comp.max ?? 100);
       inp.value = String(curVal);
       inp.addEventListener("input", () => {
-        if (comp.value && typeof comp.value === "object" && comp.value.path) {
-          setPointer(surface.dataModel, comp.value.path, Number(inp.value), scopePath);
+        const bindPath =
+          comp.value && typeof comp.value === "object"
+            ? comp.value["@path"] || comp.value.path
+            : undefined;
+        if (bindPath) {
+          setPointer(surface.dataModel, bindPath, Number(inp.value), scopePath);
           renderSurface();
         }
       });
@@ -15176,7 +15734,7 @@ const A2UI_STUDIO_JS = `
     if (type === "DateTimeInput") {
       const wrap = document.createElement("div");
       wrap.className = "a2ui-textfield";
-      const lbl = resolveDynamic(comp.label, surface, scopeData);
+      const lbl = resolveDynamic(comp.label, surface, scopeData, itemIndex);
       if (lbl) {
         const l = document.createElement("label");
         l.textContent = String(lbl);
@@ -15184,10 +15742,14 @@ const A2UI_STUDIO_JS = `
       }
       const inp = document.createElement("input");
       inp.type = comp.enableTime && comp.enableDate !== false ? "datetime-local" : comp.enableTime ? "time" : "date";
-      inp.value = String(resolveDynamic(comp.value, surface, scopeData) || "");
+      inp.value = String(resolveDynamic(comp.value, surface, scopeData, itemIndex) || "");
       inp.addEventListener("change", () => {
-        if (comp.value && typeof comp.value === "object" && comp.value.path) {
-          setPointer(surface.dataModel, comp.value.path, inp.value, scopePath);
+        const bindPath =
+          comp.value && typeof comp.value === "object"
+            ? comp.value["@path"] || comp.value.path
+            : undefined;
+        if (bindPath) {
+          setPointer(surface.dataModel, bindPath, inp.value, scopePath);
         }
       });
       wrap.appendChild(inp);
@@ -15336,7 +15898,7 @@ const A2UI_STUDIO_JS = `
             id: comp.id + "_" + grp.id + "_" + item.id,
             component: "CheckBox",
             label: item.label,
-            value: { path: itemPath },
+            value: { "@path": itemPath },
           };
           itemsCol.appendChild(renderComponent(surface, chkComp, undefined, undefined));
         });
@@ -15433,8 +15995,8 @@ const A2UI_STUDIO_JS = `
 
         const ttsPlayer = renderComponent(surface, {
           id: comp.id + "_tts_" + idx,
-          component: "AudioPlayer",
-          url: "tts://web-speech/module/" + (idx + 1),
+          component: "SpeechPlayer",
+          "@catalogId": "https://a2ui.org/specification/v1_0/catalogs/icm-okf-v0.2/catalog.json",
           description: mod.title,
           ttsText: mod.spokenNarration || mod.narration,
         });
@@ -15588,7 +16150,7 @@ const A2UI_STUDIO_JS = `
           component: "ChoicePicker",
           variant: "mutuallyExclusive",
           options: q.options,
-          value: { path: answersPath + "/" + q.id },
+          value: { "@path": answersPath + "/" + q.id },
         });
         qCard.appendChild(picker);
 
@@ -15671,7 +16233,7 @@ const A2UI_STUDIO_JS = `
             : isAnalysis
               ? "Document your risk assessment, conviction, or IC condition here..."
               : "Describe your assessment and proposed actions here...",
-          value: { path: responsesPath + "/" + c.id },
+          value: { "@path": responsesPath + "/" + c.id },
         });
         card.appendChild(tf);
 
@@ -15925,6 +16487,19 @@ const A2UI_STUDIO_JS = `
               timestamp: new Date().toISOString(),
             };
             const jsonStr = JSON.stringify(payloadObj);
+            const rpcCallObj = {
+              version: "1.0",
+              callAgentFunction: {
+                surfaceId: surface.surfaceId,
+                functionCallId: "verify_" + Date.now(),
+                callFunction: {
+                  "@call": "verifyOkfSources",
+                  catalogId: "https://a2ui.org/specification/v1_0/catalogs/icm-okf-v0.2/catalog.json",
+                  args: payloadObj,
+                },
+              },
+            };
+            actionLog.unshift(rpcCallObj);
             const url =
               "http://127.0.0.1:44820/ping-pong?payload=" + encodeURIComponent(jsonStr);
             if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
@@ -15952,7 +16527,7 @@ const A2UI_STUDIO_JS = `
               method: "POST",
               mode: "cors",
               headers: { "Content-Type": "text/plain;charset=utf-8" },
-              body: jsonStr,
+              body: JSON.stringify(rpcCallObj),
             };
             let abortTimer = null;
             if (typeof AbortController !== "undefined") {
@@ -17004,7 +17579,7 @@ const A2UI_STUDIO_JS = `
       if (pre && surface) {
         pre.textContent = JSON.stringify(
           {
-            protocolVersion: "v0.9.1",
+            protocolVersion: "1.0",
             surfaceId: surface.surfaceId,
             catalogId: surface.catalogId,
             componentCount: Object.keys(surface.components).length,
@@ -17036,7 +17611,7 @@ const A2UI_STUDIO_JS = `
 `.trim();
 
 /**
- * Generates an A2UI v0.9.1 Declarative Surface (`a2ui_surface.json` + `a2ui_surface.jsonl`)
+ * Generates an A2UI v1.0 Declarative Surface (`a2ui_surface.json` + `a2ui_surface.jsonl`)
  * and a zero-dependency Bi-Directional A2UI Studio HTML renderer (`a2ui.html`) for any ICM run.
  */
 export function generateA2uiSurface(
@@ -18092,7 +18667,7 @@ export function generateA2uiSurface(
     options.surfaceId ||
     `icm_${(resolvedRunId || 'workspace').replace(/[^a-zA-Z0-9_-]/g, '_')}`;
 
-  // Construct A2UI v0.9.1 Component Adjacency List
+  // Construct A2UI v1.0 Component Adjacency List (Basic default catalog + Tier 2 @catalogId mixing)
   const components: A2uiComponent[] = [];
   const tabs: Array<{ title: string; child: string }> = [];
 
@@ -18117,8 +18692,8 @@ export function generateA2uiSurface(
     {
       id: 'header_title',
       component: 'Text',
-      variant: 'h1',
-      text: { path: '/meta/title' },
+      variant: 'body',
+      text: { '@call': 'formatString', args: { value: '# ${/meta/title}' } },
     },
     {
       id: 'header_badges_row',
@@ -18128,26 +18703,30 @@ export function generateA2uiSurface(
     {
       id: 'badge_status',
       component: 'Badge',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
       tone: okfDoc.frontmatter.status === 'stable' ? 'success' : 'warn',
-      text: { path: '/okf/statusBadge' },
+      text: { '@path': '/okf/statusBadge' },
     },
     {
       id: 'badge_trust',
       component: 'Badge',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
       tone: okfTrustTier === 'human-reviewed' ? 'accent' : 'primary',
-      text: { path: '/okf/trustBadge' },
+      text: { '@path': '/okf/trustBadge' },
     },
     {
       id: 'badge_freshness',
       component: 'Badge',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
       tone: okfStale ? 'danger' : 'success',
-      text: { path: '/okf/freshnessBadge' },
+      text: { '@path': '/okf/freshnessBadge' },
     },
     {
       id: 'badge_sources',
       component: 'Badge',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
       tone: 'neutral',
-      text: { path: '/okf/sourcesBadge' },
+      text: { '@path': '/okf/sourcesBadge' },
     },
     {
       id: 'header_meta_row',
@@ -18158,7 +18737,7 @@ export function generateA2uiSurface(
       id: 'header_subtitle',
       component: 'Text',
       variant: 'caption',
-      text: { path: '/meta/subtitleLine' },
+      text: { '@path': '/meta/subtitleLine' },
     }
   );
 
@@ -18189,22 +18768,21 @@ export function generateA2uiSurface(
     {
       id: 'overview_narration_heading',
       component: 'Text',
-      variant: 'h2',
-      text: { path: '/stage2/overviewHeading' },
+      variant: 'body',
+      text: { '@call': 'formatString', args: { value: '## ${/stage2/overviewHeading}' } },
     },
     {
       id: 'overview_tts_player',
-      component: 'AudioPlayer',
-      url: 'tts://web-speech/stage2/spokenScript',
-      description: { path: '/meta/title' },
-      ttsText: { path: '/stage2/spokenScript' },
+      component: 'SpeechPlayer',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
+      description: { '@path': '/meta/title' },
+      ttsText: { '@path': '/stage2/spokenScript' },
     },
     {
       id: 'overview_narration_body',
       component: 'Text',
       variant: 'body',
-      markdown: true,
-      text: { path: '/stage2/scriptBody' },
+      text: { '@path': '/stage2/scriptBody' },
     }
   );
 
@@ -18223,12 +18801,12 @@ export function generateA2uiSurface(
       {
         id: 'overview_highlights_title',
         component: 'Text',
-        variant: 'h3',
+        variant: 'body',
         text: isNo
-          ? 'Hovedpunkter & Læringsmål'
+          ? '### Hovedpunkter & Læringsmål'
           : isAnalysis
-            ? 'Key Takeaways & Thesis Highlights'
-            : 'Key Takeaways & Learning Objectives',
+            ? '### Key Takeaways & Thesis Highlights'
+            : '### Key Takeaways & Learning Objectives',
       },
       {
         id: 'overview_highlights_list',
@@ -18242,7 +18820,7 @@ export function generateA2uiSurface(
         id: 'highlight_item_text',
         component: 'Text',
         variant: 'body',
-        text: { path: 'label' },
+        text: { '@path': 'label' },
       }
     );
   }
@@ -18252,6 +18830,7 @@ export function generateA2uiSurface(
     components.push({
       id: 'tab_checklist',
       component: 'InteractiveChecklist',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
       title: isNo
         ? 'Interaktiv Sjekkliste (OKF v0.2 Kontrollpunkter)'
         : 'Interactive Checklist (OKF v0.2 Verification Items)',
@@ -18263,6 +18842,7 @@ export function generateA2uiSurface(
     components.push({
       id: 'tab_modules',
       component: 'ModuleCarousel',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
       title: isNo
         ? 'Opplæringsmoduler & Leksjoner'
         : isAnalysis
@@ -18277,6 +18857,7 @@ export function generateA2uiSurface(
     components.push({
       id: 'tab_cases',
       component: 'CaseSimulator',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
       title: isNo
         ? 'Scenario- og vedtakssimulator'
         : isAnalysis
@@ -18291,6 +18872,7 @@ export function generateA2uiSurface(
     components.push({
       id: 'tab_quiz',
       component: 'QuizRunner',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
       title: isNo ? 'Interaktiv Kunnskapssjekk' : 'Interactive Knowledge Check',
       questionsPath: '/stage2/quiz',
       answersPath: '/stage2/quizAnswers',
@@ -18301,15 +18883,17 @@ export function generateA2uiSurface(
     {
       id: 'tab_okf_markdown',
       component: 'OkfMarkdown',
-      title: { path: '/okf/title' },
-      body: { path: '/okf/body' },
-      sources: { path: '/okf/sources' },
-      trustTier: { path: '/okf/trustTier' },
-      isStale: { path: '/okf/isStale' },
+      '@catalogId': A2UI_ICM_CATALOG_ID,
+      title: { '@path': '/okf/title' },
+      body: { '@path': '/okf/body' },
+      sources: { '@path': '/okf/sources' },
+      trustTier: { '@path': '/okf/trustTier' },
+      isStale: { '@path': '/okf/isStale' },
     },
     {
       id: 'tab_okf_graph',
       component: 'OkfKnowledgeGraph',
+      '@catalogId': A2UI_ICM_CATALOG_ID,
       title: isNo ? 'OKF v0.2 Kunnskapsgraf' : 'OKF v0.2 Knowledge Graph',
     }
   );
@@ -18571,11 +19155,7 @@ export function generateA2uiSurface(
       version: A2UI_PROTOCOL_VERSION,
       createSurface: {
         surfaceId,
-        catalogId: A2UI_ICM_CATALOG_ID,
-        theme: {
-          primaryColor: '#1d4ed8',
-          agentDisplayName: 'ICM + OKF v0.2 A2UI Studio',
-        },
+        catalogId: A2UI_BASIC_CATALOG_ID,
         sendDataModel: true,
       },
     },
@@ -18598,7 +19178,7 @@ export function generateA2uiSurface(
 
   const validation = validateA2uiSurfaceMessages(messages);
   if (!validation.valid) {
-    throw new Error(`Invalid A2UI v0.9.1 surface generated: ${validation.errors.join('; ')}`);
+    throw new Error(`Invalid A2UI v1.0 surface generated: ${validation.errors.join('; ')}`);
   }
 
   // Determine output paths (supports `outputDir` override for non-destructive external testing)
@@ -18624,8 +19204,11 @@ export function generateA2uiSurface(
 
   const surfaceJsonDoc = {
     version: A2UI_PROTOCOL_VERSION,
+    mimeType: A2UI_MIME_TYPE,
     surfaceId,
-    catalogId: A2UI_ICM_CATALOG_ID,
+    catalogId: A2UI_BASIC_CATALOG_ID,
+    domainCatalogId: A2UI_ICM_CATALOG_ID,
+    catalogIds: [A2UI_BASIC_CATALOG_ID, A2UI_ICM_CATALOG_ID],
     catalogSchema: A2UI_ICM_CATALOG_SCHEMA,
     generatedAt: new Date().toISOString(),
     runId: resolvedRunId || 'workspace',
@@ -18646,7 +19229,8 @@ export function generateA2uiSurface(
 
   const clientPayload = {
     surfaceId,
-    catalogId: A2UI_ICM_CATALOG_ID,
+    catalogId: A2UI_BASIC_CATALOG_ID,
+    domainCatalogId: A2UI_ICM_CATALOG_ID,
     messages,
     bundleRuns,
     bundleGraph: {
@@ -18669,7 +19253,7 @@ export function generateA2uiSurface(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeA2uiHtml(docTitle)} — A2UI v0.9.1 Studio</title>
+<title>${escapeA2uiHtml(docTitle)} — A2UI v${A2UI_PROTOCOL_VERSION} Studio</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
 <style>
@@ -18679,7 +19263,7 @@ ${A2UI_STUDIO_CSS}
 <body>
 <header class="a2ui-topbar">
   <div class="a2ui-topbar-brand">
-    <span class="a2ui-protocol-pill">A2UI ${A2UI_PROTOCOL_VERSION}</span>
+    <span class="a2ui-protocol-pill">A2UI v${A2UI_PROTOCOL_VERSION}</span>
     <span class="a2ui-topbar-title">${escapeA2uiHtml(docTitle)}</span>
   </div>
   <div class="a2ui-topbar-actions">
@@ -18693,7 +19277,7 @@ ${A2UI_STUDIO_CSS}
 <div class="a2ui-modal-backdrop" id="a2ui-inspector-modal" hidden>
   <div class="a2ui-modal-dialog">
     <div class="a2ui-modal-header">
-      <strong>${docIsNo ? 'A2UI v0.9.1 Deklarativ Surface, Data Model &amp; Action Log' : 'A2UI v0.9.1 Declarative Surface, Data Model &amp; Action Log'}</strong>
+      <strong>${docIsNo ? `A2UI v${A2UI_PROTOCOL_VERSION} Deklarativ Surface, Data Model &amp; Action Log` : `A2UI v${A2UI_PROTOCOL_VERSION} Declarative Surface, Data Model &amp; Action Log`}</strong>
       <button class="a2ui-btn" id="a2ui-close-inspector">${docIsNo ? 'Lukk' : 'Close'}</button>
     </div>
     <div class="a2ui-modal-body">
@@ -18790,11 +19374,7 @@ ${A2UI_STUDIO_JS}
           version: A2UI_PROTOCOL_VERSION,
           createSurface: {
             surfaceId: siblingSurfaceId,
-            catalogId: A2UI_ICM_CATALOG_ID,
-            theme: {
-              primaryColor: '#1d4ed8',
-              agentDisplayName: 'ICM + OKF v0.2 A2UI Studio',
-            },
+            catalogId: A2UI_BASIC_CATALOG_ID,
             sendDataModel: true,
           },
         },
@@ -18816,7 +19396,8 @@ ${A2UI_STUDIO_JS}
       ];
       const siblingPayload = {
         surfaceId: siblingSurfaceId,
-        catalogId: A2UI_ICM_CATALOG_ID,
+        catalogId: A2UI_BASIC_CATALOG_ID,
+        domainCatalogId: A2UI_ICM_CATALOG_ID,
         messages: siblingMessages,
         bundleRuns,
         bundleGraph: clientPayload.bundleGraph,
@@ -18849,7 +19430,7 @@ ${A2UI_STUDIO_JS}
   return {
     runId: resolvedRunId || 'workspace',
     surfaceId,
-    catalogId: A2UI_ICM_CATALOG_ID,
+    catalogId: A2UI_BASIC_CATALOG_ID,
     isStage1Only,
     componentCount: components.length,
     tabCount: tabs.length,
@@ -18877,7 +19458,7 @@ ${A2UI_STUDIO_JS}
  * 2. `cleanGroundingLinks()` multi-byte UTF-8 byte-offset snapping (`æ`, `ø`, `å`, `§`, `—`), Markdown heading/table guards,
  *    closing emphasis/bracket snapping (`**bold**`, `(RK 1)`), `.^id` / `.[^id]` normalization, `isFinalStep` filtering,
  *    and cited-only footnote definitions (`citedFootnoteIds`).
- * 3. A2UI v0.9.1 `validateA2uiSurfaceMessages()`, `cleanChecklistLabel()` (`**bold**`, `*italic*`, `` `code` ``, `[^id]`),
+ * 3. A2UI v1.0 `validateA2uiSurfaceMessages()`, `cleanChecklistLabel()` (`**bold**`, `*italic*`, `` `code` ``, `[^id]`),
  *    and `normalizeStage2ForA2ui()` concise `CaseSimulator` synthesis.
  */
 export async function runIcmSelfTests(): Promise<{ passed: number }> {
@@ -19414,7 +19995,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
     'truncateSlugAtWordBoundary snaps 48-char and 32-char slugs (including 34-char 4-word slugs like brannsikker-bruk-av-elsparkesykkel -> brannsikker-bruk-av) to the last word boundary dash'
   );
 
-  // 3. A2UI v0.9.1 validation, checklist label cleaning, checklist group hierarchy/ordering, totalEstimatedMinutes, synthesized highlights, and CaseSimulator synthesis
+  // 3. A2UI v1.0 validation, checklist label cleaning, checklist group hierarchy/ordering, totalEstimatedMinutes, synthesized highlights, and CaseSimulator synthesis
   const cleanedChkLabel = cleanChecklistLabel(
     '***Viktig*** **Brannvernleder** skal kontrollere *varme arbeider* (*FOB § 4*), måle 2 * 3 * 4 meter og `internkontroll` [^lovdata-fob]'
   );
@@ -19632,37 +20213,53 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
 
   const validMessages: A2uiEnvelopeMessage[] = [
     {
-      version: 'v0.9.1',
+      version: '1.0',
       createSurface: {
         surfaceId: 'test_surface',
-        catalogId: A2UI_ICM_CATALOG_ID,
+        catalogId: A2UI_BASIC_CATALOG_ID,
+        sendDataModel: true,
       },
     },
     {
-      version: 'v0.9.1',
+      version: '1.0',
       updateComponents: {
         surfaceId: 'test_surface',
         components: [
-          { id: 'root', component: 'Column', children: ['title_txt'] },
-          { id: 'title_txt', component: 'Text', text: 'Hei A2UI', variant: 'h1' },
+          { id: 'root', component: 'Column', children: ['title_txt', 'status_badge'] },
+          {
+            id: 'title_txt',
+            component: 'Text',
+            variant: 'body',
+            text: { '@call': 'formatString', args: { value: '# ${/okf/title}' } },
+          },
+          {
+            id: 'status_badge',
+            component: 'Badge',
+            '@catalogId': A2UI_ICM_CATALOG_ID,
+            tone: 'success',
+            text: { '@path': '/okf/title' },
+          },
         ],
       },
     },
     {
-      version: 'v0.9.1',
+      version: '1.0',
       updateDataModel: {
         surfaceId: 'test_surface',
         path: '/',
-        value: { okf: { title: 'Test' } },
+        value: { okf: { title: 'Hei A2UI v1.0' } },
       },
     },
   ];
   const validationRes = validateA2uiSurfaceMessages(validMessages);
-  assert(validationRes.valid === true, `Valid A2UI v0.9.1 messages pass validation (${validationRes.errors.join('; ')})`);
+  assert(
+    validationRes.valid === true,
+    `Valid A2UI v1.0 messages with Basic default catalog + @catalogId Tier 2 mixing pass validation (${validationRes.errors.join('; ')})`
+  );
 
   const invalidRes = validateA2uiSurfaceMessages([
     {
-      version: 'v0.9.1',
+      version: '1.0',
       updateComponents: {
         surfaceId: 'broken',
         components: [{ id: 'not_root', component: 'Text', text: 'Missing root' }],
@@ -19671,36 +20268,79 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
   ]);
   assert(invalidRes.valid === false && invalidRes.errors.length > 0, 'Missing root component is rejected by validator');
 
-  // Verify Tier 2 ICM/OKF catalog JSON Schema on disk (`specification/v0_9_1/catalogs/icm-okf-v0.2/catalog.json`) and catalog property validation
+  // Verify Tier 2 ICM/OKF catalog JSON Schema on disk (`specification/v1_0/catalogs/icm-okf-v0.2/catalog.json`),
+  // `specification/UPSTREAM_LOCK.json`, and strict A2UI v1.0 protocol validation rules
   const icmCatalogDiskPath = path.resolve(
     process.cwd(),
     'specification',
-    'v0_9_1',
+    'v1_0',
     'catalogs',
     'icm-okf-v0.2',
     'catalog.json'
   );
+  const upstreamLockDiskPath = path.resolve(process.cwd(), 'specification', 'UPSTREAM_LOCK.json');
   const icmCatalogDiskJson = JSON.parse(fs.readFileSync(icmCatalogDiskPath, 'utf-8'));
+  const upstreamLockJson = JSON.parse(fs.readFileSync(upstreamLockDiskPath, 'utf-8'));
   const invalidSchemaRes = validateA2uiSurfaceMessages([
     {
-      version: 'v0.9.1',
-      createSurface: { surfaceId: 'schema_test', catalogId: A2UI_ICM_CATALOG_ID },
+      version: '1.0',
+      createSurface: {
+        surfaceId: 'schema_test',
+        catalogId: A2UI_BASIC_CATALOG_ID,
+        theme: { primaryColor: '#1d4ed8' },
+      } as any,
     },
     {
-      version: 'v0.9.1',
+      version: '1.0',
       updateComponents: {
         surfaceId: 'schema_test',
         components: [
-          { id: 'root', component: 'Column', children: ['bad_widget', 'missing_prop_chk'] },
+          {
+            id: 'root',
+            component: 'Column',
+            children: [
+              'bad_widget',
+              'missing_prop_chk',
+              'missing_cat_badge',
+              'legacy_h1_txt',
+              'legacy_path_txt',
+              'bad_tts_audio',
+              'valid_speech_player',
+            ],
+          },
           { id: 'bad_widget', component: 'NonExistentWidget' },
-          { id: 'missing_prop_chk', component: 'InteractiveChecklist', title: 'Missing groupsPath' },
+          {
+            id: 'missing_prop_chk',
+            component: 'InteractiveChecklist',
+            '@catalogId': A2UI_ICM_CATALOG_ID,
+            title: 'Missing groupsPath',
+          },
+          { id: 'missing_cat_badge', component: 'Badge', text: 'Missing @catalogId' },
+          { id: 'legacy_h1_txt', component: 'Text', variant: 'h1', text: 'Legacy heading' },
+          { id: 'legacy_path_txt', component: 'Text', text: { path: '/meta/title' } as any },
+          { id: 'bad_tts_audio', component: 'AudioPlayer', url: 'tts://web-speech/narration' },
+          {
+            id: 'valid_speech_player',
+            component: 'SpeechPlayer',
+            '@catalogId': A2UI_ICM_CATALOG_ID,
+            ttsText: 'Hei verden',
+          },
         ],
       },
+    },
+    {
+      version: '1.0',
+      updateDataModel: {
+        surfaceId: 'schema_test',
+        path: '/temp',
+      } as any,
     },
   ]);
   assert(
     icmCatalogDiskJson.catalogId === A2UI_ICM_CATALOG_ID &&
-      icmCatalogDiskJson.extendsCatalogId === A2UI_BASIC_CATALOG_ID &&
+      icmCatalogDiskJson.protocolVersion === '1.0' &&
+      !('extendsCatalogId' in icmCatalogDiskJson) &&
+      upstreamLockJson?.a2ui?.protocolVersion === '1.0' &&
       Boolean(icmCatalogDiskJson.components?.OkfMarkdown) &&
       Boolean(icmCatalogDiskJson.components?.OkfKnowledgeGraph) &&
       Boolean(icmCatalogDiskJson.components?.InteractiveChecklist) &&
@@ -19708,10 +20348,24 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       Boolean(icmCatalogDiskJson.components?.QuizRunner) &&
       Boolean(icmCatalogDiskJson.components?.CaseSimulator) &&
       Boolean(icmCatalogDiskJson.components?.Badge) &&
+      Boolean(icmCatalogDiskJson.components?.SpeechPlayer) &&
+      Boolean(icmCatalogDiskJson.functions?.verifyOkfSources) &&
+      isAllowedA2uiMediaUrl('https://example.com/audio.mp3') === true &&
+      isAllowedA2uiMediaUrl('./assets/audio.mp3') === true &&
+      isAllowedA2uiMediaUrl('data:audio/wav;base64,UklGRg==') === true &&
+      isAllowedA2uiMediaUrl('tts://web-speech/module/1') === false &&
+      isAllowedA2uiMediaUrl('javascript:alert(1)') === false &&
       invalidSchemaRes.valid === false &&
+      invalidSchemaRes.errors.some((e) => e.includes('unsupported A2UI v1.0 property "theme"')) &&
       invalidSchemaRes.errors.some((e) => e.includes('NonExistentWidget')) &&
-      invalidSchemaRes.errors.some((e) => e.includes('missing required catalog property "groupsPath"')),
-    `specification/v0_9_1/catalogs/icm-okf-v0.2/catalog.json defines all Tier 2 components and validateA2uiSurfaceMessages enforces component types and required schema properties`
+      invalidSchemaRes.errors.some((e) => e.includes('missing required catalog property "groupsPath"')) &&
+      invalidSchemaRes.errors.some((e) => e.includes('missing_cat_badge') && e.includes('@catalogId')) &&
+      invalidSchemaRes.errors.some((e) => e.includes('legacy_h1_txt') && e.includes('invalid variant "h1"')) &&
+      invalidSchemaRes.errors.some((e) => e.includes('legacy_path_txt') && e.includes('legacy "{ path }"')) &&
+      invalidSchemaRes.errors.some((e) => e.includes('bad_tts_audio') && e.includes('disallowed media URL scheme')) &&
+      invalidSchemaRes.errors.some((e) => e.includes('missing required "value" property')) &&
+      !invalidSchemaRes.errors.some((e) => e.includes('valid_speech_player')),
+    `specification/v1_0/catalogs/icm-okf-v0.2/catalog.json + validateA2uiSurfaceMessages enforce strict A2UI v1.0 rules (no createSurface.theme, @catalogId ownership, @path/@call, Basic Text variants, media URL allowlist, and required updateDataModel.value)`
   );
 
   // Verify embedded A2UI_STUDIO_JS and OKF_VIZ_JS have zero JavaScript syntax errors and test their runtime formatting hooks
@@ -19736,6 +20390,55 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       typeof studioHooks.cleanClientChecklistLabel === 'function' &&
       typeof vizHooks.renderMarkdownWithOkfFootnotes === 'function',
     'A2UI_STUDIO_JS and OKF_VIZ_JS parse with zero syntax errors and expose runtime test hooks'
+  );
+
+  // Verify A2UI v1.0 client runtime hooks (@path, @call formatString, @index with offset, updateDataModel null deletion, and preserveLeadingH1)
+  studioHooks.processMessage({
+    version: '1.0',
+    createSurface: {
+      surfaceId: 'v1_hook_surface',
+      catalogId: A2UI_BASIC_CATALOG_ID,
+      dataModel: { meta: { title: 'Åpen Kunnskap' }, tempKey: 'to-delete' },
+    },
+  });
+  studioHooks.processMessage({
+    version: '1.0',
+    updateDataModel: {
+      surfaceId: 'v1_hook_surface',
+      path: '/tempKey',
+      value: null,
+    },
+  });
+  const hookSurface = studioHooks.surfaces.v1_hook_surface;
+  const resolvedAtPath = studioHooks.resolveDynamic({ '@path': '/meta/title' }, hookSurface, undefined, 0);
+  const resolvedFmtHeading = studioHooks.resolveDynamic(
+    { '@call': 'formatString', args: { value: '# ${/meta/title} (#${@index})' } },
+    hookSurface,
+    undefined,
+    2
+  );
+  const resolvedAtIndex = studioHooks.resolveDynamic(
+    { '@call': '@index', args: { offset: 1 } },
+    hookSurface,
+    undefined,
+    2
+  );
+  const preservedH1Out = String(
+    studioHooks.formatInlineLatexAndFootnotes('# Beholdt Overskrift\n\nBrødtekst', [], undefined, true)
+  );
+  const strippedH1Out = String(
+    studioHooks.formatInlineLatexAndFootnotes('# Fjernet Overskrift\n\nBrødtekst', [])
+  );
+  assert(
+    resolvedAtPath === 'Åpen Kunnskap' &&
+      resolvedFmtHeading === '# Åpen Kunnskap (#2)' &&
+      resolvedAtIndex === 3 &&
+      !('tempKey' in hookSurface.dataModel) &&
+      preservedH1Out.includes('# Beholdt Overskrift') &&
+      !strippedH1Out.includes('Fjernet Overskrift') &&
+      studioHooks.isAllowedMediaUrl('tts://foo') === false &&
+      studioHooks.isAllowedMediaUrl('https://a2ui.org/demo.mp3') === true,
+    'A2UI_STUDIO_JS evaluates v1.0 @path, formatString, @index(offset), updateDataModel null deletion, media URL allowlist, and preserveLeadingH1'
   );
 
   // Verify compound trailing citation-section headings (## Kilder og fotnoter, ## Referanser og fotnoter, ## Sources and Footnotes, bold headings, trailing ---, etc.)
@@ -22199,6 +22902,53 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         pingPongOut.payload?.runId === 'test-gif-run',
       `startA2uiPingPongListener serves valid 1x1 GIF89a with Access-Control-Allow-Private-Network header on format=gif so img.onload/onerror accurately distinguishes local wakeup from Web Remote / CSP fallback`
     );
+
+    // Verify A2UI v1.0 `callAgentFunction` (`verifyOkfSources`) -> `agentFunctionResponse` RPC round-trip on `startA2uiPingPongListener`
+    let rpcPort = 0;
+    const rpcPromise = startA2uiPingPongListener({
+      port: 0,
+      force: true,
+      workspaceRoot: tmpStage1ReviewDir,
+      onListening: (p) => {
+        rpcPort = p;
+      },
+    });
+    for (let waitIdx = 0; waitIdx < 40 && rpcPort === 0; waitIdx++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const rpcRes = await fetch(`http://127.0.0.1:${rpcPort}/ping-pong`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        version: '1.0',
+        callAgentFunction: {
+          surfaceId: 'icm_rpc_test',
+          functionCallId: 'verify_rpc_1',
+          callFunction: {
+            '@call': 'verifyOkfSources',
+            catalogId: A2UI_ICM_CATALOG_ID,
+            args: {
+              runId: 'test-rpc-run',
+              verifierActor: 'human:styrer',
+              rejectedSources: ['src-a'],
+            },
+          },
+        },
+      }),
+    });
+    const rpcAckJson = (await rpcRes.json()) as Record<string, any>;
+    const rpcResolved = await rpcPromise;
+    assert(
+      rpcRes.status === 200 &&
+        rpcAckJson.version === '1.0' &&
+        rpcAckJson.agentFunctionResponse?.functionCallId === 'verify_rpc_1' &&
+        rpcAckJson.agentFunctionResponse?.value?.ok === true &&
+        rpcResolved.payload?.runId === 'test-rpc-run' &&
+        rpcResolved.payload?.verifierActor === 'human:styrer' &&
+        Array.isArray(rpcResolved.payload?.rejectedSources) &&
+        rpcResolved.payload.rejectedSources[0] === 'src-a',
+      `startA2uiPingPongListener unwraps A2UI v1.0 callAgentFunction(verifyOkfSources) envelopes and replies with a valid v1.0 agentFunctionResponse`
+    );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
   }
@@ -22210,6 +22960,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
 // 4. Headless CLI Entrypoint (Linux / macOS / Windows / SSH / Cron / Terminal execution)
 if (
   process.argv.includes('--test') ||
+  process.argv.includes('--spec-check') ||
   process.argv.includes('--cli') ||
   process.argv.includes('--stage1') ||
   process.argv.includes('--stage2') ||
@@ -22221,6 +22972,12 @@ if (
   (async () => {
     if (process.argv.includes('--test')) {
       await runIcmSelfTests();
+      return;
+    }
+
+    if (process.argv.includes('--spec-check')) {
+      const specStatus = await checkUpstreamA2uiSpec();
+      console.log('[A2UI Upstream Spec Check]:', specStatus);
       return;
     }
 
@@ -22301,7 +23058,7 @@ if (
         outputHtmlPath: customHtmlOut,
         openBrowser: hasOpen,
       });
-      console.log('A2UI v0.9.1 Surface & Studio Generated:', {
+      console.log('A2UI v1.0 Surface & Studio Generated:', {
         runId: a2uiResult.runId,
         surfaceId: a2uiResult.surfaceId,
         componentCount: a2uiResult.componentCount,
@@ -22507,7 +23264,7 @@ if (
       }
       if (hasA2ui) {
         const a2uiResult = generateA2uiSurface({ workspaceRoot: './workspace', runId: target });
-        console.log('A2UI v0.9.1 Surface Generated:', a2uiResult.htmlOutputPath);
+        console.log('A2UI v1.0 Surface Generated:', a2uiResult.htmlOutputPath);
       }
       console.log('OKF Verification Complete:', verifyResult);
       return;
@@ -22588,7 +23345,7 @@ if (
       }
       if (hasA2ui && !isDryRun) {
         const a2uiResult = generateA2uiSurface({ workspaceRoot: './workspace', runId: argValue });
-        console.log('A2UI v0.9.1 Surface Generated:', a2uiResult.htmlOutputPath);
+        console.log('A2UI v1.0 Surface Generated:', a2uiResult.htmlOutputPath);
       }
       console.log('Stage 2 CLI Run Complete:', result);
     } else {
@@ -22659,7 +23416,7 @@ if (
         }
         if (hasA2ui && !isDryRun) {
           const a2uiResult = generateA2uiSurface({ workspaceRoot: './workspace', runId });
-          console.log('A2UI v0.9.1 Surface Generated:', a2uiResult.htmlOutputPath);
+          console.log('A2UI v1.0 Surface Generated:', a2uiResult.htmlOutputPath);
         }
         console.log(
           `Stage 1 CLI ${isDryRun ? 'Dry-Run ' : 'Run '}Complete (${runId}):`,
@@ -22700,7 +23457,7 @@ if (
         }
         if (hasA2ui) {
           const a2uiResult = generateA2uiSurface({ workspaceRoot: './workspace', runId });
-          console.log('A2UI v0.9.1 Surface Generated:', a2uiResult.htmlOutputPath);
+          console.log('A2UI v1.0 Surface Generated:', a2uiResult.htmlOutputPath);
         }
         console.log(`Headless ICM Run Complete (${runId}):`, {
           status: 'Pipeline executed successfully',

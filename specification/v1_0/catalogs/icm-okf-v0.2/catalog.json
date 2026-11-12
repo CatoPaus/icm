@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a2ui.org/specification/v1_0/catalogs/icm-okf-v0.2/catalog.json",
+  "protocolVersion": "1.0",
+  "title": "ICM + OKF v0.2 Domain A2UI Component Catalog",
+  "description": "Tier 2 A2UI v1.0 domain catalog providing ICM + OKF v0.2 components (Badge, SpeechPlayer, OkfMarkdown, OkfKnowledgeGraph, InteractiveChecklist, ModuleCarousel, QuizRunner, CaseSimulator) and agent RPC functions (verifyOkfSources) mixed natively alongside the A2UI v1.0 Basic Catalog via @catalogId.",
+  "catalogId": "https://a2ui.org/specification/v1_0/catalogs/icm-okf-v0.2/catalog.json",
+  "instructions": "Use this catalog alongside the A2UI v1.0 Basic Catalog ('https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json') by setting '@catalogId': 'https://a2ui.org/specification/v1_0/catalogs/icm-okf-v0.2/catalog.json' on Tier 2 domain components (Badge, SpeechPlayer, OkfMarkdown, OkfKnowledgeGraph, InteractiveChecklist, ModuleCarousel, QuizRunner, CaseSimulator) and 'catalogId' on verifyOkfSources function calls.",
+  "components": {
+    "Badge": {
+      "type": "object",
+      "description": "Renders a semantic status pill badge (e.g. status: stable, trust: human-reviewed, fresh).",
+      "properties": {
+        "component": {
+          "const": "Badge"
+        },
+        "text": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "The text label rendered inside the pill badge."
+        },
+        "tone": {
+          "type": "string",
+          "description": "Semantic visual tone for the status badge.",
+          "enum": ["primary", "success", "warn", "danger", "accent", "neutral"],
+          "default": "neutral"
+        },
+        "weight": {
+          "$ref": "#/$defs/Weight"
+        }
+      },
+      "required": ["component", "text"]
+    },
+    "SpeechPlayer": {
+      "type": "object",
+      "description": "Synthesizes spoken narration via Web Speech API with automatic BCP-47 voice binding (nb-NO/no-NO/en-US) or plays an optional pre-rendered Stage 4 audio URL.",
+      "properties": {
+        "component": {
+          "const": "SpeechPlayer"
+        },
+        "ttsText": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Plain spoken text synthesized via Web Speech API."
+        },
+        "description": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Human-readable title or description of the narration track."
+        },
+        "audioUrl": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Optional http:, https:, data:, or relative URL for pre-rendered Stage 4 audio."
+        },
+        "weight": {
+          "$ref": "#/$defs/Weight"
+        }
+      },
+      "required": ["component", "ttsText"]
+    },
+    "OkfMarkdown": {
+      "type": "object",
+      "description": "Renders OKF v0.2 Markdown with clickable [^id] footnotes, domain-provenance & timestamp chips, interactive source curation (replace/reject/add), Layer 4 raw Markdown editing, and internal concept navigation.",
+      "properties": {
+        "component": {
+          "const": "OkfMarkdown"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Title of the OKF v0.2 concept document."
+        },
+        "body": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "OKF v0.2 Markdown body with inline [^id] footnote citations and bottom [^id]: Title definitions."
+        },
+        "frontmatter": {
+          "type": "object",
+          "description": "Optional raw OKF v0.2 YAML frontmatter object."
+        },
+        "sources": {
+          "description": "Array of OKF v0.2 source objects ({ id, title, resource, retrieved_at, last_modified }) or JSON Pointer binding.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            {
+              "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DataBinding"
+            }
+          ]
+        },
+        "trustTier": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Computed OKF v0.2 trust tier (unverified | auto | machine-confirmed | human-reviewed)."
+        },
+        "isStale": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicBoolean",
+          "description": "Computed OKF v0.2 staleness flag evaluated against frontmatter.stale_after."
+        },
+        "editablePath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path for Layer 4 in-place Markdown editing (defaults to /okf/body)."
+        },
+        "rejectedSourcesPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path storing interactive rejected source IDs (defaults to /okf/rejectedSources)."
+        },
+        "replacedSourcesPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path storing interactive replaced source mappings (defaults to /okf/replacedSources)."
+        },
+        "addedSourcesPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path storing interactive human-added sources (defaults to /okf/addedSources)."
+        },
+        "verifierActorPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path storing the human verifier identity (defaults to /okf/verifierActor)."
+        },
+        "weight": {
+          "$ref": "#/$defs/Weight"
+        }
+      },
+      "required": ["component", "body"]
+    },
+    "OkfKnowledgeGraph": {
+      "type": "object",
+      "description": "Embeds the interactive Cytoscape.js + zero-CDN SVG OKF v0.2 Knowledge Graph explorer directly inside an A2UI tab.",
+      "properties": {
+        "component": {
+          "const": "OkfKnowledgeGraph"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Header title for the embedded OKF v0.2 knowledge graph explorer."
+        },
+        "bundlePath": {
+          "type": "string",
+          "description": "Optional relative path to the standalone workspace/bundle/viz.html graph explorer."
+        },
+        "weight": {
+          "$ref": "#/$defs/Weight"
+        }
+      },
+      "required": ["component"]
+    },
+    "InteractiveChecklist": {
+      "type": "object",
+      "description": "Renders extracted Markdown or Stage 2 checklists with nested category headers, LaTeX/footnote cleaning, and reactive CheckBox completion bound two-way to the A2UI data model.",
+      "properties": {
+        "component": {
+          "const": "InteractiveChecklist"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Header title for the interactive checklist card."
+        },
+        "subtitle": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Optional subtitle or completion summary binding."
+        },
+        "groupsPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path to the checklist groups array in the surface data model (e.g. /checklist/groups)."
+        },
+        "weight": {
+          "$ref": "#/$defs/Weight"
+        }
+      },
+      "required": ["component", "groupsPath"]
+    },
+    "ModuleCarousel": {
+      "type": "object",
+      "description": "Renders Stage 2 trainingModules, lessons, modules, or analytical pillars with step-by-step navigation, metadata badges, slide cues, action items, and SpeechPlayer narration.",
+      "properties": {
+        "component": {
+          "const": "ModuleCarousel"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Header title for the training modules or analytical pillars carousel."
+        },
+        "modulesPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path to the normalized Stage 2 modules/pillars array (e.g. /stage2/modules)."
+        },
+        "activeIndexPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path to the currently active module index (e.g. /stage2/activeModuleIndex)."
+        },
+        "weight": {
+          "$ref": "#/$defs/Weight"
+        }
+      },
+      "required": ["component", "modulesPath"]
+    },
+    "QuizRunner": {
+      "type": "object",
+      "description": "Interactive assessment runner bound to Stage 2 quiz items with ChoicePicker selection, explanation feedback, and live score calculation.",
+      "properties": {
+        "component": {
+          "const": "QuizRunner"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Header title for the interactive knowledge check runner."
+        },
+        "questionsPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path to the quiz questions array (e.g. /stage2/quiz)."
+        },
+        "answersPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path to the user's selected quiz answers map (e.g. /stage2/quizAnswers)."
+        },
+        "weight": {
+          "$ref": "#/$defs/Weight"
+        }
+      },
+      "required": ["component", "questionsPath"]
+    },
+    "CaseSimulator": {
+      "type": "object",
+      "description": "Interactive scenario, dilemma, or stress-test simulator bound to Stage 2 cases with editable response notes and model resolution reveal.",
+      "properties": {
+        "component": {
+          "const": "CaseSimulator"
+        },
+        "title": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Header title for the interactive scenario, dilemma, or stress-test simulator."
+        },
+        "casesPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path to the normalized cases/scenarios array (e.g. /stage2/cases)."
+        },
+        "responsesPath": {
+          "type": "string",
+          "description": "RFC 6901 JSON Pointer path to the user's drafted scenario responses map (e.g. /stage2/caseResponses)."
+        },
+        "weight": {
+          "$ref": "#/$defs/Weight"
+        }
+      },
+      "required": ["component", "casesPath"]
+    }
+  },
+  "functions": {
+    "verifyOkfSources": {
+      "type": "object",
+      "description": "Submits human OKF v0.2 source curation decisions (verifierActor, rejectedSources, replacedSources, addedSources) from the renderer to the Co-Architect agent via callAgentFunction.",
+      "returnType": "object",
+      "allowedCallers": "rendererOnly",
+      "requiresUserActivation": true,
+      "properties": {
+        "@call": {
+          "const": "verifyOkfSources"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "type": "string"
+            },
+            "verifierActor": {
+              "type": "string"
+            },
+            "rejectedSources": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "replacedSources": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "addedSources": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "agyText": {
+              "type": "string"
+            },
+            "cliText": {
+              "type": "string"
+            },
+            "timestamp": {
+              "type": "string"
+            }
+          },
+          "required": ["runId", "verifierActor"],
+          "unevaluatedProperties": false
+        }
+      },
+      "required": ["@call", "args"]
+    }
+  },
+  "$defs": {
+    "anyComponent": {
+      "oneOf": [
+        { "$ref": "#/components/Badge" },
+        { "$ref": "#/components/SpeechPlayer" },
+        { "$ref": "#/components/OkfMarkdown" },
+        { "$ref": "#/components/OkfKnowledgeGraph" },
+        { "$ref": "#/components/InteractiveChecklist" },
+        { "$ref": "#/components/ModuleCarousel" },
+        { "$ref": "#/components/QuizRunner" },
+        { "$ref": "#/components/CaseSimulator" }
+      ],
+      "discriminator": {
+        "propertyName": "component"
+      }
+    },
+    "anyFunction": {
+      "oneOf": [
+        { "$ref": "#/functions/verifyOkfSources" }
+      ]
+    },
+    "Weight": {
+      "type": "number",
+      "description": "The relative weight of this component within a Row or Column."
+    }
+  }
+}

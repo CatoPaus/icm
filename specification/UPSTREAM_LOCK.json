@@ -1,0 +1,23 @@
+{
+  "$comment": "Tracks vendored upstream protocol specifications so `npm run spec:check` can detect new upstream releases or main-branch schema updates.",
+  "a2ui": {
+    "repository": "google/A2UI",
+    "branch": "main",
+    "commit": "24d1bf9c830071f74c9c908433e73cc6cbe0aa33",
+    "committedAt": "2026-11-11T05:27:55Z",
+    "trackedPaths": [
+      "specification",
+      "catalogs/basic/v1"
+    ],
+    "protocolVersion": "1.0",
+    "specDir": "specification/v1_0",
+    "basicCatalogUpstreamPath": "catalogs/basic/v1/catalog.json",
+    "versionsUrl": "https://raw.githubusercontent.com/google/A2UI/main/specification/versions.json"
+  },
+  "okf": {
+    "repository": "GoogleCloudPlatform/open-knowledge-format",
+    "branch": "main",
+    "okfVersion": "0.2",
+    "specFile": "SPEC.md"
+  }
+}

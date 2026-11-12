@@ -1,10 +1,10 @@
-# Open Knowledge Studio (`ICM` · `OKF v0.2` · `A2UI v0.9.1`)
+# Open Knowledge Studio (`ICM` · `OKF v0.2` · `A2UI v1.0`)
 
 **Open Knowledge Studio** (`open-knowledge-studio`) is a zero-dependency grounded research, compounding knowledge graph, and interactive surface engine built in TypeScript and Node.js. It unites three open architectural pillars on top of the **Google AI Interactions API (`/v1beta/interactions`)** and **Gemini 4 Argon (`gemini-4-argon`)**—with **zero runtime `npm` dependencies** and **zero external AI orchestration framework bloat**:
 
 1. **Interpretable Context Methodology (`ICM`):** A declarative, filesystem-first pipeline architecture where every context layer (`Layers 0–4`), assembled input prompt (`prompt_assembled.md`), reasoning/search trace (`thinking_trace.md`), and handoff artifact lives as plain Markdown or JSON on disk.
 2. **Open Knowledge Format (`OKF v0.2`):** Grounded primary-source provenance (`retrieved_at`, HTTP/HTML/PDF `last_modified`), structural domain-mismatch detection, zero-token human citation curation (`cli:verify`), explicit `trust_tier` gating (`unverified` → `human-reviewed`), progressive disclosure (`bundle/index.md`), and a compounding multi-concept knowledge graph (`viz.html`).
-3. **Agent-to-UI (`A2UI v0.9.1`) & Interactive Co-Architect Studio:** Compiles verified artifacts into declarative RFC 6901 JSON Pointer surfaces (`a2ui_surface.json` / `.jsonl`) and a self-contained, zero-CDN offline Studio (`a2ui.html`) featuring Stage-1 Intermission review with reactive loopback wakeup (`cli:ping-pong`), multi-run course/briefing switching, bilingual TTS, interactive checklists, case simulators, quizzes, and live knowledge graphs.
+3. **Agent-to-UI (`A2UI v1.0`) & Interactive Co-Architect Studio:** Compiles verified artifacts into declarative RFC 6901 JSON Pointer surfaces (`a2ui_surface.json` / `.jsonl` using `@path`, `@call`, and multi-catalog `@catalogId` bindings) and a self-contained, zero-CDN offline Studio (`a2ui.html`) featuring Stage-1 Intermission review with reactive loopback wakeup (`cli:ping-pong`), multi-run course/briefing switching, bilingual TTS, interactive checklists, case simulators, quizzes, and live knowledge graphs.
 
 ---
 
@@ -30,8 +30,8 @@ Because every run lives in plain Markdown and JSON files on disk (`workspace/run
 2. Inspect, curate, or edit `research_summary.md` (or tweak `voice_guide.md`) directly in your editor.
 3. Re-run Stage 2 (or downstream stages) standalone in seconds (`npm run cli:stage2 -- <runId>`) without re-running or paying for Stage 1 research again.
 
-### 4. Declarative A2UI v0.9.1 Studio Out-of-the-Box + Optional Bespoke Domain UI
-* **Zero-CDN A2UI Studio & OKF Graph Compiler (`src/index.ts`):** Every Stage 1 and Stage 2 run automatically compiles declarative **A2UI v0.9.1** surface artifacts (`a2ui_surface.json` / `.jsonl`) and self-contained, offline-capable HTML apps (`a2ui.html` and `workspace/bundle/viz.html`) with built-in GFM Markdown, interactive SVG + Cytoscape knowledge graphs, 1-click source curation, and multi-run switching—at **`0` runtime npm dependencies**.
+### 4. Declarative A2UI v1.0 Studio Out-of-the-Box + Optional Bespoke Domain UI
+* **Zero-CDN A2UI Studio & OKF Graph Compiler (`src/index.ts`):** Every Stage 1 and Stage 2 run automatically compiles declarative **A2UI v1.0** surface artifacts (`a2ui_surface.json` / `.jsonl`) and self-contained, offline-capable HTML apps (`a2ui.html` and `workspace/bundle/viz.html`) with built-in GFM Markdown, interactive SVG + Cytoscape knowledge graphs, 1-click source curation, and multi-run switching—at **`0` runtime npm dependencies**.
 * **Optional Bespoke UI in Phase 5:** Because `src/index.ts` ships zero framework bloat, once your pipeline stages (`01_research`, `02_script`, `03_...`, `04_...`) and real verified artifacts exist on disk, you can keep the built-in A2UI Studio / headless CLI pipeline or have the **Co-Architect** (`GEMINI.md` & `.agents/skills/icm-co-architect/SKILL.md`) generate a bespoke domain web app tailored to your exact schema.
 
 ---
@@ -120,6 +120,11 @@ The workspace layout maps abstract context layers directly to disk directories:
 ├── LICENSE                      # MIT License
 ├── GEMINI.md                    # Antigravity 2.0 Main Agent Rules (ICM Co-Architect)
 ├── SPEC.md                      # Open Knowledge Format (OKF v0.2) Upstream Specification
+├── A2UI_SPEC.md                 # Agent-to-UI (A2UI v1.0) Upstream Protocol Specification
+├── specification/               # Vendored A2UI v1.0 Schemas, Catalogs & Upstream Lock
+│   ├── UPSTREAM_LOCK.json       # Pinned google/A2UI commit SHA & protocolVersion ("1.0")
+│   ├── versions.json            # Official A2UI protocol version registry
+│   └── v1_0/                    # A2UI v1.0 JSON Schemas, Basic Catalog & ICM+OKF v0.2 Catalog
 ├── .agents/                     # Antigravity 2.0 Workspace Customizations
 │   ├── hooks.json               # SessionStart context injector & PreToolUse Argon guardrail
 │   ├── scripts/
@@ -130,7 +135,7 @@ The workspace layout maps abstract context layers directly to disk directories:
 ├── package.json                 # Zero runtime dependencies (only tsx, typescript, @types/node)
 ├── tsconfig.json
 ├── src/
-│   └── index.ts                 # 100% Pure ICM + OKF v0.2 Engine, Gemini 4 Argon SSE Client & CLI
+│   └── index.ts                 # 100% Pure ICM + OKF v0.2 + A2UI v1.0 Engine, Argon SSE Client & CLI
 ├── prompts/                     # Layer 2: Stage Contracts (Markdown + YAML frontmatter)
 │   ├── 01_research.md           # Stage 1 contract (gemini-4-argon, thinkingLevel: HIGH)
 │   └── 02_script.md             # Stage 2 contract (gemini-4-argon, thinkingLevel: MEDIUM)
@@ -181,7 +186,7 @@ GEMINI_API_KEY="your-gemini-api-key"
 
 ---
 
-## Running the ICM + OKF v0.2 + A2UI v0.9.1 Pipeline (`cli:stage1`, `cli:verify`, `cli:stage2`, `cli:viz`, `cli:a2ui`, `cli`, `--dry-run`)
+## Running the ICM + OKF v0.2 + A2UI v1.0 Pipeline (`cli:stage1`, `cli:verify`, `cli:stage2`, `cli:viz`, `cli:a2ui`, `spec:check`, `cli`, `--dry-run`)
 
 Because the ICM state lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/` and `workspace/bundle/`) and `src/index.ts` uses pure cross-platform Node.js with zero external dependencies, you can run every stage standalone from any Windows, macOS, or Linux terminal, SSH session, Docker container, or cron job:
 
@@ -211,11 +216,11 @@ Because the ICM state lives in plain Markdown and JSON files on disk (`workspace
    npm run cli:viz
    ```
    *(Walks `workspace/bundle/` and writes a self-contained single-file `workspace/bundle/viz.html` with Cytoscape.js force-directed graph, trust-tier & staleness badges, and bidirectional backlinks.)*
-6. **Compile the Declarative A2UI v0.9.1 Surface & Bi-Directional Studio (`cli:a2ui`):**
+6. **Compile the Declarative A2UI v1.0 Surface & Bi-Directional Studio (`cli:a2ui`):**
    ```bash
    npm run cli:a2ui -- <runId>
    ```
-   *(Compiles the run's Stage 1 OKF v0.2 Markdown, Stage 2 JSON, and OKF Bundle into declarative **A2UI v0.9.1** surface artifacts (`workspace/runs/<runId>/stages/02_script/output/a2ui_surface.json` and `a2ui_surface.jsonl` with `createSurface`, `updateComponents`, and `updateDataModel` bound via RFC 6901 JSON Pointers) plus a self-contained **A2UI Studio HTML app** (`workspace/runs/<runId>/a2ui.html` and `workspace/bundle/a2ui.html`) implementing both **Tier 1 Basic Catalog Primitives** (`Tabs`, `Card`, `Row`, `Column`, `List`, `Text`, `CheckBox`, `ChoicePicker`, `TextField`, `Button`, `AudioPlayer`, `Video`, `Image`, `Icon`, `Divider`, `Modal`, `Badge`) and **Tier 2 ICM + OKF Domain Components** (`OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`). See [`A2UI_SPEC.md`](./A2UI_SPEC.md) for the upstream A2UI v0.9.1 protocol specification.)*
+   *(Compiles the run's Stage 1 OKF v0.2 Markdown, Stage 2 JSON, and OKF Bundle into declarative **A2UI v1.0** surface artifacts (`workspace/runs/<runId>/stages/02_script/output/a2ui_surface.json` and `a2ui_surface.jsonl` with `version: "1.0"`, `createSurface`, `updateComponents`, and `updateDataModel` bound via `@path` RFC 6901 JSON Pointers and `@call` functions) plus a self-contained **A2UI Studio HTML app** (`workspace/runs/<runId>/a2ui.html` and `workspace/bundle/a2ui.html`) implementing both **Tier 1 Basic Catalog Primitives** (`Tabs`, `Card`, `Row`, `Column`, `List`, `Text`, `CheckBox`, `ChoicePicker`, `TextField`, `DateTimeInput`, `Slider`, `Button`, `AudioPlayer`, `Video`, `Image`, `Icon`, `Divider`, `Modal`) and **`@catalogId`-scoped Tier 2 ICM + OKF Domain Components** (`Badge`, `SpeechPlayer`, `OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`). See [`A2UI_SPEC.md`](./A2UI_SPEC.md) for the upstream A2UI v1.0 protocol specification.)*
 7. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
    ```bash
    npm run cli -- "Cloud Native Architecture in 2026"
@@ -224,6 +229,11 @@ Because the ICM state lives in plain Markdown and JSON files on disk (`workspace
    ```bash
    cat workspace/runs/<runId>/stages/02_script/output/script_draft.json
    ```
+9. **Check upstream `google/A2UI` protocol version & commit lock (`spec:check`):**
+   ```bash
+   npm run spec:check
+   ```
+   *(Compares [`specification/UPSTREAM_LOCK.json`](./specification/UPSTREAM_LOCK.json) against live `google/A2UI` `versions.json` and latest `main` commit SHA so future protocol updates are detected deterministically.)*
 
 ### Multimodal Stage Expansion (`gemini-nano-banana-2.1`, `gemini-3.8-flash-tts`, & `gemini-api` CLI)
 Downstream stages that generate or analyze media files on disk (slide illustrations, voiceovers, video, music, or PDF corpora) can either call `/v1beta/interactions` directly via `fetch` in `src/index.ts` or use Google AI Studio's stateless **`gemini-api` CLI** (`google-gemini/gemini-api-cli`):

@@ -1,7 +1,7 @@
 {
   "name": "open-knowledge-studio",
   "version": "2.0.0",
-  "description": "Zero-dependency grounded research, compounding OKF v0.2 knowledge graphs, and interactive A2UI v0.9.1 surfaces powered by Interpretable Context Methodology (ICM).",
+  "description": "Zero-dependency grounded research, compounding OKF v0.2 knowledge graphs, and interactive A2UI v1.0 surfaces powered by Interpretable Context Methodology (ICM).",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "cli:a2ui": "npx tsx --env-file-if-exists=.env.local src/index.ts --a2ui",
     "cli:ping-pong": "npx tsx --env-file-if-exists=.env.local src/index.ts --ping-pong",
     "test": "npx tsx src/index.ts --test",
+    "spec:check": "npx tsx src/index.ts --spec-check",
     "typecheck": "npx tsc --noEmit",
     "clean": "node scripts/cleanup.js"
   },
