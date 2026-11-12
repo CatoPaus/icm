@@ -7737,6 +7737,7 @@ export function walkBundleConcepts(bundleRoot: string): OKFConceptNode[] {
 }
 
 const OKF_VIZ_CSS = `
+:root { color-scheme: light; }
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -7766,7 +7767,9 @@ header {
   border: 1px solid #cbd5e1;
   border-radius: 4px;
   background: #fff;
+  color: #0f172a;
 }
+.controls input::placeholder { color: #64748b; opacity: 1; }
 .controls input { width: 220px; }
 .controls button { cursor: pointer; background: #f1f5f9; }
 .controls button:hover { background: #e2e8f0; }
@@ -11037,6 +11040,7 @@ export function validateA2uiSurfaceMessages(messages: A2uiEnvelopeMessage[]): {
 
 const A2UI_STUDIO_CSS = `
 :root {
+  color-scheme: light;
   --bg: #f8fafc;
   --surface: #ffffff;
   --surface-subtle: #f1f5f9;
@@ -11111,6 +11115,7 @@ body {
   text-overflow: ellipsis;
 }
 .a2ui-run-switcher {
+  color-scheme: dark;
   background: #1e293b;
   color: #f8fafc;
   border: 1px solid #3b82f6;
@@ -11267,6 +11272,14 @@ body {
   text-decoration: line-through;
   color: var(--text-light);
 }
+.a2ui-input {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  font-family: inherit;
+  background: #ffffff;
+  color: #0f172a;
+  caret-color: #0f172a;
+}
 .a2ui-textfield {
   display: flex;
   flex-direction: column;
@@ -11280,6 +11293,17 @@ body {
   border-radius: 6px;
   font-size: 13.5px;
   font-family: inherit;
+  background: #ffffff;
+  color: #0f172a;
+  caret-color: #0f172a;
+}
+.a2ui-input::placeholder,
+.a2ui-textfield input::placeholder,
+.a2ui-textfield textarea::placeholder,
+.okf-replace-url-input::placeholder,
+.okf-add-source-box input::placeholder {
+  color: #64748b;
+  opacity: 1;
 }
 .a2ui-choice-group { display: flex; flex-direction: column; gap: 6px; }
 .a2ui-choice-opt {
@@ -11489,7 +11513,9 @@ body {
   border-radius: 6px;
   font-size: 12px;
   font-family: inherit;
-  background: #fff;
+  background: #ffffff;
+  color: #0f172a;
+  caret-color: #0f172a;
 }
 .okf-search-log-details {
   padding: 8px 12px;
@@ -20607,8 +20633,10 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         s1HtmlRendered.includes('okf-open-replace-btn') &&
         s1HtmlRendered.includes('okf-jump-sources-btn') &&
         s1HtmlRendered.includes('okf-replace-url-input') &&
-        s1HtmlRendered.includes('okf-replace-url-btn'),
-      `toggleReplacePanelInStudio, setReplaceSourceInStudio, and buildCurationPrompts support 1-click direct source swap (without requiring Reject first), 1-step inline URLs, jump-to-sources button, and BPE bold-space normalization`
+        s1HtmlRendered.includes('okf-replace-url-btn') &&
+        s1HtmlRendered.includes('color-scheme: light;') &&
+        /\.okf-add-source-box input\s*\{[^}]*color:\s*#0f172a;/.test(s1HtmlRendered),
+      `toggleReplacePanelInStudio, setReplaceSourceInStudio, and buildCurationPrompts support 1-click direct source swap (without requiring Reject first), 1-step inline URLs, jump-to-sources button, BPE bold-space normalization, and explicit dark-webview input contrast`
     );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
