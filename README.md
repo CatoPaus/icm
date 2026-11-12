@@ -1,8 +1,10 @@
-# Interpretable Context Methodology (ICM) with Gemini 4 Argon
+# Open Knowledge Studio (`ICM` · `OKF v0.2` · `A2UI v0.9.1`)
 
-This repository contains a **100% Pure Interpretable Context Methodology (ICM)** reference engine built in TypeScript and Node.js, powered directly by the **Google AI Interactions API (`/v1beta/interactions`)** and **Gemini 4 Argon (`gemini-4-argon`)** with **zero runtime `npm` dependencies** and **zero external AI orchestration framework bloat**.
+**Open Knowledge Studio** (`open-knowledge-studio`) is a zero-dependency grounded research, compounding knowledge graph, and interactive surface engine built in TypeScript and Node.js. It unites three open architectural pillars on top of the **Google AI Interactions API (`/v1beta/interactions`)** and **Gemini 4 Argon (`gemini-4-argon`)**—with **zero runtime `npm` dependencies** and **zero external AI orchestration framework bloat**:
 
-ICM is a declarative, filesystem-centric context management architecture that replaces opaque framework state machines with numbered stage directories, Markdown-based stage contracts, and explicit sandboxing boundaries on disk.
+1. **Interpretable Context Methodology (`ICM`):** A declarative, filesystem-first pipeline architecture where every context layer (`Layers 0–4`), assembled input prompt (`prompt_assembled.md`), reasoning/search trace (`thinking_trace.md`), and handoff artifact lives as plain Markdown or JSON on disk.
+2. **Open Knowledge Format (`OKF v0.2`):** Grounded primary-source provenance (`retrieved_at`, HTTP/HTML/PDF `last_modified`), structural domain-mismatch detection, zero-token human citation curation (`cli:verify`), explicit `trust_tier` gating (`unverified` → `human-reviewed`), progressive disclosure (`bundle/index.md`), and a compounding multi-concept knowledge graph (`viz.html`).
+3. **Agent-to-UI (`A2UI v0.9.1`) & Interactive Co-Architect Studio:** Compiles verified artifacts into declarative RFC 6901 JSON Pointer surfaces (`a2ui_surface.json` / `.jsonl`) and a self-contained, zero-CDN offline Studio (`a2ui.html`) featuring Stage-1 Intermission review with reactive loopback wakeup (`cli:ping-pong`), multi-run course/briefing switching, bilingual TTS, interactive checklists, case simulators, quizzes, and live knowledge graphs.
 
 ---
 
@@ -28,34 +30,33 @@ Because every run lives in plain Markdown and JSON files on disk (`workspace/run
 2. Inspect, curate, or edit `research_summary.md` (or tweak `voice_guide.md`) directly in your editor.
 3. Re-run Stage 2 (or downstream stages) standalone in seconds (`npm run cli:stage2 -- <runId>`) without re-running or paying for Stage 1 research again.
 
-### 4. Extensible N-Stage Pipeline & Bespoke Domain UI (Built After Real Artifacts Exist)
-Just as ICM never designs Stage 2 before verifying Stage 1's actual output on disk, **this base template intentionally ships with zero pre-baked Web UI (`0` runtime dependencies)**:
-* **Why No Pre-Baked Generic UI:** A pre-built generic dashboard anchors the AI agent to an arbitrary layout and wastes tokens patching legacy HTML/JS. An Online Course Studio (16:9 slide carousel + synchronized audio player + formative quiz runner), a Legal Contract Auditor (side-by-side clause diff & risk heatmap), and a Podcast Studio (dual-host waveform timeline) each require fundamentally different interfaces.
-* **Bespoke UI in Phase 5:** Once your pipeline stages (`01_research`, `02_script`, `03_...`, `04_...`) and a real verified run in `workspace/runs/<runId>/` are locked in on disk, the **ICM Co-Architect** (`GEMINI.md` & `.agents/skills/icm-co-architect/SKILL.md`) offers to generate a **custom Domain Web Studio** (`src/server.ts` + `public/`) tailored specifically to your pipeline's real artifacts—or keep your project as a pure headless CLI pipeline.
+### 4. Declarative A2UI v0.9.1 Studio Out-of-the-Box + Optional Bespoke Domain UI
+* **Zero-CDN A2UI Studio & OKF Graph Compiler (`src/index.ts`):** Every Stage 1 and Stage 2 run automatically compiles declarative **A2UI v0.9.1** surface artifacts (`a2ui_surface.json` / `.jsonl`) and self-contained, offline-capable HTML apps (`a2ui.html` and `workspace/bundle/viz.html`) with built-in GFM Markdown, interactive SVG + Cytoscape knowledge graphs, 1-click source curation, and multi-run switching—at **`0` runtime npm dependencies**.
+* **Optional Bespoke UI in Phase 5:** Because `src/index.ts` ships zero framework bloat, once your pipeline stages (`01_research`, `02_script`, `03_...`, `04_...`) and real verified artifacts exist on disk, you can keep the built-in A2UI Studio / headless CLI pipeline or have the **Co-Architect** (`GEMINI.md` & `.agents/skills/icm-co-architect/SKILL.md`) generate a bespoke domain web app tailored to your exact schema.
 
 ---
 
 ## Using as an Upstream Base / Template Repository
 
-This repository is designed to serve as an **untouched upstream base template** for specialized downstream projects (e.g., `icm-course-studio`, `icm-podcast-studio`, `icm-market-strategy`, `icm-legal-review`). Runtime outputs (`workspace/runs/`, `.icm/`, `.sessions/`) are excluded via `.gitignore` so the base repository remains clean.
+This repository is designed to serve as an **untouched upstream base template** (`CatoPaus/open-knowledge-studio`) for specialized downstream projects (e.g., `oks-course-studio`, `oks-legal-review`, `nis2-cyber-audit`, `brannvern-barnehager`). Runtime outputs (`workspace/runs/`, `.icm/`, `.sessions/`) are excluded via `.gitignore` so the base repository remains clean.
 
 ### Starting a New Specialized Project
 
 > **Important — Name Your Project Folder After Your Target Domain:**
-> When you clone this template (`git clone https://github.com/CatoPaus/icm.git <project-folder-name>`), the **Antigravity 2.0 ICM Co-Architect** automatically reads your project directory name at `SessionStart` (via `.agents/hooks.json`) and uses it as an immediate semantic signal to pre-populate domain-specific recommendations and multiple-choice options during setup.
-> * Example: Naming your folder `icm-course-studio` or `icm-course-builder` automatically steers the Co-Architect's first interactive question and `(Recommended)` options toward online course creation.
-> * Example: Naming your folder `icm-podcast-studio`, `icm-legal-review`, or `icm-competitor-intel` automatically tailors its Layer 0–3, Stage 1–4, and Phase 5 UI recommendations to those domains.
+> When you clone this template (`git clone https://github.com/CatoPaus/open-knowledge-studio.git <project-folder-name>`), the **Antigravity 2.0 Co-Architect** automatically reads your project directory name at `SessionStart` (via `.agents/hooks.json`) and uses it as an immediate semantic signal to pre-populate domain-specific recommendations and multiple-choice options during setup.
+> * Example: Naming your folder `oks-course-studio` or `course-studio` automatically steers the Co-Architect's first interactive question and `(Recommended)` options toward online course creation.
+> * Example: Naming your folder `podcast-studio`, `legal-review`, or `competitor-intel` automatically tailors its Layer 0–3, Stage 1–4, and Phase 5 UI recommendations to those domains.
 
 ```bash
 # 1. Clone this base template repository into a domain-named project directory
-git clone https://github.com/CatoPaus/icm.git icm-course-studio
-cd icm-course-studio
+git clone https://github.com/CatoPaus/open-knowledge-studio.git oks-course-studio
+cd oks-course-studio
 
 # 2. Rename 'origin' to 'upstream' (so 'upstream' always points to the untouched base template)
 git remote rename origin upstream
 
 # 3. Point 'origin' to your new specialized GitHub repository and push
-git remote add origin https://github.com/CatoPaus/icm-course-studio.git
+git remote add origin https://github.com/CatoPaus/oks-course-studio.git
 git push -u origin main
 
 # 4. Install dev dependencies (tsx, typescript, @types/node) and add your Gemini API key

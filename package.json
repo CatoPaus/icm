@@ -1,6 +1,7 @@
 {
-  "name": "icm-gemini-4-argon",
+  "name": "open-knowledge-studio",
   "version": "2.0.0",
+  "description": "Zero-dependency grounded research, compounding OKF v0.2 knowledge graphs, and interactive A2UI v0.9.1 surfaces powered by Interpretable Context Methodology (ICM).",
   "license": "MIT",
   "type": "module",
   "scripts": {

@@ -57,10 +57,16 @@ if (mode === 'session-start') {
   }
 
   const projectFolderName = path.basename(repoRoot);
+  const isBaseTemplateFolder = ['open-knowledge-studio', 'icm', 'jolly-hertz'].includes(
+    projectFolderName.toLowerCase()
+  );
+  const folderSignalLine = isBaseTemplateFolder
+    ? `- Project Folder Name: "${projectFolderName}" (default template repository name — ask the user what target domain they want to specialize for in Question 1 rather than inferring a domain from "${projectFolderName}").`
+    : `- Project Folder Name (Domain Signal): "${projectFolderName}" (use this folder name to infer the user's likely project domain and pre-populate tailored "(Recommended)" options when asking Question 1 via ask_question).`;
   const msg = [
     '[ICM Co-Architect Session Context]',
     `- Workspace Root: ${repoRoot}`,
-    `- Project Folder Name (Domain Signal): "${projectFolderName}" (use this folder name to infer the user's likely project domain and pre-populate tailored "(Recommended)" options when asking Question 1 via ask_question).`,
+    folderSignalLine,
     `- ${latestRunInfo}`,
     '- Pure ICM Filesystem Traces: Every stage writes input/prompt_assembled.md, output/thinking_trace.md, and token telemetry in workspace/runs/<runId>/meta.json.',
     '- Reminder: Follow the root GEMINI.md one-question / one-stage-at-a-time workflow. Never dump multi-step plans before testing Stage 1 via npm run cli:stage1.'
