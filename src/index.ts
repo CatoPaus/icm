@@ -6603,8 +6603,8 @@ export function syncRunToBundle(
   };
 }
 
-// Helper to load ICM Layer 0 (GEMINI.md), Layer 1 (CONTEXT.md), and Layer 3 (_config/voice_guide.md + bundle/index.md) from disk
-export function loadWorkspaceLayers(workspacePath: string) {
+// Helper to load ICM Layer 0 (GEMINI.md), Layer 1 (CONTEXT.md), and Layer 3 (_config/voice_guide.md + bundle/index.md + bundle/references/*.md) from disk
+export function loadWorkspaceLayers(workspacePath: string, topic?: string) {
   const geminiGuidePath = path.join(workspacePath, 'GEMINI.md');
   const contextGuidePath = path.join(workspacePath, 'CONTEXT.md');
   const toneGuidePath = path.join(workspacePath, '_config/voice_guide.md');
@@ -6615,6 +6615,23 @@ export function loadWorkspaceLayers(workspacePath: string) {
     const freshSummaries: string[] = [];
     const staleConceptRelPaths: string[] = [];
     const deprecatedConceptRelPaths: string[] = [];
+    const referenceCandidates: Array<{
+      relCid: string;
+      title: string;
+      type: string;
+      tier: string;
+      sources: OKFSource[];
+      body: string;
+      score: number;
+    }> = [];
+
+    const topicTokens = Array.from(
+      new Set(
+        String(topic || '')
+          .toLowerCase()
+          .match(/[\p{L}\p{N}][\p{L}\p{N}-]{2,}/gu) || []
+      )
+    );
 
     const scanBundleConcepts = (dir: string) => {
       const entries = fs
@@ -6643,6 +6660,28 @@ export function loadWorkspaceLayers(workspacePath: string) {
               freshSummaries.push(
                 `- [/${relCid}.md] **${doc.frontmatter.title || relCid}** (${doc.frontmatter.type || 'Concept'}, trust_tier: ${tier}): ${doc.frontmatter.description || ''}`
               );
+              if (relFile.startsWith('references/')) {
+                const metaHay = `${doc.frontmatter.title || ''} ${doc.frontmatter.description || ''} ${(doc.frontmatter.tags || []).join(' ')} ${relCid}`.toLowerCase();
+                const bodyHay = String(doc.body || '').slice(0, 6000).toLowerCase();
+                let score = topicTokens.length === 0 ? 1 : 0;
+                for (const tok of topicTokens) {
+                  const stem = tok.length >= 6 ? tok.slice(0, tok.length - 1) : tok;
+                  if (metaHay.includes(tok) || (stem.length >= 5 && metaHay.includes(stem))) {
+                    score += 3;
+                  } else if (bodyHay.includes(tok) || (stem.length >= 5 && bodyHay.includes(stem))) {
+                    score += 1;
+                  }
+                }
+                referenceCandidates.push({
+                  relCid,
+                  title: String(doc.frontmatter.title || relCid),
+                  type: String(doc.frontmatter.type || 'Reference'),
+                  tier,
+                  sources: Array.isArray(doc.frontmatter.sources) ? doc.frontmatter.sources : [],
+                  body: String(doc.body || '').trim(),
+                  score,
+                });
+              }
             }
           } catch {
             // Ignore unreadable concept files
@@ -6670,6 +6709,42 @@ export function loadWorkspaceLayers(workspacePath: string) {
         lines.push(
           `Skipped deprecated concepts (${deprecatedConceptRelPaths.length}): ${deprecatedConceptRelPaths.join(', ')}`
         );
+      }
+      if (referenceCandidates.length > 0) {
+        referenceCandidates.sort(
+          (a, b) => b.score - a.score || a.relCid.localeCompare(b.relCid)
+        );
+        const selectedRefs = referenceCandidates
+          .filter((r) => r.score > 0 || referenceCandidates.length <= 8)
+          .slice(0, 8);
+        if (selectedRefs.length > 0) {
+          lines.push(
+            '',
+            'Hydrated Authoritative Reference Records (`workspace/bundle/references/` — cite canonical `sources` URLs & verbatim formal identifiers directly when applicable):'
+          );
+          let remainingBudget = 48_000;
+          for (const ref of selectedRefs) {
+            if (remainingBudget <= 0) break;
+            lines.push(`### [/${ref.relCid}.md] ${ref.title} (${ref.type}, trust_tier: ${ref.tier})`);
+            if (ref.sources.length > 0) {
+              lines.push('Canonical Sources:');
+              for (const s of ref.sources) {
+                lines.push(
+                  `- id: \`${s.id || 'source'}\` | title: "${s.title || s.resource}" | resource: ${s.resource}${s.last_modified ? ` | last_modified: ${s.last_modified}` : ''}`
+                );
+              }
+            }
+            if (ref.body) {
+              const maxExcerpt = Math.min(8_000, remainingBudget);
+              const excerpt =
+                ref.body.length > maxExcerpt
+                  ? `${ref.body.slice(0, maxExcerpt)}\n...[truncated]`
+                  : ref.body;
+              lines.push('Authoritative Content:', excerpt);
+              remainingBudget -= excerpt.length;
+            }
+          }
+        }
       }
       bundleContext = lines.join('\n');
     }
@@ -6834,7 +6909,10 @@ export async function runStage1Flow(input: {
 }> {
   const workspacePath = path.resolve(input.workspaceRoot);
   const runDir = path.join(workspacePath, 'runs', input.runId);
-  const { globalIdentity, workspaceContext, bundleContext } = loadWorkspaceLayers(workspacePath);
+  const { globalIdentity, workspaceContext, bundleContext } = loadWorkspaceLayers(
+    workspacePath,
+    input.topic
+  );
 
   const contract = loadStagePromptContract('01_research');
   const stage1ThinkingLevel = normalizeThinkingLevel(input.thinkingLevel, contract.thinkingLevel);
@@ -23649,6 +23727,89 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         emptyStatusRunCount === 0 &&
         emptyStatusFormatted.includes('[01_research: PENDING] ---> [OKF Gate: PENDING] ---> [02_script: PENDING] ---> [A2UI v1.0: PENDING]'),
       `getIcmPipelineStatus and formatIcmPipelineStatus accurately report OKF bundle state, Stage-1 Intermission runs, full Stage-2+A2UI runs, and empty workspaces`
+    );
+
+    const tmpRefWs = fs.mkdtempSync(path.join(os.tmpdir(), 'icm-bundle-refs-'));
+    let refHydratedBundleCtx = '';
+    try {
+      const refBundleRoot = path.join(tmpRefWs, 'bundle');
+      fs.mkdirSync(path.join(refBundleRoot, 'research'), { recursive: true });
+      fs.mkdirSync(path.join(refBundleRoot, 'references'), { recursive: true });
+      const futureIso = new Date(Date.now() + 86_400_000 * 30).toISOString();
+      fs.writeFileSync(
+        path.join(refBundleRoot, 'research/prior-note.md'),
+        [
+          '---',
+          'type: Research Concept',
+          'title: Prior Research Summary',
+          'description: Earlier synthesis note.',
+          'status: stable',
+          `stale_after: ${futureIso}`,
+          '---',
+          'UNIQUE_RESEARCH_BODY_SENTINEL_DO_NOT_HYDRATE',
+        ].join('\n'),
+        'utf-8'
+      );
+      fs.writeFileSync(
+        path.join(refBundleRoot, 'references/aaa-unrelated-agro.md'),
+        [
+          '---',
+          'type: Reference',
+          'title: Agricultural Soil Directive',
+          'description: Crop rotation thresholds.',
+          'status: stable',
+          `stale_after: ${futureIso}`,
+          'sources:',
+          '  - id: agro-dir',
+          '    title: Soil Directive Official Registry',
+          '    resource: https://registry.example.org/agro/soil-101',
+          '---',
+          'Crop rotation minimum interval is 3 years.',
+        ].join('\n'),
+        'utf-8'
+      );
+      fs.writeFileSync(
+        path.join(refBundleRoot, 'references/zzz-orbital-debris.md'),
+        [
+          '---',
+          'type: Reference',
+          'title: Orbital Debris Mitigation Standard',
+          'description: Post-mission disposal requirements in LEO.',
+          'tags: [orbital, debris, spacecraft]',
+          'status: stable',
+          `stale_after: ${futureIso}`,
+          'verified:',
+          '  by: human:connector',
+          `  at: ${new Date().toISOString()}`,
+          'sources:',
+          '  - id: orbital-std-primary',
+          '    title: Space Systems Debris Mitigation Registry',
+          '    resource: https://standards.example.org/space/ISO-24113',
+          '---',
+          'Formal identifier `ISO 24113`: Spacecraft in LEO shall complete disposal within 5 years[^orbital-std-primary].',
+          '',
+          '[^orbital-std-primary]: Space Systems Debris Mitigation Registry',
+        ].join('\n'),
+        'utf-8'
+      );
+      refHydratedBundleCtx = loadWorkspaceLayers(
+        tmpRefWs,
+        'Orbital debris post-mission spacecraft disposal'
+      ).bundleContext;
+    } finally {
+      fs.rmSync(tmpRefWs, { recursive: true, force: true });
+    }
+
+    assert(
+      refHydratedBundleCtx.includes('[/research/prior-note.md]') &&
+        !refHydratedBundleCtx.includes('UNIQUE_RESEARCH_BODY_SENTINEL_DO_NOT_HYDRATE') &&
+        refHydratedBundleCtx.includes('Hydrated Authoritative Reference Records (`workspace/bundle/references/`') &&
+        refHydratedBundleCtx.includes('https://standards.example.org/space/ISO-24113') &&
+        refHydratedBundleCtx.includes('Formal identifier `ISO 24113`') &&
+        refHydratedBundleCtx.indexOf('[/references/zzz-orbital-debris.md]') !== -1 &&
+        refHydratedBundleCtx.indexOf('### [/references/zzz-orbital-debris.md]') <
+          refHydratedBundleCtx.indexOf('### [/references/aaa-unrelated-agro.md]'),
+      `loadWorkspaceLayers hydrates workspace/bundle/references/*.md with canonical sources and topic-relevance ranking while keeping workspace/bundle/research/*.md in Progressive Disclosure summary form`
     );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });

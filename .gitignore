@@ -12,6 +12,7 @@ node_modules/
 .sessions/
 .snapshots/
 .icm/
+.cache/
 
 # User-generated workspace runs and stage outputs (private research & scripts)
 workspace/runs/
