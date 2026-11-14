@@ -98,6 +98,8 @@ export function loadDotEnvIfExists(
 loadDotEnvIfExists();
 
 export const GEMINI_4_ARGON_MODEL = 'gemini-4-argon' as const;
+export const GEMINI_NANO_BANANA_MODEL = 'gemini-nano-banana-2.1' as const;
+export const GEMINI_FLASH_TTS_MODEL = 'gemini-3.8-flash-tts' as const;
 const INTERACTIONS_API_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const INTERACTIONS_API_REVISION = '2026-05-20';
 
@@ -131,8 +133,13 @@ export interface StagePromptContract {
   thinkingLevel: ThinkingLevel;
   includeThoughts: boolean;
   useGoogleSearch: boolean;
-  outputFormat: 'text' | 'json';
+  outputFormat: 'text' | 'json' | 'image' | 'audio';
   outputJsonSchema?: Record<string, any>;
+  aspectRatio?: string;
+  imageSize?: string;
+  voice?: string;
+  audioMimeType?: string;
+  sampleRate?: number;
   template: string;
 }
 
@@ -282,6 +289,12 @@ export function loadStagePromptContract(
   const frontmatter = match[1];
   const template = match[2].trim();
 
+  const modelMatch = frontmatter.match(/^\s*model:\s*([^\r\n#]+)/m);
+  const rawModel = modelMatch?.[1]
+    ?.trim()
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/^googleai\//i, '');
+
   const maxTokensMatch = frontmatter.match(/maxOutputTokens:\s*(\d+)/);
   const maxOutputTokens = maxTokensMatch ? parseInt(maxTokensMatch[1], 10) : 32768;
 
@@ -295,9 +308,43 @@ export function loadStagePromptContract(
 
   const useGoogleSearch = /googleSearch|google_search/i.test(frontmatter);
 
-  const formatMatch = frontmatter.match(/output:\s*[\r\n]+\s*format:\s*(json|text)/i);
-  const outputFormat: 'text' | 'json' =
-    formatMatch?.[1]?.toLowerCase() === 'json' ? 'json' : 'text';
+  const formatMatch = frontmatter.match(
+    /(?:output:\s*[\r\n]+(?:[ \t]+[^\r\n]+\r?\n)*?[ \t]+format:\s*|(?:^|\r?\n)\s*format:\s*)(json|text|image|audio)\b/i
+  );
+  const rawFormat = formatMatch?.[1]?.toLowerCase();
+  const outputFormat: 'text' | 'json' | 'image' | 'audio' =
+    rawFormat === 'json' || rawFormat === 'image' || rawFormat === 'audio' ? rawFormat : 'text';
+
+  const resolvedModel =
+    rawModel ||
+    (outputFormat === 'image'
+      ? GEMINI_NANO_BANANA_MODEL
+      : outputFormat === 'audio'
+        ? GEMINI_FLASH_TTS_MODEL
+        : GEMINI_4_ARGON_MODEL);
+
+  const aspectRatioMatch = frontmatter.match(/(?:aspectRatio|aspect_ratio):\s*([^\r\n#]+)/i);
+  const aspectRatio = aspectRatioMatch?.[1]?.trim().replace(/^['"]|['"]$/g, '');
+
+  const imageSizeMatch = frontmatter.match(/(?:imageSize|image_size):\s*([^\r\n#]+)/i);
+  const imageSize = imageSizeMatch?.[1]?.trim().replace(/^['"]|['"]$/g, '');
+
+  const voiceMatch = frontmatter.match(/(?:voiceName|voice_name|voice):\s*([^\r\n#]+)/i);
+  const voice = voiceMatch?.[1]?.trim().replace(/^['"]|['"]$/g, '');
+
+  const audioMimeMatch = frontmatter.match(
+    /(?:audioMimeType|audio_mime_type):\s*([^\r\n#]+)/i
+  );
+  const genericMimeMatch =
+    outputFormat === 'audio'
+      ? frontmatter.match(/(?:mimeType|mime_type):\s*([^\r\n#]+)/i)
+      : null;
+  const audioMimeType = (audioMimeMatch?.[1] || genericMimeMatch?.[1])
+    ?.trim()
+    .replace(/^['"]|['"]$/g, '');
+
+  const sampleRateMatch = frontmatter.match(/(?:sampleRate|sample_rate):\s*(\d+)/i);
+  const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : undefined;
 
   let outputJsonSchema: Record<string, any> | undefined;
   if (outputFormat === 'json') {
@@ -309,13 +356,18 @@ export function loadStagePromptContract(
 
   return {
     name: promptName,
-    model: GEMINI_4_ARGON_MODEL,
+    model: resolvedModel,
     maxOutputTokens,
     thinkingLevel,
     includeThoughts,
     useGoogleSearch,
     outputFormat,
     outputJsonSchema,
+    ...(aspectRatio ? { aspectRatio } : {}),
+    ...(imageSize ? { imageSize } : {}),
+    ...(voice ? { voice } : {}),
+    ...(audioMimeType ? { audioMimeType } : {}),
+    ...(sampleRate ? { sampleRate } : {}),
     template,
   };
 }
@@ -870,6 +922,475 @@ async function executeWithRetryAndFallback(
           thinkingLevel: fallbackThinkingLevel,
         });
         return { result: fallbackResult, usedThinkingLevel: fallbackThinkingLevel };
+      }
+      throw err;
+    }
+  }
+}
+
+/**
+ * Inspects binary magic bytes first (and declared MIME type as fallback) so saved media filenames
+ * and HTML `data:` URIs always match the true binary payload (e.g., JPEG `\xFF\xD8\xFF` -> `.jpg` / `image/jpeg`).
+ */
+export function detectMediaMimeAndExtension(
+  buffer: Buffer,
+  declaredMime?: string,
+  fallbackKind: 'image' | 'audio' = 'image'
+): { mimeType: string; ext: string } {
+  if (
+    buffer.length >= 3 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff
+  ) {
+    return { mimeType: 'image/jpeg', ext: '.jpg' };
+  }
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) {
+    return { mimeType: 'image/png', ext: '.png' };
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return { mimeType: 'image/webp', ext: '.webp' };
+  }
+  if (
+    buffer.length >= 6 &&
+    (buffer.subarray(0, 6).toString('ascii') === 'GIF87a' ||
+      buffer.subarray(0, 6).toString('ascii') === 'GIF89a')
+  ) {
+    return { mimeType: 'image/gif', ext: '.gif' };
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WAVE'
+  ) {
+    return { mimeType: 'audio/wav', ext: '.wav' };
+  }
+  if (buffer.length >= 4 && buffer.subarray(0, 4).toString('ascii') === 'OggS') {
+    return { mimeType: 'audio/ogg', ext: '.ogg' };
+  }
+  if (
+    buffer.length >= 3 &&
+    (buffer.subarray(0, 3).toString('ascii') === 'ID3' ||
+      (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0))
+  ) {
+    return { mimeType: 'audio/mpeg', ext: '.mp3' };
+  }
+
+  const normMime = String(declaredMime || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  if (normMime === 'image/jpeg' || normMime === 'image/jpg') {
+    return { mimeType: 'image/jpeg', ext: '.jpg' };
+  }
+  if (normMime === 'image/png') {
+    return { mimeType: 'image/png', ext: '.png' };
+  }
+  if (normMime === 'image/webp') {
+    return { mimeType: 'image/webp', ext: '.webp' };
+  }
+  if (normMime === 'image/gif') {
+    return { mimeType: 'image/gif', ext: '.gif' };
+  }
+  if (normMime === 'audio/wav' || normMime === 'audio/x-wav' || normMime === 'audio/wave') {
+    return { mimeType: 'audio/wav', ext: '.wav' };
+  }
+  if (normMime === 'audio/mp3' || normMime === 'audio/mpeg') {
+    return { mimeType: 'audio/mpeg', ext: '.mp3' };
+  }
+  if (normMime === 'audio/ogg' || normMime === 'audio/ogg_opus' || normMime === 'audio/opus') {
+    return { mimeType: 'audio/ogg', ext: '.ogg' };
+  }
+  if (normMime === 'audio/l16' || normMime === 'audio/pcm') {
+    return { mimeType: 'audio/l16', ext: '.pcm' };
+  }
+
+  return fallbackKind === 'audio'
+    ? { mimeType: 'audio/wav', ext: '.wav' }
+    : { mimeType: 'image/jpeg', ext: '.jpg' };
+}
+
+/**
+ * Wraps raw 16-bit little-endian mono PCM bytes (`audio/l16`) in a standard 44-byte RIFF WAVE header
+ * so HTML5 `<audio>` elements can play raw PCM responses natively without external codecs.
+ */
+export function wrapPcm16InWavHeader(
+  pcmBuffer: Buffer,
+  sampleRate: number = 24000,
+  numChannels: number = 1
+): Buffer {
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const dataSize = pcmBuffer.length;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'ascii');
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8, 'ascii');
+  header.write('fmt ', 12, 'ascii');
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM = 1
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36, 'ascii');
+  header.writeUInt32LE(dataSize, 40);
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+export interface NanoBananaImageRequestOptions {
+  promptText: string;
+  model?: string;
+  aspectRatio?: string;
+  imageSize?: string;
+  store?: boolean;
+  maxRetries?: number;
+}
+
+export interface NanoBananaImageResult {
+  id?: string;
+  status?: string;
+  imageBuffer: Buffer;
+  mimeType: string;
+  ext: string;
+  text: string;
+  thoughts: string[];
+  usage: InteractionUsageTelemetry;
+}
+
+/**
+ * Direct zero-dependency client for Gemini Nano Banana 2.1 (`gemini-nano-banana-2.1`) via
+ * `POST /v1beta/interactions` (`response_format: { type: "image" }`).
+ */
+export async function generateNanoBananaImageInteraction(
+  options: NanoBananaImageRequestOptions
+): Promise<NanoBananaImageResult> {
+  const apiKey = getApiKey();
+  const resolvedModel = (options.model || GEMINI_NANO_BANANA_MODEL).replace(/^googleai\//i, '');
+  const maxRetries = options.maxRetries ?? 2;
+
+  const requestBody: Record<string, any> = {
+    model: resolvedModel,
+    input: [
+      {
+        type: 'user_input',
+        content: [{ type: 'text', text: options.promptText }],
+      },
+    ],
+    response_format: {
+      type: 'image',
+      ...(options.aspectRatio ? { aspect_ratio: options.aspectRatio } : {}),
+      ...(options.imageSize ? { image_size: options.imageSize } : {}),
+    },
+    store: Boolean(options.store),
+  };
+
+  let attempt = 0;
+  while (true) {
+    try {
+      const response = await fetch(INTERACTIONS_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Api-Revision': INTERACTIONS_API_REVISION,
+          'x-goog-api-key': apiKey,
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        const error: any = new Error(
+          `Interactions Image API Error [${response.status} ${response.statusText}]: ${errText}`
+        );
+        error.statusCode = response.status;
+        throw error;
+      }
+
+      const interaction = (await response.json()) as Record<string, any>;
+      if (interaction.status === 'failed') {
+        const details = (interaction.errors ?? [])
+          .map((e: any) => `${e.code ? `[${e.code}] ` : ''}${e.message || ''}`.trim())
+          .filter(Boolean)
+          .join('; ');
+        const err: any = new Error(
+          `Interactions Image generation failed: ${details || 'Unknown error'}`
+        );
+        err.status = interaction.errors?.[0]?.code;
+        throw err;
+      }
+
+      let rawBase64 = '';
+      let rawMime = '';
+      let textOut = '';
+      const thoughts: string[] = [];
+
+      if (Array.isArray(interaction.steps)) {
+        for (const step of interaction.steps) {
+          if (step?.type === 'thought' && Array.isArray(step.summary)) {
+            for (const sPart of step.summary) {
+              const t = String(typeof sPart === 'string' ? sPart : sPart?.text || '').trim();
+              if (t && !thoughts.includes(t)) thoughts.push(t);
+            }
+          }
+          if (step?.type === 'model_output' && Array.isArray(step.content)) {
+            for (const part of step.content) {
+              if (part?.type === 'image' && typeof part.data === 'string' && part.data.length > 0) {
+                rawBase64 = part.data;
+                rawMime = String(part.mime_type || part.mimeType || '');
+              } else if (part?.type === 'text' && typeof part.text === 'string') {
+                textOut += part.text;
+              }
+            }
+          }
+        }
+      }
+
+      if (!rawBase64 && typeof interaction.output_image?.data === 'string') {
+        rawBase64 = interaction.output_image.data;
+        rawMime = String(interaction.output_image.mime_type || interaction.output_image.mimeType || '');
+      }
+      if (!rawBase64 && Array.isArray(interaction.outputs)) {
+        const imgOut = interaction.outputs.find(
+          (o: any) => o?.type === 'image' && typeof o.data === 'string'
+        );
+        if (imgOut) {
+          rawBase64 = imgOut.data;
+          rawMime = String(imgOut.mime_type || imgOut.mimeType || '');
+        }
+      }
+
+      if (!rawBase64) {
+        throw new Error(
+          `Interactions Image API (${resolvedModel}) returned no image data part in steps[].content[].`
+        );
+      }
+
+      const imageBuffer = Buffer.from(rawBase64, 'base64');
+      const { mimeType, ext } = detectMediaMimeAndExtension(imageBuffer, rawMime, 'image');
+      const rawUsage = interaction.usage || {};
+      const usage: InteractionUsageTelemetry = {
+        inputTokens: rawUsage.total_input_tokens ?? 0,
+        thoughtsTokens: rawUsage.total_thought_tokens ?? 0,
+        outputTokens: rawUsage.total_output_tokens ?? 0,
+        totalTokens: rawUsage.total_tokens ?? 0,
+      };
+
+      return {
+        id: interaction.id,
+        status: interaction.status,
+        imageBuffer,
+        mimeType,
+        ext,
+        text: textOut.trim(),
+        thoughts,
+        usage,
+      };
+    } catch (err: any) {
+      if (attempt < maxRetries && isRetryableError(err)) {
+        attempt++;
+        console.warn(
+          `[Retry ${attempt}/${maxRetries}] Transient error on ${resolvedModel}: ${err.message}. Retrying...`
+        );
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+export interface FlashTtsAudioRequestOptions {
+  transcriptText: string;
+  styleInstruction?: string;
+  model?: string;
+  voice?: string;
+  audioMimeType?: string;
+  sampleRate?: number;
+  store?: boolean;
+  maxRetries?: number;
+}
+
+export interface FlashTtsAudioResult {
+  id?: string;
+  status?: string;
+  audioBuffer: Buffer;
+  mimeType: string;
+  ext: string;
+  thoughts: string[];
+  usage: InteractionUsageTelemetry;
+}
+
+/**
+ * Direct zero-dependency client for Gemini 3.8 Flash TTS (`gemini-3.8-flash-tts`) via
+ * `POST /v1beta/interactions` (`response_format: { type: "audio" }`, `speech_config: [{ voice }]`).
+ */
+export async function generateFlashTtsAudioInteraction(
+  options: FlashTtsAudioRequestOptions
+): Promise<FlashTtsAudioResult> {
+  const apiKey = getApiKey();
+  const resolvedModel = (options.model || GEMINI_FLASH_TTS_MODEL).replace(/^googleai\//i, '');
+  const resolvedVoice = (options.voice || 'Kore').trim() || 'Kore';
+  const maxRetries = options.maxRetries ?? 2;
+
+  const textPart: Record<string, any> = {
+    type: 'text',
+    text: options.transcriptText,
+  };
+  if (options.styleInstruction && options.styleInstruction.trim()) {
+    textPart.annotations = [
+      {
+        type: 'speech_metadata',
+        style: options.styleInstruction.trim(),
+      },
+    ];
+  }
+
+  const requestBody: Record<string, any> = {
+    model: resolvedModel,
+    input: [
+      {
+        type: 'user_input',
+        content: [textPart],
+      },
+    ],
+    response_format: {
+      type: 'audio',
+      ...(options.audioMimeType ? { mime_type: options.audioMimeType } : {}),
+      ...(options.sampleRate ? { sample_rate: options.sampleRate } : {}),
+    },
+    generation_config: {
+      speech_config: [{ voice: resolvedVoice }],
+    },
+    store: Boolean(options.store),
+  };
+
+  let attempt = 0;
+  while (true) {
+    try {
+      const response = await fetch(INTERACTIONS_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Api-Revision': INTERACTIONS_API_REVISION,
+          'x-goog-api-key': apiKey,
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        const error: any = new Error(
+          `Interactions TTS API Error [${response.status} ${response.statusText}]: ${errText}`
+        );
+        error.statusCode = response.status;
+        throw error;
+      }
+
+      const interaction = (await response.json()) as Record<string, any>;
+      if (interaction.status === 'failed') {
+        const details = (interaction.errors ?? [])
+          .map((e: any) => `${e.code ? `[${e.code}] ` : ''}${e.message || ''}`.trim())
+          .filter(Boolean)
+          .join('; ');
+        const err: any = new Error(
+          `Interactions TTS generation failed: ${details || 'Unknown error'}`
+        );
+        err.status = interaction.errors?.[0]?.code;
+        throw err;
+      }
+
+      let rawBase64 = '';
+      let rawMime = '';
+      const thoughts: string[] = [];
+
+      if (Array.isArray(interaction.steps)) {
+        for (const step of interaction.steps) {
+          if (step?.type === 'thought' && Array.isArray(step.summary)) {
+            for (const sPart of step.summary) {
+              const t = String(typeof sPart === 'string' ? sPart : sPart?.text || '').trim();
+              if (t && !thoughts.includes(t)) thoughts.push(t);
+            }
+          }
+          if (step?.type === 'model_output' && Array.isArray(step.content)) {
+            for (const part of step.content) {
+              if (part?.type === 'audio' && typeof part.data === 'string' && part.data.length > 0) {
+                rawBase64 = part.data;
+                rawMime = String(part.mime_type || part.mimeType || '');
+              }
+            }
+          }
+        }
+      }
+
+      if (!rawBase64 && typeof interaction.output_audio?.data === 'string') {
+        rawBase64 = interaction.output_audio.data;
+        rawMime = String(interaction.output_audio.mime_type || interaction.output_audio.mimeType || '');
+      }
+      if (!rawBase64 && Array.isArray(interaction.outputs)) {
+        const audOut = interaction.outputs.find(
+          (o: any) => o?.type === 'audio' && typeof o.data === 'string'
+        );
+        if (audOut) {
+          rawBase64 = audOut.data;
+          rawMime = String(audOut.mime_type || audOut.mimeType || '');
+        }
+      }
+
+      if (!rawBase64) {
+        throw new Error(
+          `Interactions TTS API (${resolvedModel}) returned no audio data part in steps[].content[].`
+        );
+      }
+
+      let audioBuffer: Buffer = Buffer.from(rawBase64, 'base64');
+      let detected = detectMediaMimeAndExtension(audioBuffer, rawMime || options.audioMimeType, 'audio');
+      if (detected.mimeType === 'audio/l16') {
+        audioBuffer = wrapPcm16InWavHeader(audioBuffer, options.sampleRate || 24000, 1);
+        detected = { mimeType: 'audio/wav', ext: '.wav' };
+      }
+
+      const rawUsage = interaction.usage || {};
+      const usage: InteractionUsageTelemetry = {
+        inputTokens: rawUsage.total_input_tokens ?? 0,
+        thoughtsTokens: rawUsage.total_thought_tokens ?? 0,
+        outputTokens: rawUsage.total_output_tokens ?? 0,
+        totalTokens: rawUsage.total_tokens ?? 0,
+      };
+
+      return {
+        id: interaction.id,
+        status: interaction.status,
+        audioBuffer,
+        mimeType: detected.mimeType,
+        ext: detected.ext,
+        thoughts,
+        usage,
+      };
+    } catch (err: any) {
+      if (attempt < maxRetries && isRetryableError(err)) {
+        attempt++;
+        console.warn(
+          `[Retry ${attempt}/${maxRetries}] Transient error on ${resolvedModel}: ${err.message}. Retrying...`
+        );
+        await new Promise((r) => setTimeout(r, 1500 * attempt));
+        continue;
       }
       throw err;
     }
@@ -6972,7 +7493,7 @@ export async function runStage1Flow(input: {
       maxOutputTokens: contract.maxOutputTokens,
       includeThoughts: contract.includeThoughts,
       useGoogleSearch: contract.useGoogleSearch,
-      outputFormat: contract.outputFormat,
+      outputFormat: contract.outputFormat === 'json' ? 'json' : 'text',
     });
     return {
       success: true,
@@ -7005,7 +7526,7 @@ export async function runStage1Flow(input: {
       maxOutputTokens: contract.maxOutputTokens,
       includeThoughts: contract.includeThoughts,
       useGoogleSearch: contract.useGoogleSearch,
-      outputFormat: contract.outputFormat,
+      outputFormat: contract.outputFormat === 'json' ? 'json' : 'text',
       onThought: (thoughtStep, allThoughts) => {
         const previewSnippet = thoughtStep.replace(/\s+/g, ' ').slice(0, 120);
         console.log(`[Stage 1 Thought]: ${previewSnippet}...`);
@@ -7658,7 +8179,7 @@ export async function runStage2Flow(input: {
       maxOutputTokens: contract.maxOutputTokens,
       includeThoughts: contract.includeThoughts,
       useGoogleSearch: contract.useGoogleSearch,
-      outputFormat: contract.outputFormat,
+      outputFormat: contract.outputFormat === 'json' ? 'json' : 'text',
       outputJsonSchema: contract.outputJsonSchema,
     });
     return {
@@ -7677,7 +8198,7 @@ export async function runStage2Flow(input: {
       maxOutputTokens: contract.maxOutputTokens,
       includeThoughts: contract.includeThoughts,
       useGoogleSearch: contract.useGoogleSearch,
-      outputFormat: contract.outputFormat,
+      outputFormat: contract.outputFormat === 'json' ? 'json' : 'text',
       outputJsonSchema: contract.outputJsonSchema,
       onThought: (thoughtStep) => {
         const previewSnippet = thoughtStep.replace(/\s+/g, ' ').slice(0, 120);
@@ -7735,6 +8256,891 @@ export async function runStage2Flow(input: {
     outputPath: scriptOutputTarget,
     trust_tier: trustTier,
     is_stale: stale,
+  };
+}
+
+/**
+ * Resolves a requested `<runId>` (exact, suffix, or substring match) or automatically selects
+ * the latest run in `workspace/runs/` that has a completed Stage 2 `script_draft.json`.
+ */
+export function resolveDownstreamRunId(workspaceRoot: string, requestedRunId?: string): string {
+  const workspacePath = path.resolve(workspaceRoot || './workspace');
+  const runsRoot = path.join(workspacePath, 'runs');
+  const trimmed = String(requestedRunId || '').trim();
+  if (trimmed) {
+    const exactDir = path.join(runsRoot, trimmed);
+    if (fs.existsSync(exactDir)) return trimmed;
+    if (fs.existsSync(runsRoot)) {
+      const matched = fs
+        .readdirSync(runsRoot, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && d.name !== '_dry_run')
+        .map((d) => d.name)
+        .find((name) => name.endsWith(`-${trimmed}`) || name.includes(trimmed));
+      if (matched) return matched;
+    }
+    return trimmed;
+  }
+
+  if (!fs.existsSync(runsRoot)) {
+    throw new Error(`No workspace/runs directory found at ${runsRoot}`);
+  }
+  const candidates = fs
+    .readdirSync(runsRoot, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && d.name !== '_dry_run')
+    .map((d) => {
+      const fullPath = path.join(runsRoot, d.name);
+      const hasStage2 = fs.existsSync(
+        path.join(fullPath, 'stages', '02_script', 'output', 'script_draft.json')
+      );
+      const tsMatch = d.name.match(/-(\d{10,})$/);
+      const sortKey = tsMatch ? Number(tsMatch[1]) : fs.statSync(fullPath).mtimeMs;
+      return { name: d.name, hasStage2, sortKey };
+    })
+    .filter((c) => c.hasStage2)
+    .sort((a, b) => b.sortKey - a.sortKey || b.name.localeCompare(a.name));
+
+  if (candidates.length === 0) {
+    throw new Error(
+      `No completed Stage 2 run (stages/02_script/output/script_draft.json) found in ${runsRoot}. Run Stage 2 first via 'npm run cli:stage2 -- <runId>'.`
+    );
+  }
+  return candidates[0].name;
+}
+
+function stripMarkdownForTts(text: string): string {
+  return sanitizeSpokenScript(text)
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*\*(?!\s)([^*]*?\S)\*\*\*/g, '$1')
+    .replace(/\*\*(?!\s)([^*]*?\S)\*\*/g, '$1')
+    .replace(/\*(?!\s)([^*]*?\S)\*/g, '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+export interface Stage3VisualManifestItem {
+  slotId: string;
+  moduleNumber: number;
+  title: string;
+  caption: string;
+  fileName: string;
+  relativePath: string;
+  mimeType: string;
+  bytes: number;
+  aspectRatio: string;
+  imageSize: string;
+}
+
+/**
+ * 2b. Optional Phase 4 Stage 3 Visual Synthesis Runner (`prompts/03_visuals.md` -> `gemini-nano-banana-2.1`).
+ * Generates `overview` + `module_XX` illustrations in `stages/03_visuals/output/` with true binary
+ * MIME/extension fidelity (`.jpg` / `.png` / `.webp`), writes `visuals_manifest.json` + `thinking_trace.md`,
+ * updates `meta.stage3Telemetry`, and automatically hydrates `a2ui.html` & `a2ui_studio.html`.
+ */
+export async function runStage3Flow(input: {
+  workspaceRoot: string;
+  runId?: string;
+  promptName?: string;
+  promptDir?: string;
+  concurrency?: number;
+  dryRun?: boolean;
+  artifactDir?: string;
+  openBrowser?: boolean;
+}): Promise<{
+  success: boolean;
+  runId: string;
+  outputDir: string;
+  slotCount: number;
+  manifestPath?: string;
+  a2uiHtmlPath?: string;
+  artifactHtmlPath?: string;
+  items: Stage3VisualManifestItem[];
+  usage: InteractionUsageTelemetry;
+  dryRun?: boolean;
+}> {
+  const workspacePath = path.resolve(input.workspaceRoot || './workspace');
+  const resolvedRunId = resolveDownstreamRunId(workspacePath, input.runId);
+  const runDir = path.join(workspacePath, 'runs', resolvedRunId);
+  const stage2Path = path.join(runDir, 'stages', '02_script', 'output', 'script_draft.json');
+  if (!fs.existsSync(stage2Path)) {
+    throw new Error(
+      `Stage 2 artifact not found at ${stage2Path}. Run 'npm run cli:stage2 -- ${resolvedRunId}' before Stage 3.`
+    );
+  }
+
+  const promptName = input.promptName || '03_visuals';
+  const contract = loadStagePromptContract(promptName, input.promptDir || './prompts');
+  const resolvedModel = contract.model || GEMINI_NANO_BANANA_MODEL;
+  const aspectRatio = contract.aspectRatio || '16:9';
+  const imageSize = contract.imageSize || '1K';
+  const concurrency = Math.max(1, Math.min(4, input.concurrency ?? 2));
+
+  const rawStage2 = JSON.parse(fs.readFileSync(stage2Path, 'utf-8')) as Record<string, unknown>;
+  const stage2Norm = normalizeStage2ForA2ui(rawStage2, resolvedRunId);
+  const isNo = detectIcmLanguage(JSON.stringify(rawStage2)) === 'no';
+  const isAnalysis = detectIcmDomainMode(rawStage2, stage2Norm.quiz.length, stage2Norm.title) === 'analysis';
+  const { globalIdentity, workspaceContext, toneGuide } = loadWorkspaceLayers(workspacePath);
+
+  interface VisualSlotSpec {
+    slotId: string;
+    moduleNumber: number;
+    itemTitle: string;
+    subtitleOrBasis: string;
+    sceneFocus: string;
+    narration: string;
+    slideCues: string;
+    actionItem: string;
+    caption: string;
+    promptText: string;
+  }
+
+  const overviewFocus =
+    stage2Norm.overviewVisualPrompt ||
+    [stage2Norm.subtitle, ...stage2Norm.highlights.slice(0, 3)].filter(Boolean).join(' — ') ||
+    stage2Norm.scriptBody.slice(0, 360);
+  const overviewSlideCues = stage2Norm.highlights
+    .slice(0, 4)
+    .map((h) => `- ${h}`)
+    .join('\n');
+
+  const rawSlots: Omit<VisualSlotSpec, 'promptText'>[] = [
+    {
+      slotId: 'overview',
+      moduleNumber: 0,
+      itemTitle: stage2Norm.title,
+      subtitleOrBasis: stage2Norm.subtitle,
+      sceneFocus: overviewFocus,
+      narration: stage2Norm.scriptBody.slice(0, 600),
+      slideCues: overviewSlideCues,
+      actionItem: '',
+      caption: stage2Norm.title,
+    },
+    ...stage2Norm.modules.map((mod, idx) => {
+      const slotNum = idx + 1;
+      const slotId = `module_${String(slotNum).padStart(2, '0')}`;
+      const modFocus =
+        mod.visualPrompt ||
+        [mod.subtitleOrBasis, ...mod.bullets.slice(0, 3), mod.actionItem]
+          .filter(Boolean)
+          .join(' — ') ||
+        mod.narration.slice(0, 360);
+      const modCues = mod.bullets.map((b) => `- ${b}`).join('\n');
+      const itemPrefix = isNo
+        ? isAnalysis
+          ? 'Pilar'
+          : 'Modul'
+        : isAnalysis
+          ? 'Pillar'
+          : 'Module';
+      return {
+        slotId,
+        moduleNumber: mod.number || slotNum,
+        itemTitle: mod.title,
+        subtitleOrBasis: mod.subtitleOrBasis,
+        sceneFocus: modFocus,
+        narration: mod.narration.slice(0, 600),
+        slideCues: modCues,
+        actionItem: mod.actionItem,
+        caption: `${itemPrefix} ${mod.number || slotNum}: ${mod.title}`,
+      };
+    }),
+  ];
+
+  const slots: VisualSlotSpec[] = rawSlots.map((slot) => {
+    const fallbackTemplate = [
+      'Generate a clean, professional editorial illustration without embedded text labels.',
+      'Course / Deliverable: {{courseTitle}}',
+      'Slot: {{visualSlot}} — {{itemTitle}}',
+      '{{#if sceneFocus}}Scene & Visual Focus: {{sceneFocus}}{{/if}}',
+      '{{#if slideCues}}Key Visual Elements:\n{{slideCues}}{{/if}}',
+      '{{#if actionItem}}Practical Action Context: {{actionItem}}{{/if}}',
+    ].join('\n\n');
+    const promptText = renderPromptTemplate(contract.template || fallbackTemplate, {
+      courseTitle: stage2Norm.title,
+      title: stage2Norm.title,
+      subtitle: stage2Norm.subtitle,
+      visualSlot: slot.slotId,
+      slotId: slot.slotId,
+      slotKind: slot.slotId === 'overview' ? 'overview' : 'module',
+      moduleNumber: String(slot.moduleNumber),
+      slotTitle: slot.itemTitle,
+      itemTitle: slot.itemTitle,
+      moduleTitle: slot.itemTitle,
+      subtitleOrBasis: slot.subtitleOrBasis,
+      visualPrompt: slot.sceneFocus,
+      sceneFocus: slot.sceneFocus,
+      visualBrief: slot.sceneFocus,
+      narration: slot.narration,
+      slideCues: slot.slideCues,
+      bullets: slot.slideCues,
+      actionItem: slot.actionItem,
+      targetAudience: stage2Norm.targetAudience,
+      voiceGuide: toneGuide,
+      globalIdentity,
+      workspaceContext,
+    });
+    return { ...slot, promptText };
+  });
+
+  const stage3Dir = path.join(runDir, 'stages', '03_visuals');
+  const stage3OutDir = path.join(stage3Dir, 'output');
+  const stage3InputPath = path.join(stage3Dir, 'input', 'prompt_assembled.md');
+  fs.mkdirSync(path.dirname(stage3InputPath), { recursive: true });
+  fs.mkdirSync(stage3OutDir, { recursive: true });
+
+  const assembledDoc = [
+    '---',
+    `stage: 03_visuals`,
+    `model: ${resolvedModel}`,
+    `outputFormat: image`,
+    `aspectRatio: "${aspectRatio}"`,
+    `imageSize: "${imageSize}"`,
+    `slotCount: ${slots.length}`,
+    `assembledAt: ${new Date().toISOString()}`,
+    '---',
+    '',
+    ...slots.flatMap((s) => [
+      `## Slot: \`${s.slotId}\` — ${s.itemTitle}`,
+      '',
+      s.promptText,
+      '',
+      '---',
+      '',
+    ]),
+  ].join('\n');
+  fs.writeFileSync(stage3InputPath, assembledDoc, 'utf-8');
+
+  console.log(
+    `--- Executing Stage 3: Visual Synthesis for Run: ${resolvedRunId} [model: ${resolvedModel}, aspectRatio: ${aspectRatio}, imageSize: ${imageSize}, slots: ${slots.length}${input.dryRun ? ', DRY-RUN' : ''}] ---`
+  );
+
+  if (input.dryRun) {
+    const metaPath = path.join(runDir, 'meta.json');
+    try {
+      const meta: Record<string, any> = fs.existsSync(metaPath)
+        ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+        : { runId: resolvedRunId, createdAt: new Date().toISOString() };
+      meta.stage3DryRun = {
+        model: resolvedModel,
+        aspectRatio,
+        imageSize,
+        slotCount: slots.length,
+        assembledInputPath: stage3InputPath,
+      };
+      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    } catch {
+      // Ignore metadata update errors
+    }
+    const sampleBody = {
+      model: resolvedModel,
+      input: [
+        {
+          type: 'user_input',
+          content: [
+            {
+              type: 'text',
+              text: `[Slot 1/${slots.length} (${slots[0]?.slotId}): ${slots[0]?.promptText.length || 0} chars -> ${stage3InputPath}]`,
+            },
+          ],
+        },
+      ],
+      response_format: {
+        type: 'image',
+        aspect_ratio: aspectRatio,
+        image_size: imageSize,
+      },
+      store: false,
+    };
+    console.log(`[DRY-RUN] Stage: 03_visuals (${slots.length} image slot(s))`);
+    console.log(`[DRY-RUN] Assembled Stage 3 Prompts written to: ${stage3InputPath}`);
+    console.log(`[DRY-RUN] Would send ${slots.length}x POST ${INTERACTIONS_API_URL}`);
+    console.log(`[DRY-RUN] Sample Body:\n${JSON.stringify(sampleBody, null, 2)}`);
+    console.log(`[DRY-RUN] Network calls skipped. Zero tokens spent.`);
+    return {
+      success: true,
+      runId: resolvedRunId,
+      outputDir: stage3OutDir,
+      slotCount: slots.length,
+      items: [],
+      usage: { inputTokens: 0, thoughtsTokens: 0, outputTokens: 0, totalTokens: 0 },
+      dryRun: true,
+    };
+  }
+
+  const startTimeMs = Date.now();
+  const resultsByIdx: Array<{
+    item: Stage3VisualManifestItem;
+    thoughts: string[];
+    usage: InteractionUsageTelemetry;
+  }> = new Array(slots.length);
+
+  let nextIdx = 0;
+  const worker = async () => {
+    while (true) {
+      const idx = nextIdx++;
+      if (idx >= slots.length) break;
+      const slot = slots[idx];
+      console.log(
+        `[Stage 3 Visual ${idx + 1}/${slots.length}]: Generating ${slot.slotId} ("${slot.itemTitle}")...`
+      );
+      const imgRes = await generateNanoBananaImageInteraction({
+        promptText: slot.promptText,
+        model: resolvedModel,
+        aspectRatio,
+        imageSize,
+      });
+
+      // Remove any stale sibling image files for the same slot (e.g. `.png` vs `.jpg`)
+      for (const oldExt of ['.jpg', '.jpeg', '.png', '.webp', '.gif']) {
+        const oldPath = path.join(stage3OutDir, `${slot.slotId}${oldExt}`);
+        if (oldExt !== imgRes.ext && fs.existsSync(oldPath)) {
+          try {
+            fs.unlinkSync(oldPath);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
+      }
+
+      const fileName = `${slot.slotId}${imgRes.ext}`;
+      const outPath = path.join(stage3OutDir, fileName);
+      fs.writeFileSync(outPath, imgRes.imageBuffer);
+      console.log(
+        `[Stage 3 Visual ${idx + 1}/${slots.length}]: Saved ${fileName} (${imgRes.mimeType}, ${(imgRes.imageBuffer.length / 1024).toFixed(1)} KB, ${imgRes.usage.totalTokens} tokens)`
+      );
+
+      resultsByIdx[idx] = {
+        item: {
+          slotId: slot.slotId,
+          moduleNumber: slot.moduleNumber,
+          title: slot.itemTitle,
+          caption: slot.caption,
+          fileName,
+          relativePath: `./stages/03_visuals/output/${fileName}`,
+          mimeType: imgRes.mimeType,
+          bytes: imgRes.imageBuffer.length,
+          aspectRatio,
+          imageSize,
+        },
+        thoughts: imgRes.thoughts.map((t) => `[${slot.slotId}] ${t}`),
+        usage: imgRes.usage,
+      };
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, slots.length) }, () => worker())
+  );
+
+  const items = resultsByIdx.map((r) => r.item);
+  const allThoughts = resultsByIdx.flatMap((r) => r.thoughts);
+  const aggUsage: InteractionUsageTelemetry = resultsByIdx.reduce(
+    (acc, r) => ({
+      inputTokens: acc.inputTokens + r.usage.inputTokens,
+      thoughtsTokens: acc.thoughtsTokens + r.usage.thoughtsTokens,
+      outputTokens: acc.outputTokens + r.usage.outputTokens,
+      totalTokens: acc.totalTokens + r.usage.totalTokens,
+    }),
+    { inputTokens: 0, thoughtsTokens: 0, outputTokens: 0, totalTokens: 0 }
+  );
+  const durationMs = Date.now() - startTimeMs;
+
+  const manifestPath = path.join(stage3OutDir, 'visuals_manifest.json');
+  fs.writeFileSync(
+    manifestPath,
+    JSON.stringify(
+      {
+        stage: '03_visuals',
+        runId: resolvedRunId,
+        model: resolvedModel,
+        aspectRatio,
+        imageSize,
+        generatedAt: new Date().toISOString(),
+        items,
+      },
+      null,
+      2
+    ),
+    'utf-8'
+  );
+
+  const traceLines: string[] = [
+    `# 03_visuals — Multimodal Image Synthesis Trace`,
+    '',
+    `- **Model:** \`${resolvedModel}\``,
+    `- **Aspect Ratio / Size:** \`${aspectRatio}\` @ \`${imageSize}\``,
+    `- **Generated Assets:** ${items.length} (${items.map((it) => `\`${it.fileName}\``).join(', ')})`,
+    `- **Duration:** ${(durationMs / 1000).toFixed(1)}s`,
+    `- **Input Tokens:** ${aggUsage.inputTokens}`,
+    `- **Thinking Tokens:** ${aggUsage.thoughtsTokens}`,
+    `- **Output Tokens:** ${aggUsage.outputTokens}`,
+    `- **Total Tokens:** ${aggUsage.totalTokens}`,
+    '',
+    `## Reasoning Steps (${allThoughts.length})`,
+    '',
+    ...(allThoughts.length > 0
+      ? allThoughts.flatMap((t, idx) => [`### Step ${idx + 1}`, t, ''])
+      : ['_No reasoning summary steps emitted._']),
+  ];
+  fs.writeFileSync(path.join(stage3OutDir, 'thinking_trace.md'), traceLines.join('\n'), 'utf-8');
+
+  const metaPath = path.join(runDir, 'meta.json');
+  try {
+    const meta: Record<string, any> = fs.existsSync(metaPath)
+      ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+      : { runId: resolvedRunId, createdAt: new Date().toISOString() };
+    meta.stage3Telemetry = {
+      model: resolvedModel,
+      aspectRatio,
+      imageSize,
+      imageCount: items.length,
+      files: items.map((it) => it.fileName),
+      inputTokens: aggUsage.inputTokens,
+      thoughtsTokens: aggUsage.thoughtsTokens,
+      outputTokens: aggUsage.outputTokens,
+      totalTokens: aggUsage.totalTokens,
+      durationMs,
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+  } catch {
+    // Ignore meta update errors
+  }
+
+  console.log(
+    `[Stage 3 Telemetry]: images=${items.length}, input=${aggUsage.inputTokens}, thoughts=${aggUsage.thoughtsTokens}, output=${aggUsage.outputTokens}, total=${aggUsage.totalTokens} tokens (${(durationMs / 1000).toFixed(1)}s)`
+  );
+
+  let a2uiHtmlPath: string | undefined;
+  let artifactHtmlPath: string | undefined;
+  try {
+    const a2uiRes = generateA2uiSurface(resolvedRunId, {
+      workspaceRoot: workspacePath,
+      artifactDir: input.artifactDir,
+      openBrowser: input.openBrowser,
+    });
+    a2uiHtmlPath = a2uiRes.htmlOutputPath;
+    artifactHtmlPath = a2uiRes.artifactHtmlPath;
+    console.log(
+      `[Stage 3 A2UI Studio Hydrated]: ${a2uiRes.htmlOutputPath}${a2uiRes.artifactHtmlPath ? ` (artifact: ${a2uiRes.artifactHtmlPath})` : ''}`
+    );
+  } catch (err: any) {
+    console.warn(`[Stage 3 A2UI Warning]: ${err?.message || String(err)}`);
+  }
+
+  return {
+    success: true,
+    runId: resolvedRunId,
+    outputDir: stage3OutDir,
+    slotCount: slots.length,
+    manifestPath,
+    ...(a2uiHtmlPath ? { a2uiHtmlPath } : {}),
+    ...(artifactHtmlPath ? { artifactHtmlPath } : {}),
+    items,
+    usage: aggUsage,
+  };
+}
+
+export interface Stage4AudioManifestItem {
+  slotId: string;
+  moduleNumber: number;
+  title: string;
+  voice: string;
+  fileName: string;
+  relativePath: string;
+  mimeType: string;
+  bytes: number;
+  charCount: number;
+}
+
+/**
+ * 2c. Optional Phase 4 Stage 4 Studio Narration Runner (`prompts/04_audio.md` -> `gemini-3.8-flash-tts`).
+ * Synthesizes `overview` + `module_XX` studio voiceover tracks in `stages/04_audio/output/`, writes
+ * `audio_manifest.json` + `thinking_trace.md`, updates `meta.stage4Telemetry`, and automatically hydrates
+ * `SpeechPlayer` across `a2ui.html` & `a2ui_studio.html`.
+ */
+export async function runStage4Flow(input: {
+  workspaceRoot: string;
+  runId?: string;
+  promptName?: string;
+  promptDir?: string;
+  concurrency?: number;
+  dryRun?: boolean;
+  artifactDir?: string;
+  openBrowser?: boolean;
+}): Promise<{
+  success: boolean;
+  runId: string;
+  outputDir: string;
+  slotCount: number;
+  manifestPath?: string;
+  a2uiHtmlPath?: string;
+  artifactHtmlPath?: string;
+  items: Stage4AudioManifestItem[];
+  usage: InteractionUsageTelemetry;
+  dryRun?: boolean;
+}> {
+  const workspacePath = path.resolve(input.workspaceRoot || './workspace');
+  const resolvedRunId = resolveDownstreamRunId(workspacePath, input.runId);
+  const runDir = path.join(workspacePath, 'runs', resolvedRunId);
+  const stage2Path = path.join(runDir, 'stages', '02_script', 'output', 'script_draft.json');
+  if (!fs.existsSync(stage2Path)) {
+    throw new Error(
+      `Stage 2 artifact not found at ${stage2Path}. Run 'npm run cli:stage2 -- ${resolvedRunId}' before Stage 4.`
+    );
+  }
+
+  const promptName = input.promptName || '04_audio';
+  const contract = loadStagePromptContract(promptName, input.promptDir || './prompts');
+  const resolvedModel = contract.model || GEMINI_FLASH_TTS_MODEL;
+  const resolvedVoice = contract.voice || 'Kore';
+  const audioMimeType = contract.audioMimeType;
+  const sampleRate = contract.sampleRate;
+  const concurrency = Math.max(1, Math.min(4, input.concurrency ?? 2));
+
+  const rawStage2 = JSON.parse(fs.readFileSync(stage2Path, 'utf-8')) as Record<string, unknown>;
+  const stage2Norm = normalizeStage2ForA2ui(rawStage2, resolvedRunId);
+  const { globalIdentity, workspaceContext, toneGuide } = loadWorkspaceLayers(workspacePath);
+
+  interface AudioSlotSpec {
+    slotId: string;
+    moduleNumber: number;
+    itemTitle: string;
+    transcriptText: string;
+    styleInstruction: string;
+  }
+
+  const rawSlots: Array<{ slotId: string; moduleNumber: number; itemTitle: string; rawText: string }> =
+    [];
+  const overviewSpoken = stripMarkdownForTts(stage2Norm.spokenScript || stage2Norm.scriptBody);
+  if (overviewSpoken) {
+    rawSlots.push({
+      slotId: 'overview',
+      moduleNumber: 0,
+      itemTitle: stage2Norm.title,
+      rawText: overviewSpoken,
+    });
+  }
+  stage2Norm.modules.forEach((mod, idx) => {
+    const slotNum = idx + 1;
+    const slotId = `module_${String(slotNum).padStart(2, '0')}`;
+    const modSpoken = stripMarkdownForTts(mod.spokenNarration || mod.narration);
+    if (modSpoken) {
+      rawSlots.push({
+        slotId,
+        moduleNumber: mod.number || slotNum,
+        itemTitle: mod.title,
+        rawText: modSpoken,
+      });
+    }
+  });
+
+  if (rawSlots.length === 0) {
+    throw new Error(
+      `No spoken narration text found in ${stage2Path} to synthesize in Stage 4.`
+    );
+  }
+
+  const slots: AudioSlotSpec[] = rawSlots.map((slot) => {
+    const renderedStyle = contract.template
+      ? renderPromptTemplate(contract.template, {
+          courseTitle: stage2Norm.title,
+          title: stage2Norm.title,
+          subtitle: stage2Norm.subtitle,
+          audioSlot: slot.slotId,
+          slotId: slot.slotId,
+          slotKind: slot.slotId === 'overview' ? 'overview' : 'module',
+          moduleNumber: String(slot.moduleNumber),
+          slotTitle: slot.itemTitle,
+          itemTitle: slot.itemTitle,
+          moduleTitle: slot.itemTitle,
+          spokenText: '',
+          targetAudience: stage2Norm.targetAudience,
+          voiceGuide: toneGuide,
+          toneRules: toneGuide,
+          globalIdentity,
+          workspaceContext,
+        })
+      : '';
+    return {
+      slotId: slot.slotId,
+      moduleNumber: slot.moduleNumber,
+      itemTitle: slot.itemTitle,
+      transcriptText: slot.rawText,
+      styleInstruction: renderedStyle.trim(),
+    };
+  });
+
+  const stage4Dir = path.join(runDir, 'stages', '04_audio');
+  const stage4OutDir = path.join(stage4Dir, 'output');
+  const stage4InputPath = path.join(stage4Dir, 'input', 'prompt_assembled.md');
+  fs.mkdirSync(path.dirname(stage4InputPath), { recursive: true });
+  fs.mkdirSync(stage4OutDir, { recursive: true });
+
+  const assembledDoc = [
+    '---',
+    `stage: 04_audio`,
+    `model: ${resolvedModel}`,
+    `outputFormat: audio`,
+    `voice: "${resolvedVoice}"`,
+    ...(audioMimeType ? [`audioMimeType: "${audioMimeType}"`] : []),
+    ...(sampleRate ? [`sampleRate: ${sampleRate}`] : []),
+    `slotCount: ${slots.length}`,
+    `assembledAt: ${new Date().toISOString()}`,
+    '---',
+    '',
+    ...slots.flatMap((s) => [
+      `## Slot: \`${s.slotId}\` — ${s.itemTitle}`,
+      ...(s.styleInstruction ? ['', `**Speech Metadata Style:**`, '', `> ${s.styleInstruction.replace(/\r?\n/g, '\n> ')}`] : []),
+      '',
+      `**Transcript (${s.transcriptText.length} chars):**`,
+      '',
+      s.transcriptText,
+      '',
+      '---',
+      '',
+    ]),
+  ].join('\n');
+  fs.writeFileSync(stage4InputPath, assembledDoc, 'utf-8');
+
+  console.log(
+    `--- Executing Stage 4: Studio Narration for Run: ${resolvedRunId} [model: ${resolvedModel}, voice: ${resolvedVoice}, slots: ${slots.length}${input.dryRun ? ', DRY-RUN' : ''}] ---`
+  );
+
+  if (input.dryRun) {
+    const metaPath = path.join(runDir, 'meta.json');
+    try {
+      const meta: Record<string, any> = fs.existsSync(metaPath)
+        ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+        : { runId: resolvedRunId, createdAt: new Date().toISOString() };
+      meta.stage4DryRun = {
+        model: resolvedModel,
+        voice: resolvedVoice,
+        ...(audioMimeType ? { audioMimeType } : {}),
+        ...(sampleRate ? { sampleRate } : {}),
+        slotCount: slots.length,
+        assembledInputPath: stage4InputPath,
+      };
+      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+    } catch {
+      // Ignore metadata update errors
+    }
+    const sampleBody = {
+      model: resolvedModel,
+      input: [
+        {
+          type: 'user_input',
+          content: [
+            {
+              type: 'text',
+              text: `[Slot 1/${slots.length} (${slots[0]?.slotId}): ${slots[0]?.transcriptText.length || 0} chars -> ${stage4InputPath}]`,
+              ...(slots[0]?.styleInstruction
+                ? {
+                    annotations: [
+                      { type: 'speech_metadata', style: slots[0].styleInstruction },
+                    ],
+                  }
+                : {}),
+            },
+          ],
+        },
+      ],
+      response_format: {
+        type: 'audio',
+        ...(audioMimeType ? { mime_type: audioMimeType } : {}),
+        ...(sampleRate ? { sample_rate: sampleRate } : {}),
+      },
+      generation_config: {
+        speech_config: [{ voice: resolvedVoice }],
+      },
+      store: false,
+    };
+    console.log(`[DRY-RUN] Stage: 04_audio (${slots.length} narration track(s))`);
+    console.log(`[DRY-RUN] Assembled Stage 4 Transcripts written to: ${stage4InputPath}`);
+    console.log(`[DRY-RUN] Would send ${slots.length}x POST ${INTERACTIONS_API_URL}`);
+    console.log(`[DRY-RUN] Sample Body:\n${JSON.stringify(sampleBody, null, 2)}`);
+    console.log(`[DRY-RUN] Network calls skipped. Zero tokens spent.`);
+    return {
+      success: true,
+      runId: resolvedRunId,
+      outputDir: stage4OutDir,
+      slotCount: slots.length,
+      items: [],
+      usage: { inputTokens: 0, thoughtsTokens: 0, outputTokens: 0, totalTokens: 0 },
+      dryRun: true,
+    };
+  }
+
+  const startTimeMs = Date.now();
+  const resultsByIdx: Array<{
+    item: Stage4AudioManifestItem;
+    thoughts: string[];
+    usage: InteractionUsageTelemetry;
+  }> = new Array(slots.length);
+
+  let nextIdx = 0;
+  const worker = async () => {
+    while (true) {
+      const idx = nextIdx++;
+      if (idx >= slots.length) break;
+      const slot = slots[idx];
+      console.log(
+        `[Stage 4 Audio ${idx + 1}/${slots.length}]: Synthesizing ${slot.slotId} ("${slot.itemTitle}", ${slot.transcriptText.length} chars, voice=${resolvedVoice})...`
+      );
+      const ttsRes = await generateFlashTtsAudioInteraction({
+        transcriptText: slot.transcriptText,
+        styleInstruction: slot.styleInstruction || undefined,
+        model: resolvedModel,
+        voice: resolvedVoice,
+        audioMimeType,
+        sampleRate,
+      });
+
+      for (const oldExt of ['.wav', '.mp3', '.ogg', '.pcm']) {
+        const oldPath = path.join(stage4OutDir, `${slot.slotId}${oldExt}`);
+        if (oldExt !== ttsRes.ext && fs.existsSync(oldPath)) {
+          try {
+            fs.unlinkSync(oldPath);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
+      }
+
+      const fileName = `${slot.slotId}${ttsRes.ext}`;
+      const outPath = path.join(stage4OutDir, fileName);
+      fs.writeFileSync(outPath, ttsRes.audioBuffer);
+      console.log(
+        `[Stage 4 Audio ${idx + 1}/${slots.length}]: Saved ${fileName} (${ttsRes.mimeType}, ${(ttsRes.audioBuffer.length / 1024).toFixed(1)} KB, ${ttsRes.usage.totalTokens} tokens)`
+      );
+
+      resultsByIdx[idx] = {
+        item: {
+          slotId: slot.slotId,
+          moduleNumber: slot.moduleNumber,
+          title: slot.itemTitle,
+          voice: resolvedVoice,
+          fileName,
+          relativePath: `./stages/04_audio/output/${fileName}`,
+          mimeType: ttsRes.mimeType,
+          bytes: ttsRes.audioBuffer.length,
+          charCount: slot.transcriptText.length,
+        },
+        thoughts: ttsRes.thoughts.map((t) => `[${slot.slotId}] ${t}`),
+        usage: ttsRes.usage,
+      };
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, slots.length) }, () => worker())
+  );
+
+  const items = resultsByIdx.map((r) => r.item);
+  const allThoughts = resultsByIdx.flatMap((r) => r.thoughts);
+  const aggUsage: InteractionUsageTelemetry = resultsByIdx.reduce(
+    (acc, r) => ({
+      inputTokens: acc.inputTokens + r.usage.inputTokens,
+      thoughtsTokens: acc.thoughtsTokens + r.usage.thoughtsTokens,
+      outputTokens: acc.outputTokens + r.usage.outputTokens,
+      totalTokens: acc.totalTokens + r.usage.totalTokens,
+    }),
+    { inputTokens: 0, thoughtsTokens: 0, outputTokens: 0, totalTokens: 0 }
+  );
+  const durationMs = Date.now() - startTimeMs;
+
+  const manifestPath = path.join(stage4OutDir, 'audio_manifest.json');
+  fs.writeFileSync(
+    manifestPath,
+    JSON.stringify(
+      {
+        stage: '04_audio',
+        runId: resolvedRunId,
+        model: resolvedModel,
+        voice: resolvedVoice,
+        ...(audioMimeType ? { audioMimeType } : {}),
+        ...(sampleRate ? { sampleRate } : {}),
+        generatedAt: new Date().toISOString(),
+        items,
+      },
+      null,
+      2
+    ),
+    'utf-8'
+  );
+
+  const traceLines: string[] = [
+    `# 04_audio — Studio Speech Synthesis Trace`,
+    '',
+    `- **Model:** \`${resolvedModel}\``,
+    `- **Voice:** \`${resolvedVoice}\``,
+    `- **Generated Tracks:** ${items.length} (${items.map((it) => `\`${it.fileName}\``).join(', ')})`,
+    `- **Duration:** ${(durationMs / 1000).toFixed(1)}s`,
+    `- **Input Tokens:** ${aggUsage.inputTokens}`,
+    `- **Thinking Tokens:** ${aggUsage.thoughtsTokens}`,
+    `- **Output Tokens:** ${aggUsage.outputTokens}`,
+    `- **Total Tokens:** ${aggUsage.totalTokens}`,
+    '',
+    `## Reasoning Steps (${allThoughts.length})`,
+    '',
+    ...(allThoughts.length > 0
+      ? allThoughts.flatMap((t, idx) => [`### Step ${idx + 1}`, t, ''])
+      : ['_No reasoning summary steps emitted._']),
+  ];
+  fs.writeFileSync(path.join(stage4OutDir, 'thinking_trace.md'), traceLines.join('\n'), 'utf-8');
+
+  const metaPath = path.join(runDir, 'meta.json');
+  try {
+    const meta: Record<string, any> = fs.existsSync(metaPath)
+      ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
+      : { runId: resolvedRunId, createdAt: new Date().toISOString() };
+    meta.stage4Telemetry = {
+      model: resolvedModel,
+      voice: resolvedVoice,
+      trackCount: items.length,
+      files: items.map((it) => it.fileName),
+      inputTokens: aggUsage.inputTokens,
+      thoughtsTokens: aggUsage.thoughtsTokens,
+      outputTokens: aggUsage.outputTokens,
+      totalTokens: aggUsage.totalTokens,
+      durationMs,
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+  } catch {
+    // Ignore meta update errors
+  }
+
+  console.log(
+    `[Stage 4 Telemetry]: tracks=${items.length}, voice=${resolvedVoice}, input=${aggUsage.inputTokens}, thoughts=${aggUsage.thoughtsTokens}, output=${aggUsage.outputTokens}, total=${aggUsage.totalTokens} tokens (${(durationMs / 1000).toFixed(1)}s)`
+  );
+
+  let a2uiHtmlPath: string | undefined;
+  let artifactHtmlPath: string | undefined;
+  try {
+    const a2uiRes = generateA2uiSurface(resolvedRunId, {
+      workspaceRoot: workspacePath,
+      artifactDir: input.artifactDir,
+      openBrowser: input.openBrowser,
+    });
+    a2uiHtmlPath = a2uiRes.htmlOutputPath;
+    artifactHtmlPath = a2uiRes.artifactHtmlPath;
+    console.log(
+      `[Stage 4 A2UI Studio Hydrated]: ${a2uiRes.htmlOutputPath}${a2uiRes.artifactHtmlPath ? ` (artifact: ${a2uiRes.artifactHtmlPath})` : ''}`
+    );
+  } catch (err: any) {
+    console.warn(`[Stage 4 A2UI Warning]: ${err?.message || String(err)}`);
+  }
+
+  return {
+    success: true,
+    runId: resolvedRunId,
+    outputDir: stage4OutDir,
+    slotCount: slots.length,
+    manifestPath,
+    ...(a2uiHtmlPath ? { a2uiHtmlPath } : {}),
+    ...(artifactHtmlPath ? { artifactHtmlPath } : {}),
+    items,
+    usage: aggUsage,
   };
 }
 
@@ -10968,7 +12374,21 @@ export function getIcmPipelineStatus(options?: {
 
       const stage1Tokens = Number(meta?.stage1Telemetry?.totalTokens || 0);
       const stage2Tokens = Number(meta?.stage2Telemetry?.totalTokens || 0);
-      const totalTokens = stage1Tokens + stage2Tokens;
+      let downstreamTokens = 0;
+      if (meta && typeof meta === 'object') {
+        for (const [k, v] of Object.entries(meta)) {
+          if (
+            /^stage\d+Telemetry$/.test(k) &&
+            k !== 'stage1Telemetry' &&
+            k !== 'stage2Telemetry' &&
+            v &&
+            typeof v === 'object'
+          ) {
+            downstreamTokens += Number((v as Record<string, unknown>).totalTokens || 0);
+          }
+        }
+      }
+      const totalTokens = stage1Tokens + stage2Tokens + downstreamTokens;
 
       let nextStepHint: string;
       if (!stage1Complete) {
@@ -11071,8 +12491,11 @@ export function formatIcmPipelineStatus(report: IcmPipelineStatusReport): string
       );
     }
     if (r.totalTokens > 0) {
+      const downstreamToks = Math.max(0, r.totalTokens - r.stage1Tokens - r.stage2Tokens);
+      const downstreamPart =
+        downstreamToks > 0 ? ` | Downstream: ${downstreamToks.toLocaleString('en-US')}` : '';
       lines.push(
-        `    Tokens:   ${r.totalTokens.toLocaleString('en-US')} total (Stage 1: ${r.stage1Tokens.toLocaleString('en-US')} | Stage 2: ${r.stage2Tokens.toLocaleString('en-US')})`
+        `    Tokens:   ${r.totalTokens.toLocaleString('en-US')} total (Stage 1: ${r.stage1Tokens.toLocaleString('en-US')} | Stage 2: ${r.stage2Tokens.toLocaleString('en-US')}${downstreamPart})`
       );
     }
     lines.push(`    Next:     ${r.nextStepHint}`);
@@ -11139,7 +12562,7 @@ export const A2UI_ICM_CATALOG_SCHEMA = {
     },
     ModuleCarousel: {
       description:
-        'Renders Stage 2 trainingModules, lessons, modules, or slides with step-by-step navigation, regulatory/concept metadata, slide cues, action items, and SpeechPlayer TTS narration.',
+        'Renders Stage 2 trainingModules, lessons, modules, pillars, or slides with step-by-step navigation, optional Stage 3 16:9 illustrations (imageUrl), regulatory/concept metadata, slide cues, action items, and SpeechPlayer narration (Stage 4 studio audioUrl or Web Speech API fallback).',
       properties: ['title', 'modulesPath', 'activeIndexPath'],
     },
     QuizRunner: {
@@ -11594,6 +13017,10 @@ export interface NormalizedA2uiModule {
   spokenNarration?: string;
   actionItem: string;
   bullets: string[];
+  visualPrompt?: string;
+  imageUrl?: string;
+  imageCaption?: string;
+  audioUrl?: string;
 }
 
 export interface NormalizedA2uiQuizQuestion {
@@ -11681,6 +13108,7 @@ export function normalizeStage2ForA2ui(
   estimatedDuration: number | string;
   scriptBody: string;
   spokenScript: string;
+  overviewVisualPrompt?: string;
   highlights: string[];
   modules: NormalizedA2uiModule[];
   quiz: NormalizedA2uiQuizQuestion[];
@@ -11695,6 +13123,7 @@ export function normalizeStage2ForA2ui(
       estimatedDuration: 0,
       scriptBody: '',
       spokenScript: '',
+      overviewVisualPrompt: '',
       highlights: [],
       modules: [],
       quiz: [],
@@ -11911,6 +13340,13 @@ export function normalizeStage2ForA2ui(
               ? rawMod.bullets
               : [];
     const bullets = bulletsRaw.map((b: unknown) => String(b || '').trim()).filter(Boolean);
+    const modVisualPrompt = String(
+      rawMod.visualPrompt ||
+        rawMod.imagePrompt ||
+        rawMod.illustrationPrompt ||
+        rawMod.sceneFocus ||
+        ''
+    ).trim();
 
     modules.push({
       id: `mod_${idx + 1}`,
@@ -11922,6 +13358,7 @@ export function normalizeStage2ForA2ui(
       spokenNarration,
       actionItem,
       bullets,
+      ...(modVisualPrompt ? { visualPrompt: modVisualPrompt } : {}),
     });
 
     // If module has an embedded quizQuestion (for course/training pipelines)
@@ -12196,6 +13633,14 @@ export function normalizeStage2ForA2ui(
     });
   }
 
+  const overviewVisualPrompt = String(
+    scriptDraft.overviewVisualPrompt ||
+      scriptDraft.heroVisualPrompt ||
+      scriptDraft.visualPrompt ||
+      scriptDraft.imagePrompt ||
+      ''
+  ).trim();
+
   return {
     title,
     subtitle,
@@ -12203,6 +13648,7 @@ export function normalizeStage2ForA2ui(
     estimatedDuration,
     scriptBody,
     spokenScript,
+    ...(overviewVisualPrompt ? { overviewVisualPrompt } : {}),
     highlights,
     modules,
     quiz,
@@ -13801,11 +15247,15 @@ const A2UI_STUDIO_JS = `
     );
     if (surface.components) {
       if (surface.components["overview_narration_col"]) {
+        const hasHeroComp = Boolean(surface.components["overview_hero_image"]);
+        const hasTtsComp = Boolean(surface.components["overview_tts_player"]);
         surface.components["overview_narration_col"].children = nextIsStage1Only
           ? ["overview_narration_heading", "overview_narration_body"]
-          : surface.components["overview_tts_player"]
-            ? ["overview_narration_heading", "overview_tts_player", "overview_narration_body"]
-            : ["overview_narration_heading", "overview_narration_body"];
+          : (hasHeroComp ? ["overview_hero_image"] : []).concat(
+              hasTtsComp
+                ? ["overview_narration_heading", "overview_tts_player", "overview_narration_body"]
+                : ["overview_narration_heading", "overview_narration_body"]
+            );
       }
       if (surface.components["tab_overview"]) {
         surface.components["tab_overview"].children = nextIsStage1Only
@@ -15155,6 +16605,15 @@ const A2UI_STUDIO_JS = `
     if (typeof window !== "undefined" && window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
+    if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+      try {
+        document.querySelectorAll("audio").forEach(function (el) {
+          try {
+            if (el && typeof el.pause === "function") el.pause();
+          } catch (_e) {}
+        });
+      } catch (_e) {}
+    }
   }
 
   function cleanClientChecklistLabel(rawText) {
@@ -16314,6 +17773,9 @@ const A2UI_STUDIO_JS = `
       const isNo = isNorwegianSurface(surface);
       const wrap = document.createElement("div");
       wrap.className = "a2ui-row";
+      wrap.style.flexWrap = "wrap";
+      wrap.style.alignItems = "center";
+      wrap.style.gap = "8px";
       const desc = String(resolveDynamic(comp.description, surface, scopeData, itemIndex) || "Audio Narration");
       const textToSpeak = String(resolveDynamic(comp.ttsText, surface, scopeData, itemIndex) || "");
       const rawUrl = resolveDynamic(
@@ -16322,15 +17784,8 @@ const A2UI_STUDIO_JS = `
         scopeData,
         itemIndex
       );
-      if (rawUrl && isAllowedMediaUrl(rawUrl)) {
-        const audio = document.createElement("audio");
-        audio.controls = true;
-        audio.src = String(rawUrl);
-        wrap.appendChild(audio);
-      } else if (type === "SpeechPlayer" || textToSpeak) {
-        wrap.style.flexWrap = "wrap";
-        wrap.style.alignItems = "center";
-        wrap.style.gap = "8px";
+
+      function buildWebSpeechControls(container) {
         const voiceNote = document.createElement("span");
         voiceNote.className = "a2ui-tts-voice-status";
         voiceNote.style.fontSize = "12px";
@@ -16365,23 +17820,96 @@ const A2UI_STUDIO_JS = `
           stopActiveSpeech();
           voiceNote.style.display = "none";
         });
-        wrap.appendChild(playBtn);
-        wrap.appendChild(stopBtn);
-        wrap.appendChild(voiceNote);
+        container.appendChild(playBtn);
+        container.appendChild(stopBtn);
+        container.appendChild(voiceNote);
+      }
+
+      if (rawUrl && isAllowedMediaUrl(rawUrl)) {
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.preload = "metadata";
+        audio.src = String(rawUrl);
+        audio.style.width = "100%";
+        audio.style.maxWidth = "540px";
+        audio.style.height = "40px";
+        const studioBadge = document.createElement("span");
+        studioBadge.className = "a2ui-badge neutral";
+        studioBadge.textContent = isNo ? "🎙️ Studio-lyd" : "🎙️ Studio Audio";
+        audio.addEventListener("play", () => {
+          if (typeof window !== "undefined" && window.speechSynthesis) {
+            window.speechSynthesis.cancel();
+          }
+          if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+            try {
+              document.querySelectorAll("audio").forEach(function (other) {
+                if (other !== audio && other && typeof other.pause === "function") {
+                  try {
+                    other.pause();
+                  } catch (_e) {}
+                }
+              });
+            } catch (_e) {}
+          }
+        });
+        wrap.appendChild(audio);
+        wrap.appendChild(studioBadge);
+        if (type === "SpeechPlayer" && textToSpeak) {
+          const fallbackWrap = document.createElement("div");
+          fallbackWrap.className = "a2ui-row";
+          fallbackWrap.style.display = "none";
+          fallbackWrap.style.flexWrap = "wrap";
+          fallbackWrap.style.alignItems = "center";
+          fallbackWrap.style.gap = "8px";
+          buildWebSpeechControls(fallbackWrap);
+          audio.addEventListener("error", () => {
+            audio.style.display = "none";
+            studioBadge.style.display = "none";
+            fallbackWrap.style.display = "flex";
+          });
+          wrap.appendChild(fallbackWrap);
+        }
+      } else if (type === "SpeechPlayer" || textToSpeak) {
+        buildWebSpeechControls(wrap);
       }
       return wrap;
     }
 
     if (type === "Image") {
-      const img = document.createElement("img");
       const rawImgUrl = String(resolveDynamic(comp.url, surface, scopeData, itemIndex) || "");
-      if (isAllowedMediaUrl(rawImgUrl)) {
-        img.src = rawImgUrl;
+      if (!isAllowedMediaUrl(rawImgUrl)) {
+        const emptyImg = document.createElement("span");
+        emptyImg.style.display = "none";
+        return emptyImg;
       }
-      img.alt = String(resolveDynamic(comp.description ?? comp.alt, surface, scopeData, itemIndex) || "");
+      const altText = String(resolveDynamic(comp.description ?? comp.alt, surface, scopeData, itemIndex) || "");
+      const img = document.createElement("img");
+      img.src = rawImgUrl;
+      img.alt = altText;
+      img.loading = "lazy";
+      if (comp.variant === "header") {
+        const fig = document.createElement("figure");
+        fig.style.margin = "0 0 8px 0";
+        fig.style.borderRadius = "10px";
+        fig.style.overflow = "hidden";
+        fig.style.border = "1px solid var(--border)";
+        fig.style.background = "var(--bg)";
+        img.style.width = "100%";
+        img.style.aspectRatio = "16 / 9";
+        img.style.objectFit = String(comp.fit || "cover");
+        img.style.display = "block";
+        img.addEventListener("error", () => {
+          fig.style.display = "none";
+        });
+        fig.appendChild(img);
+        return fig;
+      }
       img.style.maxWidth = "100%";
       img.style.borderRadius = "8px";
       if (comp.fit) img.style.objectFit = String(comp.fit);
+      img.addEventListener("error", () => {
+        img.style.display = "none";
+      });
       return img;
     }
 
@@ -16692,6 +18220,37 @@ const A2UI_STUDIO_JS = `
       }
       card.appendChild(headRow);
 
+      if (mod.imageUrl && isAllowedMediaUrl(mod.imageUrl)) {
+        const fig = document.createElement("figure");
+        fig.style.margin = "0";
+        fig.style.borderRadius = "10px";
+        fig.style.overflow = "hidden";
+        fig.style.border = "1px solid var(--border)";
+        fig.style.background = "var(--bg)";
+        const figImg = document.createElement("img");
+        figImg.src = String(mod.imageUrl);
+        figImg.alt = String(mod.imageCaption || mod.title || "");
+        figImg.loading = "lazy";
+        figImg.style.width = "100%";
+        figImg.style.aspectRatio = "16 / 9";
+        figImg.style.objectFit = "cover";
+        figImg.style.display = "block";
+        figImg.addEventListener("error", () => {
+          fig.style.display = "none";
+        });
+        fig.appendChild(figImg);
+        const figCap = document.createElement("figcaption");
+        figCap.style.padding = "8px 12px";
+        figCap.style.fontSize = "12px";
+        figCap.style.color = "var(--muted, #64748b)";
+        figCap.style.borderTop = "1px solid var(--border)";
+        figCap.style.background = "var(--surface-subtle, #f8fafc)";
+        figCap.textContent =
+          "🎨 " + String(mod.imageCaption || itemLabel + (mod.number || idx + 1) + ": " + mod.title);
+        fig.appendChild(figCap);
+        card.appendChild(fig);
+      }
+
       if (mod.narration) {
         const narBox = document.createElement("div");
         narBox.className = "a2ui-body okf-md-body";
@@ -16709,6 +18268,7 @@ const A2UI_STUDIO_JS = `
           "@catalogId": "https://a2ui.org/specification/v1_0/catalogs/icm-okf-v0.2/catalog.json",
           description: mod.title,
           ttsText: mod.spokenNarration || mod.narration,
+          audioUrl: mod.audioUrl || "",
         });
         card.appendChild(ttsPlayer);
       }
@@ -18297,7 +19857,11 @@ const A2UI_STUDIO_JS = `
             clientActionEvents: actionLog,
             serverToClientMessages: messages,
           },
-          null,
+          function (_k, v) {
+            return typeof v === "string" && v.indexOf("data:") === 0 && v.length > 160
+              ? v.slice(0, 64) + "... [inline base64, " + v.length + " chars]"
+              : v;
+          },
           2
         );
       }
@@ -18614,7 +20178,230 @@ export function generateA2uiSurface(
     `${okfDoc.frontmatter.title || ''} ${okfDoc.frontmatter.description || ''} ${okfDoc.body || ''} ${JSON.stringify(rawStage2 || {})}`
   );
   const isNo = surfaceLang === 'no';
+  const runMediaUriMaps = new Map<string, Record<string, string>>();
+  const hydrateRunMultimodalMedia = (
+    targetRunDir: string,
+    norm: ReturnType<typeof normalizeStage2ForA2ui>
+  ): {
+    overviewImageUrl: string;
+    overviewImageCaption: string;
+    overviewAudioUrl: string;
+    inlineDataUriByRelUrl: Record<string, string>;
+  } => {
+    const inlineDataUriByRelUrl: Record<string, string> = {};
+    let overviewImageUrl = '';
+    let overviewImageCaption = norm.title || '';
+    let overviewAudioUrl = '';
+    if (!targetRunDir || !fs.existsSync(targetRunDir)) {
+      return { overviewImageUrl, overviewImageCaption, overviewAudioUrl, inlineDataUriByRelUrl };
+    }
+
+    const visualsOutDir = path.join(targetRunDir, 'stages', '03_visuals', 'output');
+    if (fs.existsSync(visualsOutDir)) {
+      let manifestItems: Array<Record<string, any>> = [];
+      const vManifestPath = path.join(visualsOutDir, 'visuals_manifest.json');
+      if (fs.existsSync(vManifestPath)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(vManifestPath, 'utf-8'));
+          if (Array.isArray(parsed?.items)) manifestItems = parsed.items;
+        } catch {
+          manifestItems = [];
+        }
+      }
+      const imgExts = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+      const resolveVisualSlot = (
+        candidateBases: string[],
+        slotMatchFn: (it: Record<string, any>) => boolean
+      ): { relUrl: string; caption?: string } | null => {
+        const mItem = manifestItems.find(slotMatchFn);
+        const candidateFiles: string[] = [];
+        if (mItem && typeof mItem.fileName === 'string' && mItem.fileName.trim()) {
+          candidateFiles.push(path.basename(mItem.fileName.trim()));
+        }
+        for (const base of candidateBases) {
+          for (const ext of imgExts) {
+            candidateFiles.push(`${base}${ext}`);
+          }
+        }
+        for (const fName of candidateFiles) {
+          const full = path.join(visualsOutDir, fName);
+          if (fs.existsSync(full) && fs.statSync(full).isFile()) {
+            const relUrl = `./stages/03_visuals/output/${fName}`;
+            try {
+              const buf = fs.readFileSync(full);
+              if (buf.length > 0 && buf.length <= 12 * 1024 * 1024) {
+                const det = detectMediaMimeAndExtension(buf, undefined, 'image');
+                inlineDataUriByRelUrl[relUrl] = `data:${det.mimeType};base64,${buf.toString('base64')}`;
+              }
+            } catch {
+              // Keep relative URL fallback
+            }
+            return {
+              relUrl,
+              caption: typeof mItem?.caption === 'string' ? mItem.caption.trim() : undefined,
+            };
+          }
+        }
+        return null;
+      };
+
+      const ovVis = resolveVisualSlot(
+        ['overview', 'hero'],
+        (it) => it?.slotId === 'overview' || Number(it?.moduleNumber) === 0
+      );
+      if (ovVis) {
+        overviewImageUrl = ovVis.relUrl;
+        if (ovVis.caption) overviewImageCaption = ovVis.caption;
+      }
+
+      norm.modules.forEach((mod, idx) => {
+        const slotNum = idx + 1;
+        const padSlot = String(slotNum).padStart(2, '0');
+        const modNum = mod.number || slotNum;
+        const padMod = String(modNum).padStart(2, '0');
+        const bases = Array.from(
+          new Set([
+            `module_${padSlot}`,
+            `module_${slotNum}`,
+            `module_${padMod}`,
+            `module_${modNum}`,
+          ])
+        );
+        const modVis = resolveVisualSlot(
+          bases,
+          (it) =>
+            it?.slotId === `module_${padSlot}` ||
+            it?.slotId === `module_${slotNum}` ||
+            Number(it?.moduleNumber) === modNum
+        );
+        if (modVis) {
+          mod.imageUrl = modVis.relUrl;
+          if (modVis.caption) mod.imageCaption = modVis.caption;
+        }
+      });
+    }
+
+    const audioOutDir = path.join(targetRunDir, 'stages', '04_audio', 'output');
+    if (fs.existsSync(audioOutDir)) {
+      let audioItems: Array<Record<string, any>> = [];
+      const aManifestPath = path.join(audioOutDir, 'audio_manifest.json');
+      if (fs.existsSync(aManifestPath)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(aManifestPath, 'utf-8'));
+          if (Array.isArray(parsed?.items)) audioItems = parsed.items;
+        } catch {
+          audioItems = [];
+        }
+      }
+      const audExts = ['.wav', '.mp3', '.ogg', '.m4a', '.webm'];
+      let totalInlinedAudioBytes = 0;
+      const resolveAudioSlot = (
+        candidateBases: string[],
+        slotMatchFn: (it: Record<string, any>) => boolean
+      ): string => {
+        const mItem = audioItems.find(slotMatchFn);
+        const candidateFiles: string[] = [];
+        if (mItem && typeof mItem.fileName === 'string' && mItem.fileName.trim()) {
+          candidateFiles.push(path.basename(mItem.fileName.trim()));
+        }
+        for (const base of candidateBases) {
+          for (const ext of audExts) {
+            candidateFiles.push(`${base}${ext}`);
+          }
+        }
+        for (const fName of candidateFiles) {
+          const full = path.join(audioOutDir, fName);
+          if (fs.existsSync(full) && fs.statSync(full).isFile()) {
+            const relUrl = `./stages/04_audio/output/${fName}`;
+            try {
+              let buf: Buffer = fs.readFileSync(full);
+              if (
+                buf.length > 0 &&
+                buf.length <= 8 * 1024 * 1024 &&
+                totalInlinedAudioBytes + buf.length <= 32 * 1024 * 1024
+              ) {
+                let det = detectMediaMimeAndExtension(buf, undefined, 'audio');
+                if (
+                  buf.length >= 4 &&
+                  buf.subarray(0, 4).toString('ascii') !== 'RIFF' &&
+                  fName.toLowerCase().endsWith('.pcm')
+                ) {
+                  buf = wrapPcm16InWavHeader(buf, 24000);
+                  det = { mimeType: 'audio/wav', ext: '.wav' };
+                }
+                inlineDataUriByRelUrl[relUrl] = `data:${det.mimeType};base64,${buf.toString('base64')}`;
+                totalInlinedAudioBytes += buf.length;
+              }
+            } catch {
+              // Keep relative URL fallback
+            }
+            return relUrl;
+          }
+        }
+        return '';
+      };
+
+      overviewAudioUrl = resolveAudioSlot(
+        ['overview', 'hero'],
+        (it) => it?.slotId === 'overview' || Number(it?.moduleNumber) === 0
+      );
+
+      norm.modules.forEach((mod, idx) => {
+        const slotNum = idx + 1;
+        const padSlot = String(slotNum).padStart(2, '0');
+        const modNum = mod.number || slotNum;
+        const padMod = String(modNum).padStart(2, '0');
+        const bases = Array.from(
+          new Set([
+            `module_${padSlot}`,
+            `module_${slotNum}`,
+            `module_${padMod}`,
+            `module_${modNum}`,
+          ])
+        );
+        const audRel = resolveAudioSlot(
+          bases,
+          (it) =>
+            it?.slotId === `module_${padSlot}` ||
+            it?.slotId === `module_${slotNum}` ||
+            Number(it?.moduleNumber) === modNum
+        );
+        if (audRel) {
+          mod.audioUrl = audRel;
+        }
+      });
+    }
+
+    return { overviewImageUrl, overviewImageCaption, overviewAudioUrl, inlineDataUriByRelUrl };
+  };
+
+  const applyInlineMediaToDataModel = (
+    dm: Record<string, any>,
+    uriMap?: Record<string, string>
+  ): Record<string, any> => {
+    if (!dm || !uriMap || Object.keys(uriMap).length === 0 || !dm.stage2) {
+      return dm;
+    }
+    const cloned = JSON.parse(JSON.stringify(dm));
+    if (cloned.stage2.overviewImageUrl && uriMap[cloned.stage2.overviewImageUrl]) {
+      cloned.stage2.overviewImageUrl = uriMap[cloned.stage2.overviewImageUrl];
+    }
+    if (cloned.stage2.overviewAudioUrl && uriMap[cloned.stage2.overviewAudioUrl]) {
+      cloned.stage2.overviewAudioUrl = uriMap[cloned.stage2.overviewAudioUrl];
+    }
+    if (Array.isArray(cloned.stage2.modules)) {
+      cloned.stage2.modules = cloned.stage2.modules.map((m: Record<string, any>) => ({
+        ...m,
+        ...(m.imageUrl && uriMap[m.imageUrl] ? { imageUrl: uriMap[m.imageUrl] } : {}),
+        ...(m.audioUrl && uriMap[m.audioUrl] ? { audioUrl: uriMap[m.audioUrl] } : {}),
+      }));
+    }
+    return cloned;
+  };
+
   const stage2Norm = normalizeStage2ForA2ui(rawStage2, fallbackTitle);
+  const activeMedia = hydrateRunMultimodalMedia(resolvedRunDir, stage2Norm);
+  runMediaUriMaps.set(resolvedRunId || 'workspace', activeMedia.inlineDataUriByRelUrl);
   const domainMode = detectIcmDomainMode(
     rawStage2,
     stage2Norm.quiz.length,
@@ -18671,6 +20458,8 @@ export function generateA2uiSurface(
     );
     const rIsNo = rLang === 'no';
     const rStage2Norm = normalizeStage2ForA2ui(rRawStage2, rFallbackTitle);
+    const rMedia = hydrateRunMultimodalMedia(rDir, rStage2Norm);
+    runMediaUriMaps.set(rId || 'workspace', rMedia.inlineDataUriByRelUrl);
     const rDomainMode = detectIcmDomainMode(
       rRawStage2,
       rStage2Norm.quiz.length,
@@ -18821,6 +20610,9 @@ export function generateA2uiSurface(
       },
       stage2: {
         overviewHeading: rOverviewHeading,
+        overviewImageUrl: rMedia.overviewImageUrl,
+        overviewImageCaption: rMedia.overviewImageCaption,
+        overviewAudioUrl: rMedia.overviewAudioUrl,
         scriptBody: rOverviewBody,
         spokenScript:
           rStage2Norm.spokenScript ||
@@ -19458,7 +21250,12 @@ export function generateA2uiSurface(
   }
   const overviewNarrationChildren = isStage1Only
     ? ['overview_narration_heading', 'overview_narration_body']
-    : ['overview_narration_heading', 'overview_tts_player', 'overview_narration_body'];
+    : [
+        'overview_hero_image',
+        'overview_narration_heading',
+        'overview_tts_player',
+        'overview_narration_body',
+      ];
   components.push(
     {
       id: 'tab_overview',
@@ -19476,6 +21273,14 @@ export function generateA2uiSurface(
       children: overviewNarrationChildren,
     },
     {
+      id: 'overview_hero_image',
+      component: 'Image',
+      variant: 'header',
+      fit: 'cover',
+      url: { '@path': '/stage2/overviewImageUrl' },
+      description: { '@path': '/stage2/overviewImageCaption' },
+    },
+    {
       id: 'overview_narration_heading',
       component: 'Text',
       variant: 'body',
@@ -19487,6 +21292,7 @@ export function generateA2uiSurface(
       '@catalogId': A2UI_ICM_CATALOG_ID,
       description: { '@path': '/meta/title' },
       ttsText: { '@path': '/stage2/spokenScript' },
+      audioUrl: { '@path': '/stage2/overviewAudioUrl' },
     },
     {
       id: 'overview_narration_body',
@@ -19837,6 +21643,9 @@ export function generateA2uiSurface(
     },
     stage2: {
       overviewHeading: activeOverviewHeading,
+      overviewImageUrl: activeMedia.overviewImageUrl,
+      overviewImageCaption: activeMedia.overviewImageCaption,
+      overviewAudioUrl: activeMedia.overviewAudioUrl,
       scriptBody: activeOverviewBody,
       spokenScript:
         stage2Norm.spokenScript ||
@@ -19937,12 +21746,29 @@ export function generateA2uiSurface(
     fs.writeFileSync(path.join(baseOutDir, 'a2ui_surface.jsonl'), serializedSurfaceJsonl, 'utf-8');
   }
 
+  const htmlDataModel = applyInlineMediaToDataModel(dataModel, activeMedia.inlineDataUriByRelUrl);
+  const htmlMessages: A2uiEnvelopeMessage[] = messages.map((m) =>
+    'updateDataModel' in m && m.updateDataModel
+      ? {
+          ...m,
+          updateDataModel: {
+            ...m.updateDataModel,
+            value: htmlDataModel,
+          },
+        }
+      : m
+  );
+  const htmlBundleRuns: A2uiBundleRunEntry[] = bundleRuns.map((br) => ({
+    ...br,
+    dataModel: applyInlineMediaToDataModel(br.dataModel, runMediaUriMaps.get(br.runId)),
+  }));
+
   const clientPayload = {
     surfaceId,
     catalogId: A2UI_BASIC_CATALOG_ID,
     domainCatalogId: A2UI_ICM_CATALOG_ID,
-    messages,
-    bundleRuns,
+    messages: htmlMessages,
+    bundleRuns: htmlBundleRuns,
     bundleGraph: {
       nodes: graphNodes,
       edges: graphEdges,
@@ -20063,7 +21889,12 @@ ${A2UI_STUDIO_JS}
             ...comp,
             children: br.isStage1Only
               ? ['overview_narration_heading', 'overview_narration_body']
-              : ['overview_narration_heading', 'overview_tts_player', 'overview_narration_body'],
+              : [
+                  'overview_hero_image',
+                  'overview_narration_heading',
+                  'overview_tts_player',
+                  'overview_narration_body',
+                ],
           };
         }
         if (comp.id === 'main_tabs' && Array.isArray((comp as any).tabs)) {
@@ -20079,6 +21910,10 @@ ${A2UI_STUDIO_JS}
         }
         return comp;
       });
+      const siblingHtmlDataModel = applyInlineMediaToDataModel(
+        br.dataModel,
+        runMediaUriMaps.get(br.runId)
+      );
       const siblingMessages: A2uiEnvelopeMessage[] = [
         {
           version: A2UI_PROTOCOL_VERSION,
@@ -20100,7 +21935,7 @@ ${A2UI_STUDIO_JS}
           updateDataModel: {
             surfaceId: siblingSurfaceId,
             path: '/',
-            value: br.dataModel,
+            value: siblingHtmlDataModel,
           },
         },
       ];
@@ -20109,7 +21944,7 @@ ${A2UI_STUDIO_JS}
         catalogId: A2UI_BASIC_CATALOG_ID,
         domainCatalogId: A2UI_ICM_CATALOG_ID,
         messages: siblingMessages,
-        bundleRuns,
+        bundleRuns: htmlBundleRuns,
         bundleGraph: clientPayload.bundleGraph,
       };
       const siblingHtml = renderA2uiHtmlDocument(
@@ -23869,6 +25704,265 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
           refHydratedBundleCtx.indexOf('### [/references/aaa-unrelated-agro.md]'),
       `loadWorkspaceLayers hydrates workspace/bundle/references/*.md with canonical sources and topic-relevance ranking while keeping workspace/bundle/research/*.md in Progressive Disclosure summary form`
     );
+
+    // Phase 4 Multimodal Engine (`03_visuals` + `04_audio`), Magic-Byte MIME Detection & A2UI Media Hydration Self-Tests
+    const jpegMagic = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46]);
+    const pngMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
+    const webpMagic = Buffer.concat([
+      Buffer.from('RIFF', 'ascii'),
+      Buffer.from([0x10, 0x00, 0x00, 0x00]),
+      Buffer.from('WEBP', 'ascii'),
+    ]);
+    const mp3Magic = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00]);
+    const wrappedWav = wrapPcm16InWavHeader(Buffer.alloc(480, 0), 24000, 1);
+
+    const detectedJpeg = detectMediaMimeAndExtension(jpegMagic, 'image/png', 'image');
+    const detectedPng = detectMediaMimeAndExtension(pngMagic, 'image/jpeg', 'image');
+    const detectedWebp = detectMediaMimeAndExtension(webpMagic, undefined, 'image');
+    const detectedMp3 = detectMediaMimeAndExtension(mp3Magic, 'audio/wav', 'audio');
+    const detectedWav = detectMediaMimeAndExtension(wrappedWav, 'audio/l16', 'audio');
+
+    assert(
+      detectedJpeg.mimeType === 'image/jpeg' &&
+        detectedJpeg.ext === '.jpg' &&
+        detectedPng.mimeType === 'image/png' &&
+        detectedPng.ext === '.png' &&
+        detectedWebp.mimeType === 'image/webp' &&
+        detectedWebp.ext === '.webp' &&
+        detectedMp3.mimeType === 'audio/mpeg' &&
+        detectedMp3.ext === '.mp3' &&
+        wrappedWav.length === 524 &&
+        detectedWav.mimeType === 'audio/wav' &&
+        detectedWav.ext === '.wav',
+      'detectMediaMimeAndExtension prioritizes binary magic bytes (preventing JPEG-saved-as-.png mismatches) and wrapPcm16InWavHeader produces valid RIFF WAVE buffers'
+    );
+
+    const tmpMultimodalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'icm-multimodal-test-'));
+    try {
+      const tmpMmPrompts = path.join(tmpMultimodalRoot, 'prompts');
+      const tmpMmWs = path.join(tmpMultimodalRoot, 'workspace');
+      fs.mkdirSync(tmpMmPrompts, { recursive: true });
+      fs.mkdirSync(path.join(tmpMmWs, '_config'), { recursive: true });
+      fs.writeFileSync(path.join(tmpMmWs, 'GEMINI.md'), '# Global Identity\nNeutral factual tone.\n', 'utf-8');
+      fs.writeFileSync(path.join(tmpMmWs, 'CONTEXT.md'), '# Workspace Route\nTechnical systems analysis.\n', 'utf-8');
+      fs.writeFileSync(path.join(tmpMmWs, '_config', 'voice_guide.md'), '# Voice Guide\nClear, calm studio delivery.\n', 'utf-8');
+
+      fs.writeFileSync(
+        path.join(tmpMmPrompts, '03_visuals.md'),
+        [
+          '---',
+          'aspectRatio: "16:9"',
+          'imageSize: "1K"',
+          'output:',
+          '  format: image',
+          '---',
+          'Render a clean 16:9 editorial diagram for {{slotTitle}} ({{courseTitle}}).',
+          'Scene: {{visualPrompt}}',
+          'Key points: {{slideCues}}',
+        ].join('\n'),
+        'utf-8'
+      );
+      fs.writeFileSync(
+        path.join(tmpMmPrompts, '04_audio.md'),
+        [
+          '---',
+          'voice: "Kore"',
+          'audioMimeType: "audio/wav"',
+          'sampleRate: 24000',
+          'output:',
+          '  format: audio',
+          '---',
+          '{{#if voiceGuide}}{{voiceGuide}}{{/if}}',
+          '',
+          '{{spokenText}}',
+        ].join('\n'),
+        'utf-8'
+      );
+
+      const stage3Contract = loadStagePromptContract('03_visuals', tmpMmPrompts);
+      const stage4Contract = loadStagePromptContract('04_audio', tmpMmPrompts);
+      assert(
+        stage3Contract.outputFormat === 'image' &&
+          stage3Contract.model === GEMINI_NANO_BANANA_MODEL &&
+          stage3Contract.aspectRatio === '16:9' &&
+          stage3Contract.imageSize === '1K' &&
+          stage4Contract.outputFormat === 'audio' &&
+          stage4Contract.model === GEMINI_FLASH_TTS_MODEL &&
+          stage4Contract.voice === 'Kore' &&
+          stage4Contract.audioMimeType === 'audio/wav' &&
+          stage4Contract.sampleRate === 24000,
+        'loadStagePromptContract parses image/audio multimodal frontmatter contracts with GEMINI_NANO_BANANA_MODEL and GEMINI_FLASH_TTS_MODEL defaults'
+      );
+
+      const mmRunId = 'grid-storage-architecture-1790000000001';
+      const mmRunDir = path.join(tmpMmWs, 'runs', mmRunId);
+      const mmStage1Out = path.join(mmRunDir, 'stages', '01_research', 'output');
+      const mmStage2Out = path.join(mmRunDir, 'stages', '02_script', 'output');
+      fs.mkdirSync(mmStage1Out, { recursive: true });
+      fs.mkdirSync(mmStage2Out, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(mmStage1Out, 'research_summary.md'),
+        [
+          '---',
+          'type: Research Concept',
+          'title: Grid Storage Architecture',
+          'description: Technical synthesis of long-duration grid storage.',
+          'tags:',
+          '  - energy',
+          'status: stable',
+          'generated: 2026-11-14T12:00:00Z',
+          'stale_after: 2027-11-14T12:00:00Z',
+          'sources:',
+          '  - id: grid-ref-1',
+          '    title: Grid Reliability Standard',
+          '    resource: https://standards.example.org/grid-101',
+          '    retrieved_at: 2026-11-14T12:00:00Z',
+          '---',
+          '',
+          '# Grid Storage Architecture',
+          '',
+          ' Grid-forming inverters stabilize frequency under low inertia [^grid-ref-1].',
+          '',
+          '[^grid-ref-1]: Grid Reliability Standard (https://standards.example.org/grid-101)',
+          '',
+        ].join('\n'),
+        'utf-8'
+      );
+
+      fs.writeFileSync(
+        path.join(mmStage2Out, 'script_draft.json'),
+        JSON.stringify(
+          {
+            title: 'Grid Storage Briefing',
+            subtitle: 'Inverter Dynamics & Dispatch',
+            durationMinutes: 12,
+            overviewVisualPrompt: 'Wide architectural schematic of a grid-forming battery substation at dusk, zero text.',
+            scriptBody: '## Executive Overview\n\n**Grid-forming controls** synthesize virtual inertia during contingency events.',
+            modules: [
+              {
+                moduleNumber: 1,
+                title: 'Virtual Inertia Control Loops',
+                durationMinutes: 6,
+                narration: '**Primary droop control** responds within milliseconds.\n\nOperators verify phase-angle stability across feeders.',
+                visualPrompt: 'Clean isometric diagram of an inverter phase-angle control loop with waveformoscilloscope, no labels.',
+                slideCues: ['Sub-cycle synthetic inertia response', 'Feeder phase-angle damping'],
+                actionItem: 'Validate synthetic inertia step response prior to commissioning.',
+              },
+            ],
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
+
+      fs.writeFileSync(
+        path.join(mmRunDir, 'meta.json'),
+        JSON.stringify(
+          {
+            runId: mmRunId,
+            topic: 'Grid Storage Architecture',
+            status: 'completed',
+            stage1Telemetry: { totalTokens: 1000 },
+            stage2Telemetry: { totalTokens: 500 },
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
+
+      assert(
+        resolveDownstreamRunId(tmpMmWs) === mmRunId &&
+          resolveDownstreamRunId(tmpMmWs, '1790000000001') === mmRunId,
+        'resolveDownstreamRunId resolves latest Stage-2-complete run automatically or by timestamp suffix'
+      );
+
+      const s3Dry = await runStage3Flow({
+        workspaceRoot: tmpMmWs,
+        promptDir: tmpMmPrompts,
+        dryRun: true,
+      });
+      const s4Dry = await runStage4Flow({
+        workspaceRoot: tmpMmWs,
+        promptDir: tmpMmPrompts,
+        dryRun: true,
+      });
+      const s3Assembled = fs.readFileSync(
+        path.join(mmRunDir, 'stages', '03_visuals', 'input', 'prompt_assembled.md'),
+        'utf-8'
+      );
+      const s4Assembled = fs.readFileSync(
+        path.join(mmRunDir, 'stages', '04_audio', 'input', 'prompt_assembled.md'),
+        'utf-8'
+      );
+      assert(
+        s3Dry.dryRun === true &&
+          s3Dry.slotCount === 2 &&
+          s3Dry.items.length === 0 &&
+          s3Assembled.includes('grid-forming battery substation') &&
+          s3Assembled.includes('inverter phase-angle control loop') &&
+          s4Dry.dryRun === true &&
+          s4Dry.slotCount === 2 &&
+          s4Dry.items.length === 0 &&
+          s4Assembled.includes('Grid-forming controls synthesize virtual inertia') &&
+          !s4Assembled.includes('**Grid-forming controls**'),
+        'runStage3Flow and runStage4Flow dry-runs assemble overview + module_XX visual and Markdown-stripped TTS prompts at zero token cost'
+      );
+
+      const s3OutDir = path.join(mmRunDir, 'stages', '03_visuals', 'output');
+      const s4OutDir = path.join(mmRunDir, 'stages', '04_audio', 'output');
+      fs.mkdirSync(s3OutDir, { recursive: true });
+      fs.mkdirSync(s4OutDir, { recursive: true });
+      fs.writeFileSync(path.join(s3OutDir, 'overview.jpg'), jpegMagic);
+      fs.writeFileSync(path.join(s3OutDir, 'module_01.jpg'), jpegMagic);
+      fs.writeFileSync(path.join(s4OutDir, 'overview.wav'), wrappedWav);
+      fs.writeFileSync(path.join(s4OutDir, 'module_01.wav'), wrappedWav);
+
+      fs.writeFileSync(
+        path.join(mmRunDir, 'meta.json'),
+        JSON.stringify(
+          {
+            runId: mmRunId,
+            topic: 'Grid Storage Architecture',
+            status: 'completed',
+            stage1Telemetry: { totalTokens: 1000 },
+            stage2Telemetry: { totalTokens: 500 },
+            stage3Telemetry: { totalTokens: 2600, imageCount: 2 },
+            stage4Telemetry: { totalTokens: 400, trackCount: 2 },
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
+
+      const mmA2ui = generateA2uiSurface(mmRunId, { workspaceRoot: tmpMmWs });
+      const mmValidation = validateA2uiSurfaceMessages(mmA2ui.messages);
+      const mmSurfaceJsonRaw = fs.readFileSync(mmA2ui.surfaceJsonPath, 'utf-8');
+      const mmHtmlRaw = fs.readFileSync(mmA2ui.htmlOutputPath, 'utf-8');
+      const mmStatus = getIcmPipelineStatus({ workspaceRoot: tmpMmWs, runId: mmRunId });
+      const mmStatusFormatted = formatIcmPipelineStatus(mmStatus);
+
+      assert(
+        mmValidation.valid === true &&
+          mmSurfaceJsonRaw.includes('./stages/03_visuals/output/overview.jpg') &&
+          mmSurfaceJsonRaw.includes('./stages/03_visuals/output/module_01.jpg') &&
+          mmSurfaceJsonRaw.includes('./stages/04_audio/output/overview.wav') &&
+          mmSurfaceJsonRaw.includes('./stages/04_audio/output/module_01.wav') &&
+          !mmSurfaceJsonRaw.includes('data:image/jpeg;base64,') &&
+          !mmSurfaceJsonRaw.includes('data:audio/wav;base64,') &&
+          mmHtmlRaw.includes('overview_hero_image') &&
+          mmHtmlRaw.includes('data:image/jpeg;base64,') &&
+          mmHtmlRaw.includes('data:audio/wav;base64,') &&
+          mmStatus.runs[0]?.totalTokens === 4500 &&
+          mmStatusFormatted.includes('Downstream: 3,000'),
+        'generateA2uiSurface validates cleanly, keeps relative media paths in a2ui_surface.json, inlines base64 data URIs in a2ui.html, and getIcmPipelineStatus aggregates Stage 3/4 telemetry'
+      );
+    } finally {
+      fs.rmSync(tmpMultimodalRoot, { recursive: true, force: true });
+    }
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
   }
@@ -23885,6 +25979,8 @@ if (
   process.argv.includes('--cli') ||
   process.argv.includes('--stage1') ||
   process.argv.includes('--stage2') ||
+  process.argv.includes('--stage3') ||
+  process.argv.includes('--stage4') ||
   process.argv.includes('--verify') ||
   process.argv.includes('--viz') ||
   process.argv.includes('--a2ui') ||
@@ -23935,6 +26031,8 @@ if (
 
     const isStage1Only = process.argv.includes('--stage1');
     const isStage2Only = process.argv.includes('--stage2');
+    const isStage3Only = process.argv.includes('--stage3');
+    const isStage4Only = process.argv.includes('--stage4');
     const isFullCli = process.argv.includes('--cli');
     const hasVerify = process.argv.includes('--verify');
     const hasViz = process.argv.includes('--viz');
@@ -23953,7 +26051,17 @@ if (
     }
 
     // Standalone `--ping-pong` listener for Antigravity 2.0 Reactive Wakeup
-    if (hasPingPong && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify && !hasA2ui && !hasViz) {
+    if (
+      hasPingPong &&
+      !isStage1Only &&
+      !isStage2Only &&
+      !isStage3Only &&
+      !isStage4Only &&
+      !isFullCli &&
+      !hasVerify &&
+      !hasA2ui &&
+      !hasViz
+    ) {
       const ppIdx = process.argv.indexOf('--ping-pong');
       const ppArgs = process.argv
         .slice(ppIdx + 1)
@@ -23990,7 +26098,7 @@ if (
     const verifierBy = byParsed.value;
 
     // Standalone `--a2ui` execution
-    if (hasA2ui && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify) {
+    if (hasA2ui && !isStage1Only && !isStage2Only && !isStage3Only && !isStage4Only && !isFullCli && !hasVerify) {
       const a2uiIdx = process.argv.indexOf('--a2ui');
       const rawA2uiTail = process.argv.slice(a2uiIdx + 1);
       const a2uiArgs: string[] = [];
@@ -24032,7 +26140,7 @@ if (
     }
 
     // Standalone `--viz` execution
-    if (hasViz && !isStage1Only && !isStage2Only && !isFullCli && !hasVerify) {
+    if (hasViz && !isStage1Only && !isStage2Only && !isStage3Only && !isStage4Only && !isFullCli && !hasVerify) {
       const vizIdx = process.argv.indexOf('--viz');
       const rawVizTail = process.argv.slice(vizIdx + 1);
       const vizArgs: string[] = [];
@@ -24051,6 +26159,77 @@ if (
         openFileInSystemBrowser(vizResult.outputPath);
       }
       console.log('OKF Bundle Visualization Generated:', vizResult);
+      return;
+    }
+
+    // Standalone `--stage3` (`03_visuals`) and `--stage4` (`04_audio`) multimodal execution
+    if (isStage3Only || isStage4Only) {
+      const mmFlag = isStage3Only ? '--stage3' : '--stage4';
+      const mmIdx = process.argv.indexOf(mmFlag);
+      const rawMmTail = process.argv.slice(mmIdx + 1);
+      const mmPositional: string[] = [];
+      let concurrencyOverride: number | undefined;
+      for (let i = 0; i < rawMmTail.length; i++) {
+        const tok = rawMmTail[i];
+        if (tok === '--artifact-dir') {
+          i++;
+          continue;
+        }
+        if (tok === '--concurrency' && rawMmTail[i + 1] && !rawMmTail[i + 1].startsWith('--')) {
+          const parsedConc = parseInt(rawMmTail[i + 1], 10);
+          if (Number.isFinite(parsedConc) && parsedConc > 0) concurrencyOverride = parsedConc;
+          i++;
+          continue;
+        }
+        if (tok.startsWith('--')) continue;
+        mmPositional.push(tok);
+      }
+      const targetRunId = mmPositional[0]?.trim() || undefined;
+      if (isStage3Only) {
+        const stage3Result = await runStage3Flow({
+          workspaceRoot: './workspace',
+          runId: targetRunId,
+          concurrency: concurrencyOverride,
+          dryRun: isDryRun,
+          artifactDir: process.env.AGY_ARTIFACT_DIR || undefined,
+          openBrowser: hasOpen,
+        });
+        console.log(
+          `Stage 3 Visuals CLI ${isDryRun ? 'Dry-Run ' : 'Run '}Complete (${stage3Result.runId}):`,
+          {
+            runId: stage3Result.runId,
+            outputDir: stage3Result.outputDir,
+            manifestPath: stage3Result.manifestPath,
+            imageCount: stage3Result.items.length,
+            totalTokens: stage3Result.usage.totalTokens,
+            a2uiHtmlPath: stage3Result.a2uiHtmlPath,
+            artifactHtmlPath: stage3Result.artifactHtmlPath,
+            dryRun: stage3Result.dryRun || false,
+          }
+        );
+      } else {
+        const stage4Result = await runStage4Flow({
+          workspaceRoot: './workspace',
+          runId: targetRunId,
+          concurrency: concurrencyOverride,
+          dryRun: isDryRun,
+          artifactDir: process.env.AGY_ARTIFACT_DIR || undefined,
+          openBrowser: hasOpen,
+        });
+        console.log(
+          `Stage 4 Audio CLI ${isDryRun ? 'Dry-Run ' : 'Run '}Complete (${stage4Result.runId}):`,
+          {
+            runId: stage4Result.runId,
+            outputDir: stage4Result.outputDir,
+            manifestPath: stage4Result.manifestPath,
+            trackCount: stage4Result.items.length,
+            totalTokens: stage4Result.usage.totalTokens,
+            a2uiHtmlPath: stage4Result.a2uiHtmlPath,
+            artifactHtmlPath: stage4Result.artifactHtmlPath,
+            dryRun: stage4Result.dryRun || false,
+          }
+        );
+      }
       return;
     }
 

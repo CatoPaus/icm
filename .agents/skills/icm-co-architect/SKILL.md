@@ -95,8 +95,8 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
    - Update [`workspace/_config/voice_guide.md`](../../workspace/_config/voice_guide.md).
    - Update [`prompts/02_script.md`](../../prompts/02_script.md) (`model: gemini-4-argon`, `thinkingLevel: MEDIUM`, `maxOutputTokens: 32768` or up to `65536`).
    - **Canonical Stage 2 JSON Schema Keys Recognized Automatically by `normalizeStage2ForA2ui()`** (use these directly in `prompts/02_script.md` frontmatter `output.schema` without reading or patching `src/index.ts`):
-     - **Top-level:** `title` (or `courseTitle` / `reportTitle` / `memoTitle`), `subtitle` (or `description` / `verdict`), `targetAudience` (or `audience`), `totalEstimatedMinutes` / `durationMinutes` / `readingTimeMinutes` (for duration in minutes; `estimatedDuration` is in seconds for short scripts or auto-inferred as minutes when modules/pillars have `durationMinutes`), `scriptBody` (or `visualSummary` / `executiveSummary` / `investmentThesis` / `memoBody` / `overview`), `spokenScript` (optional dedicated TTS narration string when separate from `visualSummary` / `scriptBody`), `learningObjectives` (or `keyTakeaways` / `thesisPoints`: `string[]`), `checklistGroups` (`{ category, items: string[] }[]`, or auto-extracted from Stage 1 Markdown `- [ ]` checklists), `scenarios` / `stressTests` / `cases` (`{ title, scenario, recommendation, resolution, mitigation, legalBasis }[]`).
-     - **Module / Pillar items (`trainingModules` / `modules` / `lessons` / `sections` / `pillars` / `analysisPillars`):** `moduleNumber` (or `pillarNumber` / `sectionNumber`), `title` (or `moduleTitle` / `pillarTitle` / `sectionTitle`), `durationMinutes` (or `readingTimeMinutes`), `legalBasis` (or `regulatoryBasis` / `legalReference` / `statute` / `analyticalFramework` / `valuationMethodology`), `narration` (or `analysis` / `content` / `summary` / `spokenNarration`), `spokenNarration` (optional dedicated TTS string when `analysis` / `narration` is visual-first), `slideCues` (or `keyPoints` / `keyTakeaways`: `string[]`), `actionItem` (or `recommendation` / `icDirective` / `practicalTask` / `exercise` / `boardActionItem`), `caseScenario` (or `scenario` / `stressTest` / `dilemma`), `caseResolution` (or `recommendedAction` / `mitigation` / `resolution` / `solution`).
+     - **Top-level:** `title` (or `courseTitle` / `reportTitle` / `memoTitle`), `subtitle` (or `description` / `verdict`), `targetAudience` (or `audience`), `totalEstimatedMinutes` / `durationMinutes` / `readingTimeMinutes` (for duration in minutes; `estimatedDuration` is in seconds for short scripts or auto-inferred as minutes when modules/pillars have `durationMinutes`), `scriptBody` (or `visualSummary` / `executiveSummary` / `investmentThesis` / `memoBody` / `overview`), `spokenScript` (optional dedicated TTS narration string when separate from `visualSummary` / `scriptBody`), `overviewVisualPrompt` (optional scene description consumed automatically by Stage 3 `03_visuals`), `learningObjectives` (or `keyTakeaways` / `thesisPoints`: `string[]`), `checklistGroups` (`{ category, items: string[] }[]`, or auto-extracted from Stage 1 Markdown `- [ ]` checklists), `scenarios` / `stressTests` / `cases` (`{ title, scenario, recommendation, resolution, mitigation, legalBasis }[]`).
+     - **Module / Pillar items (`trainingModules` / `modules` / `lessons` / `sections` / `pillars` / `analysisPillars`):** `moduleNumber` (or `pillarNumber` / `sectionNumber`), `title` (or `moduleTitle` / `pillarTitle` / `sectionTitle`), `durationMinutes` (or `readingTimeMinutes`), `legalBasis` (or `regulatoryBasis` / `legalReference` / `statute` / `analyticalFramework` / `valuationMethodology`), `narration` (or `analysis` / `content` / `summary` / `spokenNarration`), `spokenNarration` (optional dedicated TTS string when `analysis` / `narration` is visual-first), `visualPrompt` (optional scene description consumed automatically by Stage 3 `03_visuals`), `slideCues` (or `keyPoints` / `keyTakeaways`: `string[]`), `actionItem` (or `recommendation` / `icDirective` / `practicalTask` / `exercise` / `boardActionItem`), `caseScenario` (or `scenario` / `stressTest` / `dilemma`), `caseResolution` (or `recommendedAction` / `mitigation` / `resolution` / `solution`).
      - **Course vs. Non-Course Decision/Analytical Pipelines (Quiz Rule):**
        - For **course, training, or certification pipelines**, include `quizQuestion`, `quizOptions` (`string[]`), `quizCorrectIndex` (`0`-based integer), and `quizExplanation` on each module (or top-level `quiz`) so `a2ui.html` renders the interactive Quiz tab.
        - For **non-course analytical, investment, legal, executive, or decision pipelines** (e.g., equity valuation, Buy/Hold/Sell IC memo, M&A due diligence, legal compliance opinion, architecture RFC), **DO NOT** recommend or generate `quizQuestion` / `quizOptions` / `quizCorrectIndex` / `quizExplanation` / `quiz` in `prompts/02_script.md`. Instead, use `pillars` / `sections`, `thesisPoints` / `keyTakeaways`, `recommendation` / `actionItem` / `icDirective`, and `caseScenario` / `caseResolution` (or top-level `scenarios` / `stressTests`). When `quiz` is empty, `generateA2uiSurface()` automatically omits the Quiz tab from `a2ui.html` and switches the UI into analytical/decision mode.
@@ -114,11 +114,54 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
 
 ---
 
-## Phase 4: Adding Downstream Text or Multimodal Stages (`03_...`, `04_...`)
+## Phase 4: Adding Downstream Text or Multimodal Stages (`03_visuals`, `04_audio`, `03_...`)
 
+- **Built-In Zero-Patch Multimodal Stages (`prompts/03_visuals.md` & `prompts/04_audio.md`):**
+  - `runStage3Flow` (`npm run cli:stage3`), `runStage4Flow` (`npm run cli:stage4`), binary magic-byte MIME/extension detection (`detectMediaMimeAndExtension()` so JPEG/PNG/WebP/WAV/MP3 outputs always receive honest file extensions), `getIcmPipelineStatus()` downstream token aggregation, and automatic A2UI media hydration (`overview_hero_image` + `ModuleCarousel` `16:9` figures + `SpeechPlayer` studio `<audio>` controls, keeping compact relative `./stages/...` URLs in `a2ui_surface.json` while inlining portable `data:` URIs in `a2ui.html` and `a2ui_studio.html`) are **already pre-wired in [`src/index.ts`](../../src/index.ts)**! You do **not** need to read or patch `src/index.ts` to add Stage 3 illustrations or Stage 4 studio voiceover:
+  1. **Stage 3 Visual Illustrations (`prompts/03_visuals.md` -> `gemini-nano-banana-2.1`):**
+     - Create `prompts/03_visuals.md` with `output.format: image`, `aspectRatio: "16:9"` (or `"4:3"` / `"1:1"`), and `imageSize: "1K"` (or `"2K"`). Available Handlebars variables per slot (`overview` + `module_01..module_NN`): `{{slotId}}`, `{{slotKind}}`, `{{moduleNumber}}`, `{{slotTitle}}`, `{{courseTitle}}`, `{{subtitle}}`, `{{targetAudience}}`, `{{visualPrompt}}`, `{{narration}}`, `{{slideCues}}`, `{{actionItem}}`, `{{globalIdentity}}`, `{{workspaceContext}}`:
+       ```yaml
+       ---
+       model: gemini-nano-banana-2.1
+       aspectRatio: "16:9"
+       imageSize: "1K"
+       output:
+         format: image
+       ---
+       Create a clean 16:9 editorial illustration for "{{slotTitle}}" ({{courseTitle}}).
+       Scene direction: {{visualPrompt}}
+       Key visual elements: {{slideCues}}
+       Zero embedded text, watermarks, or labels inside the image.
+       ```
+     - Verify at zero token cost first, then run standalone (omitting `[runId]` automatically selects the latest Stage-2-complete run):
+       ```bash
+       npm run cli:stage3 -- --dry-run <runId>
+       npm run cli:stage3 -- --artifact-dir "<appDataDir>\brain\<conversation-id>" <runId>
+       ```
+     - Refresh `a2ui_studio.html` in the HTML Auxiliary Pane via a 1-byte `write_file(Append: true, Content: "\n", ArtifactMetadata: ...)` call and output clickable links to `a2ui_studio.html`, `a2ui.html`, and `stages/03_visuals/output/visuals_manifest.json` before asking the next question.
+  2. **Stage 4 Studio Voiceover (`prompts/04_audio.md` -> `gemini-3.8-flash-tts`):**
+     - Create `prompts/04_audio.md` with `output.format: audio`, `voice: "Kore"` (or `"Puck"`, `"Charon"`, `"Aoede"`, `"Fenrir"`), `audioMimeType: "audio/wav"`, and `sampleRate: 24000`. `runStage4Flow` automatically extracts each slot's Markdown-stripped narration (`spokenScript` / `scriptBody` + `spokenNarration` / `narration`) as the spoken `content[0].text` and passes the rendered `04_audio.md` body as `speech_metadata.style` (`{{slotId}}`, `{{slotKind}}`, `{{moduleNumber}}`, `{{slotTitle}}`, `{{courseTitle}}`, `{{targetAudience}}`, `{{voiceGuide}}`, `{{globalIdentity}}`):
+       ```yaml
+       ---
+       model: gemini-3.8-flash-tts
+       voice: "Kore"
+       audioMimeType: "audio/wav"
+       sampleRate: 24000
+       output:
+         format: audio
+       ---
+       Deliver "{{slotTitle}}" ({{courseTitle}}) in a warm, clear, steady studio voice.
+       {{#if voiceGuide}}{{voiceGuide}}{{/if}}
+       ```
+     - Verify at zero token cost first, then run standalone:
+       ```bash
+       npm run cli:stage4 -- --dry-run <runId>
+       npm run cli:stage4 -- --artifact-dir "<appDataDir>\brain\<conversation-id>" <runId>
+       ```
+     - Refresh `a2ui_studio.html` in the HTML Auxiliary Pane and output clickable links to `a2ui_studio.html`, `a2ui.html`, and `stages/04_audio/output/audio_manifest.json` before asking the next question.
 - **Adding a Vertical Context Layer (e.g., `workspace/_config/course_profile.md`):**
   - Load the file in `loadWorkspaceLayers()` inside [`src/index.ts`](../../src/index.ts) and inject it into the target `prompts/*.md` template.
-- **Adding a Horizontal Pipeline Stage (e.g., `prompts/03_slides.md`):**
+- **Adding a Custom Structured Text Stage (e.g., `prompts/03_slides.md`):**
   1. Create `prompts/03_<name>.md` using `model: gemini-4-argon`. `loadStagePromptContract()` in [`src/index.ts`](../../src/index.ts) natively parses flat scalars (`title: string`), scalar arrays (`bullets: string[]`), and nested object arrays (`slides(array):` or `slides[]:` followed by indented child fields) directly from YAML frontmatter, so you never need to hardcode JSON schemas in `src/index.ts`:
      ```yaml
      output:
@@ -134,13 +177,12 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
            speakerNotes: string
            visualPrompt: string
      ```
-  2. Add `runStage3Flow` and `--stage3` in [`src/index.ts`](../../src/index.ts) + `"cli:stage3"` in [`package.json`](../../package.json), and chain `runStage3Flow` inside `icmOrchestratorFlow`.
-  3. **Test Stage 3 standalone first** (`npm run cli:stage3 -- --dry-run <runId>`, then `npm run cli:stage3 -- <runId>`) and verify `stages/03_<name>/input/prompt_assembled.md`, `output/thinking_trace.md`, and the output artifact on disk.
-- **Adding Multimodal Stages (`03_visuals`, `04_audio`, `03_video`, Document Analysis):**
-  - Activate the `gemini-api-dev` or `gemini-omni-flash-api` skill on demand for exact `/v1beta/interactions` multimodal schemas (Progressive Disclosure — never bloat `GEMINI.md` or `CONTEXT.md` with API reference docs).
-  - You can implement multimodal stages directly in [`src/index.ts`](../../src/index.ts) via zero-dependency `fetch` calls to `https://generativelanguage.googleapis.com/v1beta/interactions` (`gemini-nano-banana-2.1` for PNG slide/visual generation; `gemini-3.8-flash-tts` with `response_format: { type: "audio" }` and `generation_config: { speech_config: [{ voice: "Kore" }] }` for WAV voiceover synthesis; `gemini-omni-1.1-flash` with `response_format: { type: "video", delivery: "uri" }` and `store: true` for MP4 video generation/extension), or invoke the `gemini-api` CLI binary (`gemini-api` on PATH, or `$env:LOCALAPPDATA\Programs\gemini-api\gemini-api.exe` on Windows if the IDE has not been restarted since installation):
-    - **Image Generation (`gemini-nano-banana-2.1`):** `gemini-api image "<prompt>" --out workspace/runs/<runId>/stages/03_visuals/output/slide_01.png`
-    - **Speech / Voiceover (`gemini-3.8-flash-tts`):** `gemini-api tts "<script>" --out workspace/runs/<runId>/stages/04_audio/output/voiceover.wav`
+  2. Wire a custom stage runner in [`src/index.ts`](../../src/index.ts) and test standalone (`--dry-run` first) to verify `stages/03_<name>/input/prompt_assembled.md`, `output/thinking_trace.md`, and the output artifact on disk.
+- **Video Generation (`gemini-omni-1.2-flash`) & Document Analysis:**
+  - Activate the `gemini-api-dev` or `gemini-omni-flash-api` skill on demand for exact `/v1beta/interactions` video/multimodal schemas (Progressive Disclosure — never bloat `GEMINI.md` or `CONTEXT.md` with API reference docs).
+  - For generative video (`gemini-omni-1.2-flash` with `response_format: { type: "video", delivery: "uri" }` and `store: true`), call `/v1beta/interactions` via native `fetch` or invoke the `gemini-api` CLI binary (`gemini-api` on PATH, or `$env:LOCALAPPDATA\Programs\gemini-api\gemini-api.exe` on Windows):
+    - **Image Generation (`gemini-nano-banana-2.1`):** `gemini-api image "<prompt>" --out workspace/runs/<runId>/stages/03_visuals/output/overview.jpg`
+    - **Speech / Voiceover (`gemini-3.8-flash-tts`):** `gemini-api tts "<script>" --out workspace/runs/<runId>/stages/04_audio/output/overview.wav`
     - **Document / PDF / Video Analysis:** `gemini-api analyze -i ./docs/source.pdf "Extract key data"`
     - **Dry-Run Inspection:** Append `--dry-run` to preview the Interactions API request without sending it.
 

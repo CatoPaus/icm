@@ -170,7 +170,7 @@
     },
     "ModuleCarousel": {
       "type": "object",
-      "description": "Renders Stage 2 trainingModules, lessons, modules, or analytical pillars with step-by-step navigation, metadata badges, slide cues, action items, and SpeechPlayer narration.",
+      "description": "Renders Stage 2 trainingModules, lessons, modules, or analytical pillars with step-by-step navigation, metadata badges, optional Stage 3 16:9 module illustrations (imageUrl), slide cues, action items, and SpeechPlayer narration (Stage 4 audioUrl or Web Speech API).",
       "properties": {
         "component": {
           "const": "ModuleCarousel"

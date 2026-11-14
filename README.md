@@ -80,7 +80,7 @@ All legacy text models (`gemini-2.5-*`, `gemini-3.5-*`, etc.) and deprecated sam
 | :--- | :--- | :--- | :--- | :--- |
 | **Stage 1: In-Depth Research** (`prompts/01_research.md`) | `gemini-4-argon` — **`HIGH`** (fallback: `MEDIUM`) | `65536` *(max streaming)* | `1,048,576` | Maximizes reasoning depth for multi-source synthesis and Google Search grounding with verbatim citations. |
 | **Stage 2+: Structured Synthesis** (`prompts/02_script.md`, `03_...`) | `gemini-4-argon` — **`MEDIUM`** (default) | `32768` | `1,048,576` | Balanced reasoning effort, latency, and token usage for structured JSON/Markdown generation from verified upstream artifacts. |
-| **Optional Multimodal Stages** (`03_visuals`, `04_audio`) | `gemini-nano-banana-2.1` (PNG images)<br>`gemini-3.8-flash-tts` (WAV speech) | N/A | `131,072` | Native `/v1beta/interactions` image and voiceover generation directly into stage output directories on disk. |
+| **Optional Multimodal Stages** (`03_visuals`, `04_audio`) | `gemini-nano-banana-2.1` (`.jpg`/`.png` visuals)<br>`gemini-3.8-flash-tts` (`.wav` studio voiceover) | N/A | `131,072` | Pre-wired `/v1beta/interactions` runners (`cli:stage3`, `cli:stage4`) with magic-byte MIME fidelity and automatic A2UI Studio media hydration. |
 
 ### Token Limits & 1M Context Window Reference (`gemini-4-argon`)
 * **Unified 1M Context Window (`1,048,576` tokens):** Shared across **Input + Thinking + Output**. Any stage can ingest up to ~1M tokens of source documents, transcripts, or prior-stage artifacts without code changes.
@@ -240,8 +240,17 @@ Because the ICM state lives in plain Markdown and JSON files on disk (`workspace
    ```
    *(Compares [`specification/UPSTREAM_LOCK.json`](./specification/UPSTREAM_LOCK.json) against `RinDig/Interpretable-Context-Methodology`, `GoogleCloudPlatform/open-knowledge-format`, and `google/A2UI` so new protocol releases or upstream convention updates are detected deterministically.)*
 
-### Multimodal Stage Expansion (`gemini-nano-banana-2.1`, `gemini-3.8-flash-tts`, & `gemini-api` CLI)
-Downstream stages that generate or analyze media files on disk (slide illustrations, voiceovers, video, music, or PDF corpora) can either call `/v1beta/interactions` directly via `fetch` in `src/index.ts` or use Google AI Studio's stateless **`gemini-api` CLI** (`google-gemini/gemini-api-cli`):
+### Multimodal Stage Expansion (`cli:stage3`, `cli:stage4`, `gemini-nano-banana-2.1`, `gemini-3.8-flash-tts`, & `gemini-api` CLI)
+`src/index.ts` ships with pre-wired Phase 4 multimodal runners (`runStage3Flow` / `npm run cli:stage3` and `runStage4Flow` / `npm run cli:stage4`), magic-byte binary MIME/extension detection (`detectMediaMimeAndExtension`), and automatic A2UI v1.0 media hydration (`overview_hero_image`, `ModuleCarousel` `16:9` figures, and `SpeechPlayer` studio `<audio>` controls). Simply add `prompts/03_visuals.md` (`output.format: image`) or `prompts/04_audio.md` (`output.format: audio`) and run:
+```bash
+npm run cli:stage3 -- --dry-run <runId>
+npm run cli:stage3 -- <runId>
+
+npm run cli:stage4 -- --dry-run <runId>
+npm run cli:stage4 -- <runId>
+```
+
+For ad-hoc media generation, generative video (`gemini-omni-1.2-flash`), or pre-Stage-1 PDF/video corpus analysis, you can also use Google AI Studio's stateless **`gemini-api` CLI** (`google-gemini/gemini-api-cli`):
 * **Install `gemini-api`:**
   * **Linux / macOS:**
     ```bash
@@ -253,11 +262,11 @@ Downstream stages that generate or analyze media files on disk (slide illustrati
   ```bash
   # Stage 3 Visuals: Generate slide or illustration assets (gemini-nano-banana-2.1)
   gemini-api image "Minimalist architectural diagram of a cloud-native mesh" \
-    --out workspace/runs/<runId>/stages/03_visuals/output/hero.png
+    --out workspace/runs/<runId>/stages/03_visuals/output/overview.jpg
 
   # Stage 4 Audio: Generate spoken voiceover from Stage 2 script (gemini-3.8-flash-tts)
   gemini-api tts "Welcome to Module 1..." \
-    --out workspace/runs/<runId>/stages/04_audio/output/voiceover.wav
+    --out workspace/runs/<runId>/stages/04_audio/output/overview.wav
 
   # Pre-Stage 1 Local Corpus Analysis: Analyze local PDFs or videos into Stage 1 input
   gemini-api analyze -i ./workspace/_config/reference.pdf "Extract all regulatory requirements"
