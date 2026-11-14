@@ -2,9 +2,9 @@
 
 **Open Knowledge Studio** (`open-knowledge-studio`) is a zero-dependency grounded research, compounding knowledge graph, and interactive surface engine built in TypeScript and Node.js. It unites three open architectural pillars on top of the **Google AI Interactions API (`/v1beta/interactions`)** and **Gemini 4 Argon (`gemini-4-argon`)**—with **zero runtime `npm` dependencies** and **zero external AI orchestration framework bloat**:
 
-1. **Interpretable Context Methodology (`ICM`):** A declarative, filesystem-first pipeline architecture where every context layer (`Layers 0–4`), assembled input prompt (`prompt_assembled.md`), reasoning/search trace (`thinking_trace.md`), and handoff artifact lives as plain Markdown or JSON on disk.
-2. **Open Knowledge Format (`OKF v0.2`):** Grounded primary-source provenance (`retrieved_at`, HTTP/HTML/PDF `last_modified`), structural domain-mismatch detection, zero-token human citation curation (`cli:verify`), explicit `trust_tier` gating (`unverified` → `human-reviewed`), progressive disclosure (`bundle/index.md`), and a compounding multi-concept knowledge graph (`viz.html`).
-3. **Agent-to-UI (`A2UI v1.0`) & Interactive Co-Architect Studio:** Compiles verified artifacts into declarative RFC 6901 JSON Pointer surfaces (`a2ui_surface.json` / `.jsonl` using `@path`, `@call`, and multi-catalog `@catalogId` bindings) and a self-contained, zero-CDN offline Studio (`a2ui.html`) featuring Stage-1 Intermission review with reactive loopback wakeup (`cli:ping-pong`), multi-run course/briefing switching, bilingual TTS, interactive checklists, case simulators, quizzes, and live knowledge graphs.
+1. **Interpretable Context Methodology (`ICM` — [`RinDig/Interpretable-Context-Methodology`](https://github.com/RinDig/Interpretable-Context-Methodology), Jake Van Clief, [`arXiv:2603.16021`](https://arxiv.org/abs/2603.16021)):** A declarative, filesystem-first pipeline architecture where every context layer (`Layers 0–4`), assembled input prompt (`prompt_assembled.md`), reasoning/search trace (`thinking_trace.md`), and handoff artifact lives as plain Markdown or JSON on disk, paired with zero-token pipeline status inspection (`npm run cli:status`).
+2. **Open Knowledge Format (`OKF v0.2` — [`GoogleCloudPlatform/open-knowledge-format`](https://github.com/GoogleCloudPlatform/open-knowledge-format)):** Grounded primary-source provenance (`retrieved_at`, HTTP/HTML/PDF `last_modified`), structural domain-mismatch detection, explicit source-conflict & evidence-gap surfacing, zero-token human citation curation (`cli:verify`), explicit `trust_tier` gating (`unverified` → `human-reviewed`), progressive disclosure (`bundle/index.md`), and a compounding multi-concept knowledge graph (`viz.html`).
+3. **Agent-to-UI (`A2UI v1.0` — [`google/A2UI`](https://github.com/google/A2UI)) & Interactive Co-Architect Studio:** Compiles verified artifacts into declarative RFC 6901 JSON Pointer surfaces (`a2ui_surface.json` / `.jsonl` using `@path`, `@call`, and multi-catalog `@catalogId` bindings) and a self-contained, zero-CDN offline Studio (`a2ui.html`) featuring Stage-1 Intermission review with reactive loopback wakeup (`cli:ping-pong`), multi-run course/briefing switching, bilingual TTS, interactive checklists, case simulators, quizzes, and live knowledge graphs.
 
 ---
 
@@ -121,8 +121,8 @@ The workspace layout maps abstract context layers directly to disk directories:
 ├── GEMINI.md                    # Antigravity 2.0 Main Agent Rules (ICM Co-Architect)
 ├── SPEC.md                      # Open Knowledge Format (OKF v0.2) Upstream Specification
 ├── A2UI_SPEC.md                 # Agent-to-UI (A2UI v1.0) Upstream Protocol Specification
-├── specification/               # Vendored A2UI v1.0 Schemas, Catalogs & Upstream Lock
-│   ├── UPSTREAM_LOCK.json       # Pinned google/A2UI commit SHA & protocolVersion ("1.0")
+├── specification/               # Vendored A2UI v1.0 Schemas, Catalogs & 3-Pillar Upstream Lock
+│   ├── UPSTREAM_LOCK.json       # Pinned ICM, OKF v0.2 & A2UI v1.0 upstream commits & versions
 │   ├── versions.json            # Official A2UI protocol version registry
 │   └── v1_0/                    # A2UI v1.0 JSON Schemas, Basic Catalog & ICM+OKF v0.2 Catalog
 ├── .agents/                     # Antigravity 2.0 Workspace Customizations
@@ -186,54 +186,59 @@ GEMINI_API_KEY="your-gemini-api-key"
 
 ---
 
-## Running the ICM + OKF v0.2 + A2UI v1.0 Pipeline (`cli:stage1`, `cli:verify`, `cli:stage2`, `cli:viz`, `cli:a2ui`, `spec:check`, `cli`, `--dry-run`)
+## Running the ICM + OKF v0.2 + A2UI v1.0 Pipeline (`cli:status`, `cli:stage1`, `cli:verify`, `cli:stage2`, `cli:viz`, `cli:a2ui`, `spec:check`, `cli`, `--dry-run`)
 
 Because the ICM state lives in plain Markdown and JSON files on disk (`workspace/runs/<runId>/` and `workspace/bundle/`) and `src/index.ts` uses pure cross-platform Node.js with zero external dependencies, you can run every stage standalone from any Windows, macOS, or Linux terminal, SSH session, Docker container, or cron job:
 
-1. **Preview the assembled 5-layer prompt and Interactions API request at zero token cost (`--dry-run`):**
+1. **Inspect current pipeline & OKF v0.2 bundle status at zero token cost (`cli:status`):**
+   ```bash
+   npm run cli:status
+   ```
+   *(Scans `workspace/bundle/` and `workspace/runs/` and prints an ASCII pipeline flow dashboard `[01_research] ---> [OKF Gate] ---> [02_script] ---> [A2UI v1.0]`, trust tiers, staleness, source counts, token telemetry, and next-step hints; pass `-- --json` for machine-readable JSON.)*
+2. **Preview the assembled 5-layer prompt and Interactions API request at zero token cost (`--dry-run`):**
    ```bash
    npm run cli:stage1 -- --dry-run "Cloud Native Architecture in 2026"
    ```
    *(Writes `workspace/runs/_dry_run/stages/01_research/input/prompt_assembled.md` and prints the exact HTTP request headers and body with credentials redacted.)*
-2. **Run Stage 1 only (recommended when testing/tuning `01_research.md` before Stage 2):**
+3. **Run Stage 1 only (recommended when testing/tuning `01_research.md` before Stage 2):**
    ```bash
    npm run cli:stage1 -- "Cloud Native Architecture in 2026"
    ```
    *(Stops at the Human-in-the-Loop Intermission gate after writing `input/prompt_assembled.md`, `output/thinking_trace.md`, `output/research_summary.md` with OKF v0.2 frontmatter + `[^id]` footnotes, syncing to `workspace/bundle/`, and logging token + OKF telemetry to `meta.json`.)*
-3. **Inspect, edit, and verify the Stage 1 OKF concept artifact at Intermission (`cli:verify`):**
+4. **Inspect, edit, and verify the Stage 1 OKF concept artifact at Intermission (`cli:verify`):**
    ```bash
    nano workspace/runs/<runId>/stages/01_research/output/research_summary.md
    npm run cli:verify -- <runId> --by human:reviewer
    ```
    *(Stamps `verified: [{ by: "human:reviewer", at: "..." }]` and `status: stable`, upgrading `trust_tier` from `unverified` to `human-reviewed` in both `research_summary.md` and `workspace/bundle/`.)*
-4. **Run or re-run Stage 2 standalone after reviewing/verifying Stage 1 (supports `--dry-run`, `--verify`, and `--a2ui`):**
+5. **Run or re-run Stage 2 standalone after reviewing/verifying Stage 1 (supports `--dry-run`, `--verify`, and `--a2ui`):**
    ```bash
    npm run cli:stage2 -- --dry-run <runId>
    npm run cli:stage2 -- <runId>
    ```
-5. **Generate the zero-dependency interactive OKF Knowledge Graph Explorer (`cli:viz`):**
+6. **Generate the zero-dependency interactive OKF Knowledge Graph Explorer (`cli:viz`):**
    ```bash
    npm run cli:viz
    ```
    *(Walks `workspace/bundle/` and writes a self-contained single-file `workspace/bundle/viz.html` with Cytoscape.js force-directed graph, trust-tier & staleness badges, and bidirectional backlinks.)*
-6. **Compile the Declarative A2UI v1.0 Surface & Bi-Directional Studio (`cli:a2ui`):**
+7. **Compile the Declarative A2UI v1.0 Surface & Bi-Directional Studio (`cli:a2ui`):**
    ```bash
    npm run cli:a2ui -- <runId>
    ```
    *(Compiles the run's Stage 1 OKF v0.2 Markdown, Stage 2 JSON, and OKF Bundle into declarative **A2UI v1.0** surface artifacts (`workspace/runs/<runId>/stages/02_script/output/a2ui_surface.json` and `a2ui_surface.jsonl` with `version: "1.0"`, `createSurface`, `updateComponents`, and `updateDataModel` bound via `@path` RFC 6901 JSON Pointers and `@call` functions) plus a self-contained **A2UI Studio HTML app** (`workspace/runs/<runId>/a2ui.html` and `workspace/bundle/a2ui.html`) implementing both **Tier 1 Basic Catalog Primitives** (`Tabs`, `Card`, `Row`, `Column`, `List`, `Text`, `CheckBox`, `ChoicePicker`, `TextField`, `DateTimeInput`, `Slider`, `Button`, `AudioPlayer`, `Video`, `Image`, `Icon`, `Divider`, `Modal`) and **`@catalogId`-scoped Tier 2 ICM + OKF Domain Components** (`Badge`, `SpeechPlayer`, `OkfMarkdown`, `OkfKnowledgeGraph`, `InteractiveChecklist`, `ModuleCarousel`, `QuizRunner`, `CaseSimulator`). See [`A2UI_SPEC.md`](./A2UI_SPEC.md) for the upstream A2UI v1.0 protocol specification.)*
-7. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
+8. **Or run the full pipeline (Stage 1 + Stage 2) in one pass:**
    ```bash
    npm run cli -- "Cloud Native Architecture in 2026"
    ```
-8. **Read the final Stage 2 output:**
+9. **Read the final Stage 2 output:**
    ```bash
    cat workspace/runs/<runId>/stages/02_script/output/script_draft.json
    ```
-9. **Check upstream `google/A2UI` protocol version & commit lock (`spec:check`):**
+10. **Check all three upstream open pillars (`ICM`, `OKF v0.2`, `A2UI v1.0`) against live GitHub commits & versions (`spec:check`):**
    ```bash
    npm run spec:check
    ```
-   *(Compares [`specification/UPSTREAM_LOCK.json`](./specification/UPSTREAM_LOCK.json) against live `google/A2UI` `versions.json` and latest `main` commit SHA so future protocol updates are detected deterministically.)*
+   *(Compares [`specification/UPSTREAM_LOCK.json`](./specification/UPSTREAM_LOCK.json) against `RinDig/Interpretable-Context-Methodology`, `GoogleCloudPlatform/open-knowledge-format`, and `google/A2UI` so new protocol releases or upstream convention updates are detected deterministically.)*
 
 ### Multimodal Stage Expansion (`gemini-nano-banana-2.1`, `gemini-3.8-flash-tts`, & `gemini-api` CLI)
 Downstream stages that generate or analyze media files on disk (slide illustrations, voiceovers, video, music, or PDF corpora) can either call `/v1beta/interactions` directly via `fetch` in `src/index.ts` or use Google AI Studio's stateless **`gemini-api` CLI** (`google-gemini/gemini-api-cli`):

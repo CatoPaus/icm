@@ -1,23 +1,43 @@
 {
-  "$comment": "Tracks vendored upstream protocol specifications so `npm run spec:check` can detect new upstream releases or main-branch schema updates.",
+  "$comment": "Tracks the three upstream open methodology and protocol specifications (`icm`, `okf`, `a2ui`) so `npm run spec:check` can detect new upstream releases, convention updates, or main-branch schema updates.",
+  "icm": {
+    "repository": "RinDig/Interpretable-Context-Methodology",
+    "author": "Jake Van Clief",
+    "paperUrl": "https://arxiv.org/abs/2603.16021",
+    "branch": "main",
+    "commit": "02ba5d85c7871b75c7c702a2d8da6524723d53d4",
+    "committedAt": "2026-07-25T16:17:00Z",
+    "trackedPaths": [
+      "_core",
+      "README.md"
+    ],
+    "conventionsPath": "_core/CONVENTIONS.md"
+  },
+  "okf": {
+    "repository": "GoogleCloudPlatform/open-knowledge-format",
+    "branch": "main",
+    "commit": "0b87c52c6ef999286c745e19998fdfcd03d5dbee",
+    "committedAt": "2026-08-21T19:31:43Z",
+    "trackedPaths": [
+      "SPEC.md"
+    ],
+    "okfVersion": "0.2",
+    "specFile": "SPEC.md",
+    "rawSpecUrl": "https://raw.githubusercontent.com/GoogleCloudPlatform/open-knowledge-format/main/SPEC.md"
+  },
   "a2ui": {
     "repository": "google/A2UI",
     "branch": "main",
-    "commit": "24d1bf9c830071f74c9c908433e73cc6cbe0aa33",
-    "committedAt": "2026-11-11T05:27:55Z",
+    "commit": "d56f84f92a8478220d652af6ed7dd7abe5bfa14c",
+    "committedAt": "2026-11-13T02:36:39Z",
     "trackedPaths": [
-      "specification",
-      "catalogs/basic/v1"
+      "specification/v1_0",
+      "specification/versions.json",
+      "catalogs/basic/v1/catalog.json"
     ],
     "protocolVersion": "1.0",
     "specDir": "specification/v1_0",
     "basicCatalogUpstreamPath": "catalogs/basic/v1/catalog.json",
     "versionsUrl": "https://raw.githubusercontent.com/google/A2UI/main/specification/versions.json"
-  },
-  "okf": {
-    "repository": "GoogleCloudPlatform/open-knowledge-format",
-    "branch": "main",
-    "okfVersion": "0.2",
-    "specFile": "SPEC.md"
   }
 }

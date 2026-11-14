@@ -12,6 +12,7 @@
     "cli:viz": "npx tsx --env-file-if-exists=.env.local src/index.ts --viz",
     "cli:a2ui": "npx tsx --env-file-if-exists=.env.local src/index.ts --a2ui",
     "cli:ping-pong": "npx tsx --env-file-if-exists=.env.local src/index.ts --ping-pong",
+    "cli:status": "npx tsx src/index.ts --status",
     "test": "npx tsx src/index.ts --test",
     "spec:check": "npx tsx src/index.ts --spec-check",
     "typecheck": "npx tsc --noEmit",

@@ -10228,20 +10228,80 @@ export function startA2uiPingPongListener(options?: {
   });
 }
 
+export interface UpstreamPillarCheckResult {
+  pillar: 'icm' | 'okf' | 'a2ui';
+  repository: string;
+  branch: string;
+  status: 'up-to-date' | 'commit-drift' | 'new-protocol-version' | 'offline';
+  pinnedVersion?: string;
+  upstreamCurrentVersion?: string;
+  pinnedCommit: string;
+  upstreamHeadCommit?: string;
+  paperUrl?: string;
+  message: string;
+}
+
+async function fetchLatestTrackedCommit(
+  repoSlug: string,
+  branch: string,
+  trackedPaths: string[],
+  headers: Record<string, string>,
+  timeoutMs: number
+): Promise<{ commit?: string; httpFailed: boolean }> {
+  const pathsToQuery = trackedPaths.length > 0 ? trackedPaths : [''];
+  let anySuccess = false;
+  const results = await Promise.all(
+    pathsToQuery.map(async (trackedPath) => {
+      try {
+        const pathParam = trackedPath ? `&path=${encodeURIComponent(trackedPath)}` : '';
+        const res = await fetch(
+          `https://api.github.com/repos/${repoSlug}/commits?sha=${encodeURIComponent(branch)}${pathParam}&per_page=1`,
+          {
+            headers,
+            signal: AbortSignal.timeout(timeoutMs),
+          }
+        );
+        if (!res.ok) return undefined;
+        anySuccess = true;
+        const commitArr = (await res.json()) as Array<{
+          sha?: string;
+          commit?: { committer?: { date?: string } };
+        }>;
+        const top = Array.isArray(commitArr) ? commitArr[0] : undefined;
+        if (!top || typeof top.sha !== 'string') return undefined;
+        return {
+          sha: top.sha,
+          dateMs: top.commit?.committer?.date ? Date.parse(top.commit.committer.date) || 0 : 0,
+        };
+      } catch {
+        return undefined;
+      }
+    })
+  );
+  const valid = results.filter((c): c is { sha: string; dateMs: number } => Boolean(c));
+  if (valid.length === 0) {
+    return { commit: undefined, httpFailed: !anySuccess };
+  }
+  valid.sort((a, b) => b.dateMs - a.dateMs);
+  return { commit: valid[0].sha, httpFailed: false };
+}
+
 /**
- * Checks `specification/UPSTREAM_LOCK.json` against upstream `google/A2UI` (`versions.json` + `main` HEAD)
- * at zero dependency cost so maintainers can detect new A2UI specification releases (`npm run spec:check`).
+ * Checks all three open architectural pillars pinned in `specification/UPSTREAM_LOCK.json`
+ * (`icm`: `RinDig/Interpretable-Context-Methodology`, `okf`: `GoogleCloudPlatform/open-knowledge-format`,
+ * `a2ui`: `google/A2UI`) against live upstream GitHub commits and version manifests at zero dependency cost.
  */
-export async function checkUpstreamA2uiSpec(options?: {
+export async function checkUpstreamSpecs(options?: {
   lockPath?: string;
   timeoutMs?: number;
 }): Promise<{
   status: 'up-to-date' | 'commit-drift' | 'new-protocol-version' | 'offline';
-  pinnedProtocolVersion: string;
-  upstreamCurrentVersion?: string;
-  pinnedCommit: string;
-  upstreamHeadCommit?: string;
-  message: string;
+  pillars: {
+    icm: UpstreamPillarCheckResult;
+    okf: UpstreamPillarCheckResult;
+    a2ui: UpstreamPillarCheckResult;
+  };
+  summary: string;
 }> {
   const lockCandidates = options?.lockPath
     ? [path.resolve(options.lockPath)]
@@ -10259,115 +10319,667 @@ export async function checkUpstreamA2uiSpec(options?: {
     throw new Error('Missing specification/UPSTREAM_LOCK.json');
   }
   const lockJson = JSON.parse(fs.readFileSync(resolvedLock, 'utf-8'));
-  const pinnedProtocolVersion = String(lockJson?.a2ui?.protocolVersion || A2UI_PROTOCOL_VERSION);
-  const pinnedCommit = String(lockJson?.a2ui?.commit || '');
-  const versionsUrl = String(
-    lockJson?.a2ui?.versionsUrl ||
-      'https://raw.githubusercontent.com/google/A2UI/main/specification/versions.json'
-  );
-  const repoSlug = String(lockJson?.a2ui?.repository || 'google/A2UI');
-  const branch = String(lockJson?.a2ui?.branch || 'main');
   const timeoutMs = options?.timeoutMs ?? 6000;
+  const headers = {
+    Accept: 'application/json',
+    'User-Agent': 'open-knowledge-studio-spec-check',
+  };
 
-  try {
-    const headers = {
-      Accept: 'application/json',
-      'User-Agent': 'open-knowledge-studio-spec-check',
-    };
-    const verRes = await fetch(versionsUrl, {
+  const checkIcmPillar = async (): Promise<UpstreamPillarCheckResult> => {
+    const repoSlug = String(
+      lockJson?.icm?.repository || 'RinDig/Interpretable-Context-Methodology'
+    );
+    const branch = String(lockJson?.icm?.branch || 'main');
+    const pinnedCommit = String(lockJson?.icm?.commit || '');
+    const paperUrl = lockJson?.icm?.paperUrl ? String(lockJson.icm.paperUrl) : undefined;
+    const trackedPaths: string[] =
+      Array.isArray(lockJson?.icm?.trackedPaths) && lockJson.icm.trackedPaths.length > 0
+        ? lockJson.icm.trackedPaths.map((p: unknown) => String(p))
+        : ['_core', 'README.md'];
+
+    const headInfo = await fetchLatestTrackedCommit(
+      repoSlug,
+      branch,
+      trackedPaths,
       headers,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!verRes.ok) {
+      timeoutMs
+    );
+    if (!headInfo.commit) {
       return {
+        pillar: 'icm',
+        repository: repoSlug,
+        branch,
         status: 'offline',
-        pinnedProtocolVersion,
         pinnedCommit,
-        message: `Unable to fetch upstream versions.json (HTTP ${verRes.status}); local pin is A2UI v${pinnedProtocolVersion} @ ${pinnedCommit.slice(0, 12)}.`,
+        paperUrl,
+        message: `Offline or GitHub API rate-limited for ${repoSlug}; local pin is ${pinnedCommit.slice(0, 12)}.`,
       };
     }
-    const versionsList = (await verRes.json()) as Array<{ version?: string; status?: string }>;
-    const currentEntry = Array.isArray(versionsList)
-      ? versionsList.find((v) => v?.status === 'current')
-      : undefined;
-    const upstreamCurrentVersion = String(currentEntry?.version || '').replace(/^v/i, '');
+    if (pinnedCommit && headInfo.commit !== pinnedCommit) {
+      return {
+        pillar: 'icm',
+        repository: repoSlug,
+        branch,
+        status: 'commit-drift',
+        pinnedCommit,
+        upstreamHeadCommit: headInfo.commit,
+        paperUrl,
+        message: `Newer upstream commit(s) on ${repoSlug}@${branch}: ${headInfo.commit.slice(0, 12)} (local pin: ${pinnedCommit.slice(0, 12)}).`,
+      };
+    }
+    return {
+      pillar: 'icm',
+      repository: repoSlug,
+      branch,
+      status: 'up-to-date',
+      pinnedCommit,
+      upstreamHeadCommit: headInfo.commit,
+      paperUrl,
+      message: `ICM conventions are up to date with ${repoSlug}@${branch} (${headInfo.commit.slice(0, 12)}).`,
+    };
+  };
 
-    const trackedPaths: string[] = Array.isArray(lockJson?.a2ui?.trackedPaths) &&
-      lockJson.a2ui.trackedPaths.length > 0
-      ? lockJson.a2ui.trackedPaths.map((p: unknown) => String(p))
-      : ['specification', 'catalogs/basic/v1'];
+  const checkOkfPillar = async (): Promise<UpstreamPillarCheckResult> => {
+    const repoSlug = String(
+      lockJson?.okf?.repository || 'GoogleCloudPlatform/open-knowledge-format'
+    );
+    const branch = String(lockJson?.okf?.branch || 'main');
+    const pinnedVersion = String(lockJson?.okf?.okfVersion || '0.2');
+    const pinnedCommit = String(lockJson?.okf?.commit || '');
+    const rawSpecUrl = String(
+      lockJson?.okf?.rawSpecUrl ||
+        `https://raw.githubusercontent.com/${repoSlug}/${branch}/SPEC.md`
+    );
+    const trackedPaths: string[] =
+      Array.isArray(lockJson?.okf?.trackedPaths) && lockJson.okf.trackedPaths.length > 0
+        ? lockJson.okf.trackedPaths.map((p: unknown) => String(p))
+        : ['SPEC.md'];
 
-    let upstreamHeadCommit: string | undefined;
+    let upstreamCurrentVersion: string | undefined;
+    let rawSpecOk = false;
     try {
-      const pathResults = await Promise.all(
-        trackedPaths.map(async (trackedPath) => {
-          const commitRes = await fetch(
-            `https://api.github.com/repos/${repoSlug}/commits?sha=${encodeURIComponent(branch)}&path=${encodeURIComponent(trackedPath)}&per_page=1`,
-            {
-              headers,
-              signal: AbortSignal.timeout(timeoutMs),
-            }
-          );
-          if (!commitRes.ok) return undefined;
-          const commitArr = (await commitRes.json()) as Array<{
-            sha?: string;
-            commit?: { committer?: { date?: string } };
-          }>;
-          const top = Array.isArray(commitArr) ? commitArr[0] : undefined;
-          if (!top || typeof top.sha !== 'string') return undefined;
-          return {
-            sha: top.sha,
-            dateMs: top.commit?.committer?.date ? Date.parse(top.commit.committer.date) || 0 : 0,
-          };
-        })
-      );
-      const validCommits = pathResults.filter(
-        (c): c is { sha: string; dateMs: number } => Boolean(c)
-      );
-      if (validCommits.length > 0) {
-        validCommits.sort((a, b) => b.dateMs - a.dateMs);
-        upstreamHeadCommit = validCommits[0].sha;
+      const specRes = await fetch(rawSpecUrl, {
+        headers: { 'User-Agent': headers['User-Agent'] },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (specRes.ok) {
+        rawSpecOk = true;
+        const specSnippet = (await specRes.text()).slice(0, 1024);
+        const verMatch = specSnippet.match(/\*\*Version\s+([0-9]+(?:\.[0-9]+)*)\*\*/i);
+        if (verMatch) {
+          upstreamCurrentVersion = verMatch[1];
+        }
       }
     } catch {
-      // GitHub API rate-limit or restricted network; versions.json already succeeded
+      // Handled below if commit check also fails
     }
 
-    if (upstreamCurrentVersion && upstreamCurrentVersion !== pinnedProtocolVersion) {
+    const headInfo = await fetchLatestTrackedCommit(
+      repoSlug,
+      branch,
+      trackedPaths,
+      headers,
+      timeoutMs
+    );
+    if (!rawSpecOk && !headInfo.commit) {
       return {
-        status: 'new-protocol-version',
-        pinnedProtocolVersion,
-        upstreamCurrentVersion,
+        pillar: 'okf',
+        repository: repoSlug,
+        branch,
+        status: 'offline',
+        pinnedVersion,
         pinnedCommit,
-        upstreamHeadCommit,
-        message: `New upstream A2UI current version available: v${upstreamCurrentVersion} (local pin: v${pinnedProtocolVersion} @ ${pinnedCommit.slice(0, 12)}).`,
+        message: `Offline or unreachable for ${repoSlug}; local pin is OKF v${pinnedVersion} @ ${pinnedCommit.slice(0, 12)}.`,
       };
     }
-    if (upstreamHeadCommit && pinnedCommit && upstreamHeadCommit !== pinnedCommit) {
+    if (upstreamCurrentVersion && upstreamCurrentVersion !== pinnedVersion) {
       return {
+        pillar: 'okf',
+        repository: repoSlug,
+        branch,
+        status: 'new-protocol-version',
+        pinnedVersion,
+        upstreamCurrentVersion,
+        pinnedCommit,
+        upstreamHeadCommit: headInfo.commit,
+        message: `New upstream OKF version available: v${upstreamCurrentVersion} (local pin: v${pinnedVersion} @ ${pinnedCommit.slice(0, 12)}).`,
+      };
+    }
+    if (headInfo.commit && pinnedCommit && headInfo.commit !== pinnedCommit) {
+      return {
+        pillar: 'okf',
+        repository: repoSlug,
+        branch,
         status: 'commit-drift',
-        pinnedProtocolVersion,
+        pinnedVersion,
+        upstreamCurrentVersion: upstreamCurrentVersion || pinnedVersion,
+        pinnedCommit,
+        upstreamHeadCommit: headInfo.commit,
+        message: `OKF v${pinnedVersion} has newer upstream commit(s) on ${repoSlug}@${branch}: ${headInfo.commit.slice(0, 12)} (local pin: ${pinnedCommit.slice(0, 12)}).`,
+      };
+    }
+    return {
+      pillar: 'okf',
+      repository: repoSlug,
+      branch,
+      status: 'up-to-date',
+      pinnedVersion,
+      upstreamCurrentVersion: upstreamCurrentVersion || pinnedVersion,
+      pinnedCommit,
+      upstreamHeadCommit: headInfo.commit,
+      message: `Vendored OKF v${pinnedVersion} SPEC.md is up to date with ${repoSlug}@${branch} (${(headInfo.commit || pinnedCommit).slice(0, 12)}).`,
+    };
+  };
+
+  const checkA2uiPillar = async (): Promise<UpstreamPillarCheckResult> => {
+    const pinnedProtocolVersion = String(lockJson?.a2ui?.protocolVersion || A2UI_PROTOCOL_VERSION);
+    const pinnedCommit = String(lockJson?.a2ui?.commit || '');
+    const versionsUrl = String(
+      lockJson?.a2ui?.versionsUrl ||
+        'https://raw.githubusercontent.com/google/A2UI/main/specification/versions.json'
+    );
+    const repoSlug = String(lockJson?.a2ui?.repository || 'google/A2UI');
+    const branch = String(lockJson?.a2ui?.branch || 'main');
+    const trackedPaths: string[] =
+      Array.isArray(lockJson?.a2ui?.trackedPaths) && lockJson.a2ui.trackedPaths.length > 0
+        ? lockJson.a2ui.trackedPaths.map((p: unknown) => String(p))
+        : ['specification/v1_0', 'specification/versions.json', 'catalogs/basic/v1/catalog.json'];
+
+    try {
+      const verRes = await fetch(versionsUrl, {
+        headers,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!verRes.ok) {
+        return {
+          pillar: 'a2ui',
+          repository: repoSlug,
+          branch,
+          status: 'offline',
+          pinnedVersion: pinnedProtocolVersion,
+          pinnedCommit,
+          message: `Unable to fetch upstream versions.json (HTTP ${verRes.status}); local pin is A2UI v${pinnedProtocolVersion} @ ${pinnedCommit.slice(0, 12)}.`,
+        };
+      }
+      const versionsList = (await verRes.json()) as Array<{ version?: string; status?: string }>;
+      const currentEntry = Array.isArray(versionsList)
+        ? versionsList.find((v) => v?.status === 'current')
+        : undefined;
+      const upstreamCurrentVersion = String(currentEntry?.version || '').replace(/^v/i, '');
+
+      const headInfo = await fetchLatestTrackedCommit(
+        repoSlug,
+        branch,
+        trackedPaths,
+        headers,
+        timeoutMs
+      );
+      const upstreamHeadCommit = headInfo.commit;
+
+      if (upstreamCurrentVersion && upstreamCurrentVersion !== pinnedProtocolVersion) {
+        return {
+          pillar: 'a2ui',
+          repository: repoSlug,
+          branch,
+          status: 'new-protocol-version',
+          pinnedVersion: pinnedProtocolVersion,
+          upstreamCurrentVersion,
+          pinnedCommit,
+          upstreamHeadCommit,
+          message: `New upstream A2UI current version available: v${upstreamCurrentVersion} (local pin: v${pinnedProtocolVersion} @ ${pinnedCommit.slice(0, 12)}).`,
+        };
+      }
+      if (upstreamHeadCommit && pinnedCommit && upstreamHeadCommit !== pinnedCommit) {
+        return {
+          pillar: 'a2ui',
+          repository: repoSlug,
+          branch,
+          status: 'commit-drift',
+          pinnedVersion: pinnedProtocolVersion,
+          upstreamCurrentVersion: upstreamCurrentVersion || pinnedProtocolVersion,
+          pinnedCommit,
+          upstreamHeadCommit,
+          message: `A2UI v${pinnedProtocolVersion} is current, with newer upstream commit(s) on ${repoSlug}@${branch}: ${upstreamHeadCommit.slice(0, 12)} (local pin: ${pinnedCommit.slice(0, 12)}).`,
+        };
+      }
+      return {
+        pillar: 'a2ui',
+        repository: repoSlug,
+        branch,
+        status: 'up-to-date',
+        pinnedVersion: pinnedProtocolVersion,
         upstreamCurrentVersion: upstreamCurrentVersion || pinnedProtocolVersion,
         pinnedCommit,
         upstreamHeadCommit,
-        message: `A2UI v${pinnedProtocolVersion} is current, with newer upstream commit(s) on ${repoSlug}@${branch}: ${upstreamHeadCommit.slice(0, 12)} (local pin: ${pinnedCommit.slice(0, 12)}).`,
+        message: `Vendored A2UI v${pinnedProtocolVersion} specification is up to date with ${repoSlug}@${branch} (${(upstreamHeadCommit || pinnedCommit).slice(0, 12)}).`,
+      };
+    } catch (err: any) {
+      return {
+        pillar: 'a2ui',
+        repository: repoSlug,
+        branch,
+        status: 'offline',
+        pinnedVersion: pinnedProtocolVersion,
+        pinnedCommit,
+        message: `Offline or unreachable (${err?.message || 'network error'}); local pin is A2UI v${pinnedProtocolVersion} @ ${pinnedCommit.slice(0, 12)}.`,
       };
     }
-    return {
-      status: 'up-to-date',
-      pinnedProtocolVersion,
-      upstreamCurrentVersion: upstreamCurrentVersion || pinnedProtocolVersion,
-      pinnedCommit,
-      upstreamHeadCommit,
-      message: `Vendored A2UI v${pinnedProtocolVersion} specification is up to date with ${repoSlug}@${branch} (${(upstreamHeadCommit || pinnedCommit).slice(0, 12)}).`,
-    };
-  } catch (err: any) {
-    return {
-      status: 'offline',
-      pinnedProtocolVersion,
-      pinnedCommit,
-      message: `Offline or unreachable (${err?.message || 'network error'}); local pin is A2UI v${pinnedProtocolVersion} @ ${pinnedCommit.slice(0, 12)}.`,
-    };
+  };
+
+  const [icm, okf, a2ui] = await Promise.all([
+    checkIcmPillar(),
+    checkOkfPillar(),
+    checkA2uiPillar(),
+  ]);
+  const all = [icm, okf, a2ui];
+  let status: 'up-to-date' | 'commit-drift' | 'new-protocol-version' | 'offline' = 'up-to-date';
+  if (all.some((p) => p.status === 'new-protocol-version')) {
+    status = 'new-protocol-version';
+  } else if (all.some((p) => p.status === 'commit-drift')) {
+    status = 'commit-drift';
+  } else if (all.some((p) => p.status === 'offline')) {
+    status = 'offline';
   }
+
+  return {
+    status,
+    pillars: { icm, okf, a2ui },
+    summary: `ICM (${icm.status}) | OKF v${okf.pinnedVersion || '0.2'} (${okf.status}) | A2UI v${a2ui.pinnedVersion || A2UI_PROTOCOL_VERSION} (${a2ui.status})`,
+  };
+}
+
+/**
+ * Checks `specification/UPSTREAM_LOCK.json` against upstream `google/A2UI` (`versions.json` + `main` HEAD)
+ * as well as `RinDig/Interpretable-Context-Methodology` and `GoogleCloudPlatform/open-knowledge-format`
+ * at zero dependency cost (`npm run spec:check`).
+ */
+export async function checkUpstreamA2uiSpec(options?: {
+  lockPath?: string;
+  timeoutMs?: number;
+}): Promise<{
+  status: 'up-to-date' | 'commit-drift' | 'new-protocol-version' | 'offline';
+  pinnedProtocolVersion: string;
+  upstreamCurrentVersion?: string;
+  pinnedCommit: string;
+  upstreamHeadCommit?: string;
+  message: string;
+  pillars?: {
+    icm: UpstreamPillarCheckResult;
+    okf: UpstreamPillarCheckResult;
+    a2ui: UpstreamPillarCheckResult;
+  };
+}> {
+  const full = await checkUpstreamSpecs(options);
+  const a2ui = full.pillars.a2ui;
+  return {
+    status: full.status,
+    pinnedProtocolVersion: a2ui.pinnedVersion || A2UI_PROTOCOL_VERSION,
+    upstreamCurrentVersion: a2ui.upstreamCurrentVersion,
+    pinnedCommit: a2ui.pinnedCommit,
+    upstreamHeadCommit: a2ui.upstreamHeadCommit,
+    message: `${a2ui.message} [3-Pillar Summary: ${full.summary}]`,
+    pillars: full.pillars,
+  };
+}
+
+export interface IcmBundleConceptStatus {
+  relativePath: string;
+  title: string;
+  type: string;
+  status: string;
+  trustTier: TrustTier;
+  verifiedBy?: string;
+  isStale: boolean;
+  sourcesCount: number;
+}
+
+export interface IcmRunStageNodeStatus {
+  stageName: string;
+  state: 'COMPLETE' | 'PENDING';
+  outputFiles: string[];
+}
+
+export interface IcmRunPipelineStatus {
+  runId: string;
+  topic: string;
+  startedAt?: string;
+  stage1State: 'COMPLETE' | 'PENDING';
+  okfGateState: 'VERIFIED' | 'AWAITING REVIEW' | 'PENDING';
+  stage2State: 'COMPLETE' | 'PENDING';
+  downstreamStages: IcmRunStageNodeStatus[];
+  a2uiState: 'READY' | 'INTERMISSION' | 'PENDING';
+  okfStatus?: string;
+  trustTier?: TrustTier;
+  verifiedBy?: string;
+  isStale?: boolean;
+  sourcesCount: number;
+  domainWarningCount: number;
+  stage1Tokens: number;
+  stage2Tokens: number;
+  totalTokens: number;
+  nextStepHint: string;
+}
+
+export interface IcmPipelineStatusReport {
+  workspaceRoot: string;
+  layers: {
+    globalIdentity: boolean;
+    workspaceContext: boolean;
+    voiceGuide: boolean;
+  };
+  bundle: {
+    conceptCount: number;
+    humanReviewedCount: number;
+    unverifiedCount: number;
+    staleCount: number;
+    hasVizHtml: boolean;
+    hasA2uiHtml: boolean;
+    concepts: IcmBundleConceptStatus[];
+  };
+  runs: IcmRunPipelineStatus[];
+}
+
+/**
+ * Inspects `workspace/runs/` and `workspace/bundle/` at zero LLM token cost (`npm run cli:status`)
+ * and returns structured ICM + OKF v0.2 + A2UI v1.0 pipeline state inspired by
+ * `RinDig/Interpretable-Context-Methodology` (`_core/CONVENTIONS.md` `status` command).
+ */
+export function getIcmPipelineStatus(options?: {
+  workspaceRoot?: string;
+  runId?: string;
+}): IcmPipelineStatusReport {
+  const workspaceRoot = path.resolve(options?.workspaceRoot || './workspace');
+  const layers = {
+    globalIdentity: fs.existsSync(path.join(workspaceRoot, 'GEMINI.md')),
+    workspaceContext: fs.existsSync(path.join(workspaceRoot, 'CONTEXT.md')),
+    voiceGuide: fs.existsSync(path.join(workspaceRoot, '_config', 'voice_guide.md')),
+  };
+
+  const bundleDir = path.join(workspaceRoot, 'bundle');
+  const bundleConcepts: IcmBundleConceptStatus[] = [];
+  const walkBundleConcepts = (dir: string) => {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walkBundleConcepts(fullPath);
+      } else if (
+        entry.isFile() &&
+        entry.name.endsWith('.md') &&
+        entry.name !== 'index.md' &&
+        entry.name !== 'log.md'
+      ) {
+        try {
+          const raw = fs.readFileSync(fullPath, 'utf-8');
+          const doc = parseOkfDocument(raw);
+          const fm = doc.frontmatter || {};
+          const verifiedList = normalizeVerified(fm);
+          const relPath =
+            '/' + path.relative(bundleDir, fullPath).replace(/\\/g, '/').replace(/^\/+/, '');
+          bundleConcepts.push({
+            relativePath: relPath,
+            title: String(fm.title || path.basename(entry.name, '.md')),
+            type: String(fm.type || 'Concept'),
+            status: String(fm.status || 'draft'),
+            trustTier: getOkfTrustTier(fm),
+            verifiedBy: verifiedList[0]?.by,
+            isStale: isOkfStale(fm),
+            sourcesCount: Array.isArray(fm.sources) ? fm.sources.length : 0,
+          });
+        } catch {
+          // Ignore malformed non-OKF markdown files
+        }
+      }
+    }
+  };
+  walkBundleConcepts(bundleDir);
+  bundleConcepts.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+
+  const runsDir = path.join(workspaceRoot, 'runs');
+  const runs: Array<IcmRunPipelineStatus & { _sortMs: number }> = [];
+  const filterRunId = options?.runId?.trim();
+
+  if (fs.existsSync(runsDir)) {
+    for (const entry of fs.readdirSync(runsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const runName = entry.name;
+      if (
+        runName === '_dry_run' ||
+        runName.startsWith('_stage1_curation_test_') ||
+        runName.startsWith('.')
+      ) {
+        continue;
+      }
+      if (filterRunId && runName !== filterRunId && !runName.includes(filterRunId)) {
+        continue;
+      }
+
+      const runDir = path.join(runsDir, runName);
+      let mtimeMs = 0;
+      try {
+        mtimeMs = fs.statSync(runDir).mtimeMs;
+      } catch {
+        mtimeMs = 0;
+      }
+
+      const metaPath = path.join(runDir, 'meta.json');
+      let meta: Record<string, any> = {};
+      if (fs.existsSync(metaPath)) {
+        try {
+          meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        } catch {
+          meta = {};
+        }
+      }
+
+      const s1SummaryPath = path.join(
+        runDir,
+        'stages',
+        '01_research',
+        'output',
+        'research_summary.md'
+      );
+      const s2DraftPath = path.join(runDir, 'stages', '02_script', 'output', 'script_draft.json');
+      const a2uiHtmlPath = path.join(runDir, 'a2ui.html');
+      const a2uiSurfacePath = path.join(runDir, 'a2ui_surface.json');
+
+      const stage1Complete = fs.existsSync(s1SummaryPath);
+      const stage2Complete = fs.existsSync(s2DraftPath);
+      const hasA2uiArtifacts = fs.existsSync(a2uiHtmlPath) || fs.existsSync(a2uiSurfacePath);
+
+      let okfStatus: string | undefined;
+      let trustTier: TrustTier | undefined;
+      let verifiedBy: string | undefined;
+      let staleFlag: boolean | undefined;
+      let sourcesCount = 0;
+      let domainWarningCount = 0;
+      let inferredTopic = String(meta.topic || '');
+
+      if (stage1Complete) {
+        try {
+          const s1Doc = parseOkfDocument(fs.readFileSync(s1SummaryPath, 'utf-8'));
+          const fm = s1Doc.frontmatter || {};
+          okfStatus = String(fm.status || 'draft');
+          trustTier = getOkfTrustTier(fm);
+          const verifiedEvents = normalizeVerified(fm);
+          verifiedBy = verifiedEvents[0]?.by;
+          staleFlag = isOkfStale(fm);
+          const sources = Array.isArray(fm.sources) ? fm.sources : [];
+          sourcesCount = sources.length;
+          domainWarningCount = sources.filter(
+            (s: any) => inspectSourceDomainProvenance(s).domainMismatch
+          ).length;
+          if (!inferredTopic && fm.title) {
+            inferredTopic = String(fm.title);
+          }
+        } catch {
+          okfStatus = meta?.okf?.status;
+          trustTier = meta?.okf?.trust_tier;
+          sourcesCount = Number(meta?.okf?.sourcesCount || 0);
+        }
+      }
+
+      const stagesRoot = path.join(runDir, 'stages');
+      const downstreamStages: IcmRunStageNodeStatus[] = [];
+      if (fs.existsSync(stagesRoot)) {
+        const stageEntries = fs
+          .readdirSync(stagesRoot, { withFileTypes: true })
+          .filter(
+            (d) =>
+              d.isDirectory() &&
+              d.name !== '01_research' &&
+              d.name !== '02_script' &&
+              !d.name.startsWith('.')
+          )
+          .sort((a, b) => a.name.localeCompare(b.name));
+        for (const st of stageEntries) {
+          const outDir = path.join(stagesRoot, st.name, 'output');
+          const outFiles = fs.existsSync(outDir)
+            ? fs
+                .readdirSync(outDir)
+                .filter(
+                  (f) =>
+                    f !== 'thinking_trace.md' &&
+                    f !== 'a2ui_surface.json' &&
+                    f !== 'a2ui_surface.jsonl' &&
+                    !f.startsWith('.')
+                )
+            : [];
+          downstreamStages.push({
+            stageName: st.name,
+            state: outFiles.length > 0 ? 'COMPLETE' : 'PENDING',
+            outputFiles: outFiles,
+          });
+        }
+      }
+
+      const stage1State: 'COMPLETE' | 'PENDING' = stage1Complete ? 'COMPLETE' : 'PENDING';
+      const okfGateState: 'VERIFIED' | 'AWAITING REVIEW' | 'PENDING' = !stage1Complete
+        ? 'PENDING'
+        : trustTier && trustTier !== 'unverified'
+          ? 'VERIFIED'
+          : 'AWAITING REVIEW';
+      const stage2State: 'COMPLETE' | 'PENDING' = stage2Complete ? 'COMPLETE' : 'PENDING';
+      const a2uiState: 'READY' | 'INTERMISSION' | 'PENDING' =
+        stage2Complete && hasA2uiArtifacts
+          ? 'READY'
+          : stage1Complete && hasA2uiArtifacts
+            ? 'INTERMISSION'
+            : 'PENDING';
+
+      const stage1Tokens = Number(meta?.stage1Telemetry?.totalTokens || 0);
+      const stage2Tokens = Number(meta?.stage2Telemetry?.totalTokens || 0);
+      const totalTokens = stage1Tokens + stage2Tokens;
+
+      let nextStepHint: string;
+      if (!stage1Complete) {
+        nextStepHint = `Run Stage 1 grounded research: npm run cli:stage1 -- "<topic>"`;
+      } else if (okfGateState === 'AWAITING REVIEW' && !stage2Complete) {
+        nextStepHint = `Review workspace/runs/${runName}/a2ui.html & verify sources: npm run cli:verify -- ${runName} --by "human:<reviewer>"`;
+      } else if (!stage2Complete) {
+        nextStepHint = `Run Stage 2 structured synthesis: npm run cli:stage2 -- ${runName}`;
+      } else if (okfGateState === 'AWAITING REVIEW') {
+        nextStepHint = `Stage 2 complete on unverified draft — verify Stage 1 sources: npm run cli:verify -- ${runName} --by "human:<reviewer>"`;
+      } else if (!hasA2uiArtifacts) {
+        nextStepHint = `Compile A2UI v1.0 Studio surface: npm run cli:a2ui -- ${runName}`;
+      } else {
+        nextStepHint = `Pipeline complete — open workspace/runs/${runName}/a2ui.html (or re-run Stage 2 via npm run cli:stage2 -- ${runName})`;
+      }
+
+      const parsedStartMs = meta.startedAt ? Date.parse(String(meta.startedAt)) || mtimeMs : mtimeMs;
+      runs.push({
+        runId: runName,
+        topic: inferredTopic || runName,
+        startedAt: meta.startedAt ? String(meta.startedAt) : undefined,
+        stage1State,
+        okfGateState,
+        stage2State,
+        downstreamStages,
+        a2uiState,
+        okfStatus,
+        trustTier,
+        verifiedBy,
+        isStale: staleFlag,
+        sourcesCount,
+        domainWarningCount,
+        stage1Tokens,
+        stage2Tokens,
+        totalTokens,
+        nextStepHint,
+        _sortMs: parsedStartMs,
+      });
+    }
+  }
+
+  runs.sort((a, b) => b._sortMs - a._sortMs || b.runId.localeCompare(a.runId));
+  const cleanRuns: IcmRunPipelineStatus[] = runs.map(({ _sortMs: _ignored, ...rest }) => rest);
+
+  return {
+    workspaceRoot,
+    layers,
+    bundle: {
+      conceptCount: bundleConcepts.length,
+      humanReviewedCount: bundleConcepts.filter((c) => c.trustTier === 'human-reviewed').length,
+      unverifiedCount: bundleConcepts.filter((c) => c.trustTier === 'unverified').length,
+      staleCount: bundleConcepts.filter((c) => c.isStale).length,
+      hasVizHtml: fs.existsSync(path.join(bundleDir, 'viz.html')),
+      hasA2uiHtml: fs.existsSync(path.join(bundleDir, 'a2ui.html')),
+      concepts: bundleConcepts,
+    },
+    runs: cleanRuns,
+  };
+}
+
+/**
+ * Formats an `IcmPipelineStatusReport` as a clean ASCII pipeline & OKF v0.2 bundle dashboard.
+ */
+export function formatIcmPipelineStatus(report: IcmPipelineStatusReport): string {
+  const lines: string[] = [];
+  lines.push('=== Open Knowledge Studio — ICM · OKF v0.2 · A2UI v1.0 Pipeline Status ===');
+  lines.push(`Workspace: ${report.workspaceRoot}`);
+  lines.push(
+    `Context Layers: Layer 0 GEMINI.md [${report.layers.globalIdentity ? 'OK' : 'MISSING'}] | Layer 1 CONTEXT.md [${report.layers.workspaceContext ? 'OK' : 'MISSING'}] | Layer 3 voice_guide.md [${report.layers.voiceGuide ? 'OK' : 'MISSING'}]`
+  );
+  lines.push(
+    `OKF v0.2 Bundle: ${report.bundle.conceptCount} concept(s) (${report.bundle.humanReviewedCount} human-reviewed, ${report.bundle.unverifiedCount} unverified, ${report.bundle.staleCount} stale) | viz.html [${report.bundle.hasVizHtml ? 'READY' : 'NONE'}] | a2ui.html [${report.bundle.hasA2uiHtml ? 'READY' : 'NONE'}]`
+  );
+  for (const c of report.bundle.concepts) {
+    lines.push(
+      `  • ${c.relativePath} — "${c.title}" [${c.type} | status=${c.status} | trust=${c.trustTier}${c.verifiedBy ? ` (${c.verifiedBy})` : ''}${c.isStale ? ' | STALE' : ''} | ${c.sourcesCount} sources]`
+    );
+  }
+  lines.push('');
+
+  if (report.runs.length === 0) {
+    lines.push('Pipeline Runs: 0 active runs in workspace/runs/');
+    lines.push('  Flow: [01_research: PENDING] ---> [OKF Gate: PENDING] ---> [02_script: PENDING] ---> [A2UI v1.0: PENDING]');
+    lines.push('  Next: Preview Stage 1 at zero token cost via `npm run cli:stage1 -- --dry-run "<topic>"`');
+    return lines.join('\n');
+  }
+
+  lines.push(`Pipeline Runs (${report.runs.length}):`);
+  for (const r of report.runs) {
+    const extraStagesFlow = r.downstreamStages
+      .map((ds) => ` ---> [${ds.stageName}: ${ds.state}]`)
+      .join('');
+    const flowLine = `[01_research: ${r.stage1State}] ---> [OKF Gate: ${r.okfGateState}] ---> [02_script: ${r.stage2State}]${extraStagesFlow} ---> [A2UI v1.0: ${r.a2uiState}]`;
+    lines.push(`  Run: ${r.runId}`);
+    lines.push(`    Topic:    ${r.topic}`);
+    lines.push(`    Flow:     ${flowLine}`);
+    if (r.stage1State === 'COMPLETE') {
+      lines.push(
+        `    OKF v0.2: status=${r.okfStatus || 'draft'} | trust=${r.trustTier || 'unverified'}${r.verifiedBy ? ` (${r.verifiedBy})` : ''} | sources=${r.sourcesCount} (${r.domainWarningCount} domain warning${r.domainWarningCount === 1 ? '' : 's'}) | stale=${Boolean(r.isStale)}`
+      );
+    }
+    if (r.totalTokens > 0) {
+      lines.push(
+        `    Tokens:   ${r.totalTokens.toLocaleString('en-US')} total (Stage 1: ${r.stage1Tokens.toLocaleString('en-US')} | Stage 2: ${r.stage2Tokens.toLocaleString('en-US')})`
+      );
+    }
+    lines.push(`    Next:     ${r.nextStepHint}`);
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -22949,6 +23561,58 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         rpcResolved.payload.rejectedSources[0] === 'src-a',
       `startA2uiPingPongListener unwraps A2UI v1.0 callAgentFunction(verifyOkfSources) envelopes and replies with a valid v1.0 agentFunctionResponse`
     );
+
+    // Verify 3-pillar `specification/UPSTREAM_LOCK.json` (`icm`, `okf`, `a2ui`) and zero-token `getIcmPipelineStatus` / `formatIcmPipelineStatus` (`npm run cli:status`)
+    const lockRawJson = JSON.parse(
+      fs.readFileSync(path.resolve(process.cwd(), 'specification', 'UPSTREAM_LOCK.json'), 'utf-8')
+    );
+    assert(
+      lockRawJson?.icm?.repository === 'RinDig/Interpretable-Context-Methodology' &&
+        typeof lockRawJson?.icm?.commit === 'string' &&
+        lockRawJson.icm.commit.length === 40 &&
+        lockRawJson?.icm?.paperUrl === 'https://arxiv.org/abs/2603.16021' &&
+        lockRawJson?.okf?.repository === 'GoogleCloudPlatform/open-knowledge-format' &&
+        typeof lockRawJson?.okf?.commit === 'string' &&
+        lockRawJson.okf.commit.length === 40 &&
+        lockRawJson?.okf?.okfVersion === '0.2' &&
+        lockRawJson?.a2ui?.repository === 'google/A2UI' &&
+        lockRawJson?.a2ui?.protocolVersion === '1.0',
+      `specification/UPSTREAM_LOCK.json pins all three open pillars (ICM, OKF v0.2, A2UI v1.0) with 40-char commit SHAs`
+    );
+
+    const populatedStatus = getIcmPipelineStatus({ workspaceRoot: tmpStage1ReviewDir });
+    const populatedFormatted = formatIcmPipelineStatus(populatedStatus);
+    const s1StatusEntry = populatedStatus.runs.find((r) => r.runId === s1UnverifiedRunId);
+    const s2StatusEntry = populatedStatus.runs.find((r) => r.runId === s2RunId);
+
+    const tmpEmptyWs = fs.mkdtempSync(path.join(os.tmpdir(), 'icm-empty-status-'));
+    let emptyStatusFormatted = '';
+    let emptyStatusRunCount = -1;
+    try {
+      const emptyStatus = getIcmPipelineStatus({ workspaceRoot: tmpEmptyWs });
+      emptyStatusRunCount = emptyStatus.runs.length;
+      emptyStatusFormatted = formatIcmPipelineStatus(emptyStatus);
+    } finally {
+      fs.rmSync(tmpEmptyWs, { recursive: true, force: true });
+    }
+
+    assert(
+      populatedStatus.bundle.conceptCount >= 1 &&
+        populatedStatus.bundle.humanReviewedCount >= 1 &&
+        populatedStatus.bundle.hasVizHtml === true &&
+        populatedStatus.bundle.hasA2uiHtml === true &&
+        s1StatusEntry?.stage1State === 'COMPLETE' &&
+        s1StatusEntry?.okfGateState === 'VERIFIED' &&
+        s1StatusEntry?.stage2State === 'PENDING' &&
+        s1StatusEntry?.a2uiState === 'INTERMISSION' &&
+        s2StatusEntry?.stage1State === 'COMPLETE' &&
+        s2StatusEntry?.stage2State === 'COMPLETE' &&
+        s2StatusEntry?.a2uiState === 'READY' &&
+        populatedFormatted.includes('[01_research: COMPLETE] ---> [OKF Gate: VERIFIED] ---> [02_script: PENDING] ---> [A2UI v1.0: INTERMISSION]') &&
+        emptyStatusRunCount === 0 &&
+        emptyStatusFormatted.includes('[01_research: PENDING] ---> [OKF Gate: PENDING] ---> [02_script: PENDING] ---> [A2UI v1.0: PENDING]'),
+      `getIcmPipelineStatus and formatIcmPipelineStatus accurately report OKF bundle state, Stage-1 Intermission runs, full Stage-2+A2UI runs, and empty workspaces`
+    );
   } finally {
     fs.rmSync(tmpStage1ReviewDir, { recursive: true, force: true });
   }
@@ -22961,6 +23625,7 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
 if (
   process.argv.includes('--test') ||
   process.argv.includes('--spec-check') ||
+  process.argv.includes('--status') ||
   process.argv.includes('--cli') ||
   process.argv.includes('--stage1') ||
   process.argv.includes('--stage2') ||
@@ -22976,8 +23641,39 @@ if (
     }
 
     if (process.argv.includes('--spec-check')) {
-      const specStatus = await checkUpstreamA2uiSpec();
-      console.log('[A2UI Upstream Spec Check]:', specStatus);
+      const specStatus = await checkUpstreamSpecs();
+      console.log('[Upstream 3-Pillar Spec Check (ICM · OKF · A2UI)]:', specStatus);
+      return;
+    }
+
+    if (process.argv.includes('--status')) {
+      const statusIdx = process.argv.indexOf('--status');
+      const wsFlagIdx = process.argv.indexOf('--workspace');
+      const customWs =
+        wsFlagIdx !== -1 &&
+        process.argv[wsFlagIdx + 1] &&
+        !process.argv[wsFlagIdx + 1].startsWith('--')
+          ? process.argv[wsFlagIdx + 1]
+          : './workspace';
+      const rawTail = process.argv.slice(statusIdx + 1);
+      const positional: string[] = [];
+      for (let i = 0; i < rawTail.length; i++) {
+        if (rawTail[i] === '--workspace') {
+          i++;
+          continue;
+        }
+        if (rawTail[i].startsWith('--')) continue;
+        positional.push(rawTail[i]);
+      }
+      const statusReport = getIcmPipelineStatus({
+        workspaceRoot: customWs,
+        runId: positional[0],
+      });
+      if (process.argv.includes('--json')) {
+        console.log(JSON.stringify(statusReport, null, 2));
+      } else {
+        console.log(formatIcmPipelineStatus(statusReport));
+      }
       return;
     }
 
