@@ -138,6 +138,12 @@ export interface StagePromptContract {
   aspectRatio?: string;
   imageSize?: string;
   voice?: string;
+  primarySpeaker?: string;
+  primaryVoice?: string;
+  primaryStyle?: string;
+  secondarySpeaker?: string;
+  secondaryVoice?: string;
+  secondaryStyle?: string;
   audioMimeType?: string;
   sampleRate?: number;
   template: string;
@@ -323,27 +329,42 @@ export function loadStagePromptContract(
         ? GEMINI_FLASH_TTS_MODEL
         : GEMINI_4_ARGON_MODEL);
 
-  const aspectRatioMatch = frontmatter.match(/(?:aspectRatio|aspect_ratio):\s*([^\r\n#]+)/i);
+  const aspectRatioMatch = frontmatter.match(/^\s*(?:aspectRatio|aspect_ratio):\s*([^\r\n#]+)/im);
   const aspectRatio = aspectRatioMatch?.[1]?.trim().replace(/^['"]|['"]$/g, '');
 
-  const imageSizeMatch = frontmatter.match(/(?:imageSize|image_size):\s*([^\r\n#]+)/i);
+  const imageSizeMatch = frontmatter.match(/^\s*(?:imageSize|image_size):\s*([^\r\n#]+)/im);
   const imageSize = imageSizeMatch?.[1]?.trim().replace(/^['"]|['"]$/g, '');
 
-  const voiceMatch = frontmatter.match(/(?:voiceName|voice_name|voice):\s*([^\r\n#]+)/i);
-  const voice = voiceMatch?.[1]?.trim().replace(/^['"]|['"]$/g, '');
+  const voiceMatch = frontmatter.match(/^\s*(?:voiceName|voice_name|voice):\s*([^\r\n#]+)/im);
+  const rawVoice = voiceMatch?.[1]?.trim().replace(/^['"]|['"]$/g, '');
+
+  const extractFmString = (pattern: RegExp): string | undefined => {
+    const m = frontmatter.match(pattern);
+    const v = m?.[1]?.trim().replace(/^['"]|['"]$/g, '');
+    return v || undefined;
+  };
+  const primarySpeaker = extractFmString(/^\s*(?:primarySpeaker|primary_speaker):\s*([^\r\n#]+)/im);
+  const primaryVoice = extractFmString(/^\s*(?:primaryVoice|primary_voice):\s*([^\r\n#]+)/im);
+  const primaryStyle = extractFmString(/^\s*(?:primaryStyle|primary_style):\s*([^\r\n#]+)/im);
+  const secondarySpeaker = extractFmString(
+    /^\s*(?:secondarySpeaker|secondary_speaker):\s*([^\r\n#]+)/im
+  );
+  const secondaryVoice = extractFmString(/^\s*(?:secondaryVoice|secondary_voice):\s*([^\r\n#]+)/im);
+  const secondaryStyle = extractFmString(/^\s*(?:secondaryStyle|secondary_style):\s*([^\r\n#]+)/im);
+  const voice = rawVoice || primaryVoice;
 
   const audioMimeMatch = frontmatter.match(
-    /(?:audioMimeType|audio_mime_type):\s*([^\r\n#]+)/i
+    /^\s*(?:audioMimeType|audio_mime_type):\s*([^\r\n#]+)/im
   );
   const genericMimeMatch =
     outputFormat === 'audio'
-      ? frontmatter.match(/(?:mimeType|mime_type):\s*([^\r\n#]+)/i)
+      ? frontmatter.match(/^\s*(?:mimeType|mime_type):\s*([^\r\n#]+)/im)
       : null;
   const audioMimeType = (audioMimeMatch?.[1] || genericMimeMatch?.[1])
     ?.trim()
     .replace(/^['"]|['"]$/g, '');
 
-  const sampleRateMatch = frontmatter.match(/(?:sampleRate|sample_rate):\s*(\d+)/i);
+  const sampleRateMatch = frontmatter.match(/^\s*(?:sampleRate|sample_rate):\s*(\d+)/im);
   const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : undefined;
 
   let outputJsonSchema: Record<string, any> | undefined;
@@ -366,6 +387,12 @@ export function loadStagePromptContract(
     ...(aspectRatio ? { aspectRatio } : {}),
     ...(imageSize ? { imageSize } : {}),
     ...(voice ? { voice } : {}),
+    ...(primarySpeaker ? { primarySpeaker } : {}),
+    ...(primaryVoice ? { primaryVoice } : {}),
+    ...(primaryStyle ? { primaryStyle } : {}),
+    ...(secondarySpeaker ? { secondarySpeaker } : {}),
+    ...(secondaryVoice ? { secondaryVoice } : {}),
+    ...(secondaryStyle ? { secondaryStyle } : {}),
     ...(audioMimeType ? { audioMimeType } : {}),
     ...(sampleRate ? { sampleRate } : {}),
     template,
@@ -1054,6 +1081,159 @@ export function wrapPcm16InWavHeader(
   return Buffer.concat([header, pcmBuffer]);
 }
 
+export interface WavAudioMetadata {
+  isWav: boolean;
+  audioFormat: number;
+  channels: number;
+  sampleRate: number;
+  bitsPerSample: number;
+  dataOffset: number;
+  dataBytes: number;
+  durationSeconds: number;
+}
+
+/**
+ * Parses RIFF/WAVE sub-chunks (`fmt ` and `data`, safely skipping auxiliary chunks such as `LIST` or `INFO`)
+ * to extract exact sample rate, channel count, bit depth, PCM payload offset/size, and duration in seconds.
+ */
+export function parseWavMetadata(wavBuffer: Buffer): WavAudioMetadata {
+  const empty: WavAudioMetadata = {
+    isWav: false,
+    audioFormat: 0,
+    channels: 0,
+    sampleRate: 0,
+    bitsPerSample: 0,
+    dataOffset: 0,
+    dataBytes: 0,
+    durationSeconds: 0,
+  };
+  if (
+    !Buffer.isBuffer(wavBuffer) ||
+    wavBuffer.length < 44 ||
+    wavBuffer.subarray(0, 4).toString('ascii') !== 'RIFF' ||
+    wavBuffer.subarray(8, 12).toString('ascii') !== 'WAVE'
+  ) {
+    return empty;
+  }
+
+  let audioFormat = 0;
+  let channels = 0;
+  let sampleRate = 0;
+  let bitsPerSample = 0;
+  let dataOffset = 0;
+  let dataBytes = 0;
+  let offset = 12;
+
+  while (offset + 8 <= wavBuffer.length) {
+    const chunkId = wavBuffer.subarray(offset, offset + 4).toString('ascii');
+    const chunkSize = wavBuffer.readUInt32LE(offset + 4);
+    const payloadOffset = offset + 8;
+
+    if (chunkId === 'fmt ' && payloadOffset + 16 <= wavBuffer.length) {
+      audioFormat = wavBuffer.readUInt16LE(payloadOffset);
+      channels = wavBuffer.readUInt16LE(payloadOffset + 2);
+      sampleRate = wavBuffer.readUInt32LE(payloadOffset + 4);
+      bitsPerSample = wavBuffer.readUInt16LE(payloadOffset + 14);
+    } else if (chunkId === 'data') {
+      dataOffset = payloadOffset;
+      dataBytes = Math.max(0, Math.min(chunkSize, wavBuffer.length - payloadOffset));
+    }
+
+    if (sampleRate > 0 && dataOffset > 0) break;
+    const step = 8 + chunkSize + (chunkSize % 2);
+    if (step < 8 || offset + step <= offset) break;
+    offset += step;
+  }
+
+  if (sampleRate <= 0 || channels <= 0 || bitsPerSample <= 0 || dataOffset <= 0) {
+    return empty;
+  }
+
+  const bytesPerSec = sampleRate * channels * (bitsPerSample / 8);
+  const durationSeconds =
+    bytesPerSec > 0 && dataBytes > 0 ? Number((dataBytes / bytesPerSec).toFixed(2)) : 0;
+
+  return {
+    isWav: true,
+    audioFormat,
+    channels,
+    sampleRate,
+    bitsPerSample,
+    dataOffset,
+    dataBytes,
+    durationSeconds,
+  };
+}
+
+/**
+ * Downsamples a 16-bit PCM RIFF/WAVE buffer (e.g. `24 kHz -> 12 kHz` mono) using a 5-tap binomial
+ * anti-aliasing FIR low-pass filter (`[1, 4, 6, 4, 1] / 16`) for compact HTML `data:audio/wav;base64,...`
+ * embedding while keeping lossless 24 kHz `.wav` master files untouched on disk.
+ */
+export function resampleWav16BitMono(
+  wavBuffer: Buffer,
+  targetSampleRate: number = 12000
+): Buffer {
+  const meta = parseWavMetadata(wavBuffer);
+  if (
+    !meta.isWav ||
+    meta.audioFormat !== 1 ||
+    meta.bitsPerSample !== 16 ||
+    meta.channels < 1 ||
+    meta.sampleRate <= targetSampleRate ||
+    meta.dataBytes < 4 ||
+    targetSampleRate < 4000
+  ) {
+    return wavBuffer;
+  }
+
+  const bytesPerFrame = meta.channels * 2;
+  const inFrames = Math.floor(meta.dataBytes / bytesPerFrame);
+  if (inFrames < 2) return wavBuffer;
+
+  const readMonoSample = (frameIdx: number): number => {
+    const clamped = frameIdx < 0 ? 0 : frameIdx >= inFrames ? inFrames - 1 : frameIdx;
+    const base = meta.dataOffset + clamped * bytesPerFrame;
+    if (meta.channels === 1) {
+      return wavBuffer.readInt16LE(base);
+    }
+    let sum = 0;
+    for (let ch = 0; ch < meta.channels; ch++) {
+      sum += wavBuffer.readInt16LE(base + ch * 2);
+    }
+    return Math.round(sum / meta.channels);
+  };
+
+  const filterSample = (k: number): number =>
+    (readMonoSample(k - 2) +
+      4 * readMonoSample(k - 1) +
+      6 * readMonoSample(k) +
+      4 * readMonoSample(k + 1) +
+      readMonoSample(k + 2)) /
+    16;
+
+  const ratio = meta.sampleRate / targetSampleRate;
+  const outFrames = Math.max(1, Math.floor(inFrames / ratio));
+  const outPcm: Buffer = Buffer.allocUnsafe(outFrames * 2);
+  const isExactHalf = Math.abs(ratio - 2) < 1e-6;
+
+  for (let i = 0; i < outFrames; i++) {
+    let val: number;
+    if (isExactHalf) {
+      val = Math.round(filterSample(i * 2));
+    } else {
+      const srcPos = i * ratio;
+      const idx0 = Math.floor(srcPos);
+      const frac = srcPos - idx0;
+      val = Math.round(filterSample(idx0) * (1 - frac) + filterSample(idx0 + 1) * frac);
+    }
+    const clampedVal = val < -32768 ? -32768 : val > 32767 ? 32767 : val;
+    outPcm.writeInt16LE(clampedVal, i * 2);
+  }
+
+  return wrapPcm16InWavHeader(outPcm, targetSampleRate, 1);
+}
+
 export interface NanoBananaImageRequestOptions {
   promptText: string;
   model?: string;
@@ -1216,9 +1396,19 @@ export async function generateNanoBananaImageInteraction(
   }
 }
 
+export interface FlashTtsDialogueTurn {
+  speaker: string;
+  voice?: string;
+  text: string;
+  style?: string;
+  roleLabel?: string;
+}
+
 export interface FlashTtsAudioRequestOptions {
-  transcriptText: string;
+  transcriptText?: string;
   styleInstruction?: string;
+  turns?: FlashTtsDialogueTurn[];
+  speakers?: Array<{ speaker: string; voice: string }>;
   model?: string;
   voice?: string;
   audioMimeType?: string;
@@ -1233,13 +1423,15 @@ export interface FlashTtsAudioResult {
   audioBuffer: Buffer;
   mimeType: string;
   ext: string;
+  durationSeconds?: number;
   thoughts: string[];
   usage: InteractionUsageTelemetry;
 }
 
 /**
  * Direct zero-dependency client for Gemini 3.8 Flash TTS (`gemini-3.8-flash-tts`) via
- * `POST /v1beta/interactions` (`response_format: { type: "audio" }`, `speech_config: [{ voice }]`).
+ * `POST /v1beta/interactions` supporting both single-speaker (`speech_config: [{ voice }]`)
+ * and multi-speaker dialogue (`speech_config: { speakers: [{ speaker, voice }, ...] }`).
  */
 export async function generateFlashTtsAudioInteraction(
   options: FlashTtsAudioRequestOptions
@@ -1249,17 +1441,68 @@ export async function generateFlashTtsAudioInteraction(
   const resolvedVoice = (options.voice || 'Kore').trim() || 'Kore';
   const maxRetries = options.maxRetries ?? 2;
 
-  const textPart: Record<string, any> = {
-    type: 'text',
-    text: options.transcriptText,
-  };
-  if (options.styleInstruction && options.styleInstruction.trim()) {
-    textPart.annotations = [
-      {
-        type: 'speech_metadata',
-        style: options.styleInstruction.trim(),
-      },
-    ];
+  const validTurns = Array.isArray(options.turns)
+    ? options.turns.filter((t) => t && typeof t.text === 'string' && t.text.trim().length > 0)
+    : [];
+
+  const speakerMap = new Map<string, string>();
+  if (Array.isArray(options.speakers)) {
+    for (const sp of options.speakers) {
+      const sName = String(sp?.speaker || '').trim();
+      const sVoice = String(sp?.voice || '').trim();
+      if (sName && sVoice && !speakerMap.has(sName)) {
+        speakerMap.set(sName, sVoice);
+      }
+    }
+  }
+  for (const t of validTurns) {
+    const sName = String(t.speaker || '').trim();
+    const sVoice = String(t.voice || '').trim();
+    if (sName && sVoice && !speakerMap.has(sName)) {
+      speakerMap.set(sName, sVoice);
+    }
+  }
+
+  let contentParts: Array<Record<string, any>>;
+  let speechConfig: Record<string, any> | Array<Record<string, any>>;
+
+  if (validTurns.length > 0 && speakerMap.size >= 2) {
+    contentParts = validTurns.map((t) => ({
+      type: 'text',
+      text: t.text.trim(),
+      annotations: [
+        {
+          type: 'speech_metadata',
+          speaker: t.speaker.trim(),
+          ...(t.style && t.style.trim() ? { style: t.style.trim() } : {}),
+        },
+      ],
+    }));
+    speechConfig = {
+      speakers: Array.from(speakerMap.entries()).map(([speaker, voice]) => ({ speaker, voice })),
+    };
+  } else {
+    const singleText = (
+      options.transcriptText ||
+      validTurns.map((t) => t.text.trim()).join('\n\n')
+    ).trim();
+    const singleVoice = Array.from(speakerMap.values())[0] || resolvedVoice;
+    const singleStyle =
+      options.styleInstruction?.trim() || validTurns[0]?.style?.trim() || '';
+    const textPart: Record<string, any> = {
+      type: 'text',
+      text: singleText,
+    };
+    if (singleStyle) {
+      textPart.annotations = [
+        {
+          type: 'speech_metadata',
+          style: singleStyle,
+        },
+      ];
+    }
+    contentParts = [textPart];
+    speechConfig = [{ voice: singleVoice }];
   }
 
   const requestBody: Record<string, any> = {
@@ -1267,7 +1510,7 @@ export async function generateFlashTtsAudioInteraction(
     input: [
       {
         type: 'user_input',
-        content: [textPart],
+        content: contentParts,
       },
     ],
     response_format: {
@@ -1276,7 +1519,7 @@ export async function generateFlashTtsAudioInteraction(
       ...(options.sampleRate ? { sample_rate: options.sampleRate } : {}),
     },
     generation_config: {
-      speech_config: [{ voice: resolvedVoice }],
+      speech_config: speechConfig,
     },
     store: Boolean(options.store),
   };
@@ -1374,12 +1617,18 @@ export async function generateFlashTtsAudioInteraction(
         totalTokens: rawUsage.total_tokens ?? 0,
       };
 
+      const wavMeta =
+        detected.mimeType === 'audio/wav' ? parseWavMetadata(audioBuffer) : undefined;
+
       return {
         id: interaction.id,
         status: interaction.status,
         audioBuffer,
         mimeType: detected.mimeType,
         ext: detected.ext,
+        ...(wavMeta && wavMeta.durationSeconds > 0
+          ? { durationSeconds: wavMeta.durationSeconds }
+          : {}),
         thoughts,
         usage,
       };
@@ -8307,16 +8556,133 @@ export function resolveDownstreamRunId(workspaceRoot: string, requestedRunId?: s
   return candidates[0].name;
 }
 
-function stripMarkdownForTts(text: string): string {
-  return sanitizeSpokenScript(text)
-    .replace(/^\s*#{1,6}\s+/gm, '')
-    .replace(/^\s*[-*+]\s+/gm, '')
+/**
+ * Domain-neutral bilingual (`en` / `no`) prosody & symbol normalizer for Stage 4 neural TTS (`gemini-3.8-flash-tts`).
+ * Preserves `\n\n` paragraph breaks while converting Markdown lead-ins (`**Heading:**` -> `Heading.`),
+ * expanding statutory section ranges (`§§ 4–10` -> `paragrafene 4 til 10` / `sections 4 to 10`) without
+ * corrupting chapter-hyphenated section IDs (`§§ 11-12 og 11-13` / `TEK17 §§ 11-13`), and expanding
+ * symbols, inequalities, abbreviations, and physical units into natural spoken words.
+ */
+export function prepareTextForStudioTts(text: string, lang?: 'en' | 'no'): string {
+  const raw = String(text || '');
+  if (!raw.trim()) return '';
+  const resolvedLang: 'en' | 'no' = lang || detectIcmLanguage(raw);
+  const isNo = resolvedLang === 'no';
+
+  let s = sanitizeSpokenScript(raw)
+    // Strip formal statutory registry codes like (FOR-2015-12-17-1710) or LOV-2002-06-14-20
+    .replace(/\(\s*(?:FOR|LOV)-\d{4}-\d{2}-\d{2}-\d+\s*\)/gi, '')
+    .replace(/\b(?:FOR|LOV)-\d{4}-\d{2}-\d{2}-\d+\b/gi, '')
+    // Convert ATX Markdown headings to clean sentence lines
+    .replace(/^\s*#{1,6}\s+([^\r\n]+?)\s*$/gm, (_m, h: string) => {
+      const trimmedH = h.replace(/[:\s]+$/, '').trim();
+      if (!trimmedH) return '';
+      return /[.!?]$/.test(trimmedH) ? trimmedH : `${trimmedH}.`;
+    })
+    // Convert bold topic lead-ins with trailing colon (**Heading:** or **Heading**:) into crisp sentence pauses
+    .replace(/\*\*(?!\s)([^*\r\n]*?\S):\*\*[ \t]*/g, '$1. ')
+    .replace(/\*\*(?!\s)([^*\r\n]*?\S)\*\*:[ \t]*/g, '$1. ')
+    // Strip Markdown list bullets, inline code backticks, and remaining bold/italic wrappers
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, '')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/\*\*\*(?!\s)([^*]*?\S)\*\*\*/g, '$1')
     .replace(/\*\*(?!\s)([^*]*?\S)\*\*/g, '$1')
-    .replace(/\*(?!\s)([^*]*?\S)\*/g, '$1')
+    .replace(/\*(?!\s)([^*]*?\S)\*/g, '$1');
+
+  // Expand statutory section symbols (preserving chapter-hyphenated IDs like 11-12, 11-13)
+  s = s
+    .replace(
+      /§§\s*(\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?)\s*(?:[–—]|\s+-\s+)\s*(\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?)/g,
+      (_m, a, b) => `${isNo ? 'paragrafene ' : 'sections '}${a}${isNo ? ' til ' : ' to '}${b}`
+    )
+    .replace(/§§\s*(\d+)-(\d+)\b/g, (full, a, b, offset, str) => {
+      const fullStr = String(str);
+      const before = fullStr.slice(Math.max(0, Number(offset) - 28), Number(offset));
+      const rest = fullStr.slice(Number(offset) + full.length);
+      if (
+        /\b(?:TEK\s*\d+|SAK\s*\d+|pbl\.?|aml\.?)\s*$/i.test(before) ||
+        /^\s*(?:og|and|eller|or|til|to|,)\s*\d+-/i.test(rest) ||
+        Number(a) >= Number(b)
+      ) {
+        return `${isNo ? 'paragrafene ' : 'sections '}${a}-${b}`;
+      }
+      return `${isNo ? 'paragrafene ' : 'sections '}${a}${isNo ? ' til ' : ' to '}${b}`;
+    })
+    .replace(/§§\s*(?=\d)/g, isNo ? 'paragrafene ' : 'sections ')
+    .replace(/§\s*(?=\d)/g, isNo ? 'paragraf ' : 'section ');
+
+  // Expand percentages, inequalities, and temperatures
+  s = s
+    .replace(/(\d+(?:[.,]\d+)?)\s*%/g, (_m, n) => `${n} ${isNo ? 'prosent' : 'percent'}`)
+    .replace(/≤\s*(\d)/g, (_m, d) => `${isNo ? 'inntil' : 'at most'} ${d}`)
+    .replace(/≥\s*(\d)/g, (_m, d) => `${isNo ? 'minst' : 'at least'} ${d}`)
+    .replace(/≤/g, isNo ? ' mindre enn eller lik ' : ' less than or equal to ')
+    .replace(/≥/g, isNo ? ' større enn eller lik ' : ' greater than or equal to ')
+    .replace(/±/g, isNo ? ' pluss minus ' : ' plus or minus ')
+    .replace(/≈/g, isNo ? ' omtrent ' : ' approximately ')
+    .replace(/°C\b/g, isNo ? ' grader celsius' : ' degrees Celsius')
+    .replace(/°F\b/g, isNo ? ' grader fahrenheit' : ' degrees Fahrenheit');
+
+  // Language-specific common abbreviations
+  if (isNo) {
+    s = s
+      .replace(/\bf\.eks\.(?=\s|$|[),;:])/gi, 'for eksempel')
+      .replace(/\bdvs\.(?=\s|$|[),;:])/gi, 'det vil si')
+      .replace(/\bbl\.a\.(?=\s|$|[),;:])/gi, 'blant annet')
+      .replace(/\biht\.(?=\s|$|[),;:])/gi, 'i henhold til')
+      .replace(/\bpga\.(?=\s|$|[),;:])/gi, 'på grunn av')
+      .replace(/\bm\.m\.(?=\s|$|[),;:])/gi, 'med mer')
+      .replace(/\bosv\.(?=\s|$|[),;:])/gi, 'og så videre')
+      .replace(/\bmv\.(?=\s|$|[),;:])/gi, 'med videre')
+      .replace(/\bkl\.\s*(\d{1,2}[:.]\d{2})\b/gi, 'klokken $1')
+      .replace(/\bvs\.(?=\s)/gi, 'versus');
+  } else {
+    s = s
+      .replace(/\be\.g\.,?(?=\s)/gi, 'for example,')
+      .replace(/\bi\.e\.,?(?=\s)/gi, 'that is,')
+      .replace(/\bvs\.(?=\s)/gi, 'versus');
+  }
+
+  // Expand physical units following numeric quantities
+  s = s
+    .replace(
+      /(\b\d+(?:[.,]\d+)?)\s*dB(?:\(A\))?(?![A-Za-z0-9])/g,
+      (_m, n) => `${n} ${isNo ? 'desibel' : 'decibels'}`
+    )
+    .replace(
+      /(\b\d+(?:[.,]\d+)?)\s*m(?:²|\^2)(?![A-Za-z0-9])/g,
+      (_m, n) => `${n} ${isNo ? 'kvadratmeter' : 'square meters'}`
+    )
+    .replace(
+      /(\b\d+(?:[.,]\d+)?)\s*m(?:³|\^3)(?![A-Za-z0-9])/g,
+      (_m, n) => `${n} ${isNo ? 'kubikkmeter' : 'cubic meters'}`
+    )
+    .replace(
+      /(\b\d+(?:[.,]\d+)?)\s+kg(?=[.,;:!?)\]\s]|$)(?!\s*\/)/g,
+      (_m, n) => `${n} ${isNo ? 'kilo' : 'kilograms'}`
+    )
+    .replace(
+      /(\b\d+(?:[.,]\d+)?)\s+cm(?=[.,;:!?)\]\s]|$)(?!\s*\/)/g,
+      (_m, n) => `${n} ${isNo ? 'centimeter' : 'centimeters'}`
+    )
+    .replace(
+      /(\b\d+(?:[.,]\d+)?)\s+mm(?=[.,;:!?)\]\s]|$)(?!\s*\/)/g,
+      (_m, n) => `${n} ${isNo ? 'millimeter' : 'millimeters'}`
+    )
+    .replace(
+      /(?<!\$)(\b\d+(?:[.,]\d+)?)\s+m(?=[.,;:!?)\]\s]|$)(?!\s*\/)/g,
+      (_m, n) => `${n} ${isNo ? 'meter' : n === '1' ? 'meter' : 'meters'}`
+    );
+
+  return s
     .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]*\r?\n[ \t]*/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function stripMarkdownForTts(text: string): string {
+  return prepareTextForStudioTts(text);
 }
 
 export interface Stage3VisualManifestItem {
@@ -8746,6 +9112,9 @@ export interface Stage4AudioManifestItem {
   moduleNumber: number;
   title: string;
   voice: string;
+  voicesUsed?: string[];
+  turnCount?: number;
+  durationSeconds?: number;
   fileName: string;
   relativePath: string;
   mimeType: string;
@@ -8754,10 +9123,136 @@ export interface Stage4AudioManifestItem {
 }
 
 /**
+ * Domain-neutral multi-speaker turn segmentation for Stage 4 (`04_audio`).
+ * Honors explicit Stage 2 `dialogueTurns` when present, or segments narration paragraphs
+ * (plus optional module `actionItem` wrap-up) into natural alternating studio host/specialist turns.
+ */
+export function segmentStage4DialogueTurns(options: {
+  slotKind: 'overview' | 'module';
+  moduleNumber?: number;
+  title: string;
+  spokenText: string;
+  actionItem?: string;
+  explicitTurns?: NormalizedA2uiDialogueTurn[];
+  lang?: 'en' | 'no';
+  primarySpeaker: string;
+  primaryVoice: string;
+  primaryStyle?: string;
+  secondarySpeaker: string;
+  secondaryVoice: string;
+  secondaryStyle?: string;
+}): FlashTtsDialogueTurn[] {
+  const {
+    slotKind,
+    spokenText,
+    actionItem,
+    explicitTurns,
+    lang,
+    primarySpeaker,
+    primaryVoice,
+    primaryStyle,
+    secondarySpeaker,
+    secondaryVoice,
+    secondaryStyle,
+  } = options;
+
+  const makeTurn = (isSecondary: boolean, text: string, customStyle?: string): FlashTtsDialogueTurn => ({
+    speaker: isSecondary ? secondarySpeaker : primarySpeaker,
+    voice: isSecondary ? secondaryVoice : primaryVoice,
+    text,
+    ...(customStyle || (isSecondary ? secondaryStyle : primaryStyle)
+      ? { style: customStyle || (isSecondary ? secondaryStyle : primaryStyle) }
+      : {}),
+  });
+
+  if (Array.isArray(explicitTurns) && explicitTurns.length > 0) {
+    const mapped: FlashTtsDialogueTurn[] = [];
+    const pLower = primarySpeaker.toLowerCase();
+    const sLower = secondarySpeaker.toLowerCase();
+    explicitTurns.forEach((rawTurn, idx) => {
+      const cleaned = prepareTextForStudioTts(rawTurn.text, lang);
+      if (!cleaned) return;
+      const spRaw = String(rawTurn.speaker || '').trim().toLowerCase();
+      let useSecondary: boolean;
+      if (spRaw && spRaw === sLower) {
+        useSecondary = true;
+      } else if (spRaw && spRaw === pLower) {
+        useSecondary = false;
+      } else if (spRaw && /^(?:2|speaker[_\s-]*2|expert|specialist|guest|co-?host)$/i.test(spRaw)) {
+        useSecondary = true;
+      } else if (spRaw && /^(?:1|speaker[_\s-]*1|host|narrator|moderator|lead)$/i.test(spRaw)) {
+        useSecondary = false;
+      } else {
+        useSecondary = idx % 2 === 1;
+      }
+      mapped.push(makeTurn(useSecondary, cleaned, rawTurn.style));
+    });
+    if (mapped.length > 0) {
+      return mapped;
+    }
+  }
+
+  const normalizedBody = prepareTextForStudioTts(spokenText, lang);
+  if (!normalizedBody) return [];
+
+  const rawParagraphs = normalizedBody
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  // Merge tiny heading/lead-in fragments (< 65 chars) into the following paragraph
+  const paragraphs: string[] = [];
+  for (let i = 0; i < rawParagraphs.length; i++) {
+    const cur = rawParagraphs[i];
+    if (cur.length < 65 && i + 1 < rawParagraphs.length) {
+      rawParagraphs[i + 1] = `${/[.!?]$/.test(cur) ? cur : `${cur}.`} ${rawParagraphs[i + 1]}`;
+    } else if (cur.length < 65 && paragraphs.length > 0) {
+      paragraphs[paragraphs.length - 1] = `${paragraphs[paragraphs.length - 1]} ${cur}`;
+    } else {
+      paragraphs.push(cur);
+    }
+  }
+
+  const cleanAction =
+    slotKind === 'module' && actionItem ? prepareTextForStudioTts(actionItem, lang) : '';
+  const shouldAppendAction =
+    Boolean(cleanAction) &&
+    !normalizedBody.toLowerCase().includes(cleanAction.slice(0, Math.min(40, cleanAction.length)).toLowerCase());
+
+  if (paragraphs.length === 1) {
+    const sentences = paragraphs[0]
+      .split(/(?<=[.!?])\s+(?=[\p{Lu}"“'(\[0-9])/u)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (shouldAppendAction && sentences.length < 4) {
+      return [makeTurn(false, paragraphs[0]), makeTurn(true, cleanAction)];
+    }
+    if (sentences.length >= 2) {
+      const mid = Math.ceil(sentences.length / 2);
+      const firstHalf = sentences.slice(0, mid).join(' ');
+      const secondHalf = sentences.slice(mid).join(' ');
+      const splitTurns = [makeTurn(false, firstHalf), makeTurn(true, secondHalf)];
+      if (shouldAppendAction) {
+        splitTurns.push(makeTurn(false, cleanAction));
+      }
+      return splitTurns;
+    }
+  }
+
+  const turns: FlashTtsDialogueTurn[] = paragraphs.map((p, idx) => makeTurn(idx % 2 === 1, p));
+  if (shouldAppendAction) {
+    const lastIsSecondary =
+      turns.length > 0 && turns[turns.length - 1].speaker === secondarySpeaker;
+    turns.push(makeTurn(!lastIsSecondary, cleanAction));
+  }
+  return turns;
+}
+
+/**
  * 2c. Optional Phase 4 Stage 4 Studio Narration Runner (`prompts/04_audio.md` -> `gemini-3.8-flash-tts`).
- * Synthesizes `overview` + `module_XX` studio voiceover tracks in `stages/04_audio/output/`, writes
- * `audio_manifest.json` + `thinking_trace.md`, updates `meta.stage4Telemetry`, and automatically hydrates
- * `SpeechPlayer` across `a2ui.html` & `a2ui_studio.html`.
+ * Synthesizes `overview` + `module_XX` studio voiceover tracks (single-speaker or multi-speaker dialogue)
+ * in `stages/04_audio/output/`, writes `audio_manifest.json` + `thinking_trace.md`, updates `meta.stage4Telemetry`,
+ * and automatically hydrates `SpeechPlayer` across `a2ui.html` & `a2ui_studio.html`.
  */
 export async function runStage4Flow(input: {
   workspaceRoot: string;
@@ -8773,6 +9268,7 @@ export async function runStage4Flow(input: {
   runId: string;
   outputDir: string;
   slotCount: number;
+  totalDurationSeconds?: number;
   manifestPath?: string;
   a2uiHtmlPath?: string;
   artifactHtmlPath?: string;
@@ -8793,7 +9289,12 @@ export async function runStage4Flow(input: {
   const promptName = input.promptName || '04_audio';
   const contract = loadStagePromptContract(promptName, input.promptDir || './prompts');
   const resolvedModel = contract.model || GEMINI_FLASH_TTS_MODEL;
-  const resolvedVoice = contract.voice || 'Kore';
+  const primaryVoice = (contract.primaryVoice || contract.voice || 'Kore').trim() || 'Kore';
+  const secondaryVoice = (contract.secondaryVoice || '').trim();
+  const isMultiSpeaker = Boolean(secondaryVoice && secondaryVoice.toLowerCase() !== primaryVoice.toLowerCase());
+  const primarySpeaker = (contract.primarySpeaker || 'Host').trim() || 'Host';
+  const secondarySpeaker = (contract.secondarySpeaker || 'Expert').trim() || 'Expert';
+  const resolvedVoiceLabel = isMultiSpeaker ? `${primaryVoice} & ${secondaryVoice}` : primaryVoice;
   const audioMimeType = contract.audioMimeType;
   const sampleRate = contract.sampleRate;
   const concurrency = Math.max(1, Math.min(4, input.concurrency ?? 2));
@@ -8801,36 +9302,56 @@ export async function runStage4Flow(input: {
   const rawStage2 = JSON.parse(fs.readFileSync(stage2Path, 'utf-8')) as Record<string, unknown>;
   const stage2Norm = normalizeStage2ForA2ui(rawStage2, resolvedRunId);
   const { globalIdentity, workspaceContext, toneGuide } = loadWorkspaceLayers(workspacePath);
+  const stage4Lang = detectIcmLanguage(
+    `${stage2Norm.title}\n${stage2Norm.spokenScript || stage2Norm.scriptBody}`
+  );
 
   interface AudioSlotSpec {
     slotId: string;
+    slotKind: 'overview' | 'module';
     moduleNumber: number;
     itemTitle: string;
     transcriptText: string;
     styleInstruction: string;
+    turns?: FlashTtsDialogueTurn[];
+    speakers?: Array<{ speaker: string; voice: string }>;
   }
 
-  const rawSlots: Array<{ slotId: string; moduleNumber: number; itemTitle: string; rawText: string }> =
-    [];
-  const overviewSpoken = stripMarkdownForTts(stage2Norm.spokenScript || stage2Norm.scriptBody);
-  if (overviewSpoken) {
+  const rawSlots: Array<{
+    slotId: string;
+    slotKind: 'overview' | 'module';
+    moduleNumber: number;
+    itemTitle: string;
+    rawSourceText: string;
+    actionItem?: string;
+    dialogueTurns?: NormalizedA2uiDialogueTurn[];
+  }> = [];
+
+  const rawOverviewSource = stage2Norm.spokenScript || stage2Norm.scriptBody;
+  if (prepareTextForStudioTts(rawOverviewSource, stage4Lang) || stage2Norm.overviewDialogueTurns?.length) {
     rawSlots.push({
       slotId: 'overview',
+      slotKind: 'overview',
       moduleNumber: 0,
       itemTitle: stage2Norm.title,
-      rawText: overviewSpoken,
+      rawSourceText: rawOverviewSource,
+      dialogueTurns: stage2Norm.overviewDialogueTurns,
     });
   }
+
   stage2Norm.modules.forEach((mod, idx) => {
     const slotNum = idx + 1;
     const slotId = `module_${String(slotNum).padStart(2, '0')}`;
-    const modSpoken = stripMarkdownForTts(mod.spokenNarration || mod.narration);
-    if (modSpoken) {
+    const rawModSource = mod.spokenNarration || mod.narration;
+    if (prepareTextForStudioTts(rawModSource, stage4Lang) || mod.dialogueTurns?.length) {
       rawSlots.push({
         slotId,
+        slotKind: 'module',
         moduleNumber: mod.number || slotNum,
         itemTitle: mod.title,
-        rawText: modSpoken,
+        rawSourceText: rawModSource,
+        actionItem: mod.actionItem,
+        dialogueTurns: mod.dialogueTurns,
       });
     }
   });
@@ -8849,25 +9370,76 @@ export async function runStage4Flow(input: {
           subtitle: stage2Norm.subtitle,
           audioSlot: slot.slotId,
           slotId: slot.slotId,
-          slotKind: slot.slotId === 'overview' ? 'overview' : 'module',
+          slotKind: slot.slotKind,
           moduleNumber: String(slot.moduleNumber),
           slotTitle: slot.itemTitle,
           itemTitle: slot.itemTitle,
           moduleTitle: slot.itemTitle,
           spokenText: '',
+          dialogueTranscript: '',
+          primarySpeaker,
+          primaryVoice,
+          secondarySpeaker,
+          secondaryVoice,
+          voice: primaryVoice,
           targetAudience: stage2Norm.targetAudience,
           voiceGuide: toneGuide,
           toneRules: toneGuide,
           globalIdentity,
           workspaceContext,
-        })
+        }).trim()
       : '';
+
+    if (isMultiSpeaker) {
+      const pStyle = contract.primaryStyle || renderedStyle || undefined;
+      const sStyle = contract.secondaryStyle || renderedStyle || undefined;
+      const turns = segmentStage4DialogueTurns({
+        slotKind: slot.slotKind,
+        moduleNumber: slot.moduleNumber,
+        title: slot.itemTitle,
+        spokenText: slot.rawSourceText,
+        actionItem: slot.actionItem,
+        explicitTurns: slot.dialogueTurns,
+        lang: stage4Lang,
+        primarySpeaker,
+        primaryVoice,
+        primaryStyle: pStyle,
+        secondarySpeaker,
+        secondaryVoice,
+        secondaryStyle: sStyle,
+      });
+      const dialogueTranscript = turns
+        .map((t) => `[${t.speaker} (${t.voice})]: ${t.text}`)
+        .join('\n\n');
+      const usedSpeakerMap = new Map<string, string>();
+      for (const t of turns) {
+        if (t.speaker && t.voice && !usedSpeakerMap.has(t.speaker)) {
+          usedSpeakerMap.set(t.speaker, t.voice);
+        }
+      }
+      return {
+        slotId: slot.slotId,
+        slotKind: slot.slotKind,
+        moduleNumber: slot.moduleNumber,
+        itemTitle: slot.itemTitle,
+        transcriptText: dialogueTranscript,
+        styleInstruction: renderedStyle,
+        turns,
+        speakers: Array.from(usedSpeakerMap.entries()).map(([speaker, voice]) => ({
+          speaker,
+          voice,
+        })),
+      };
+    }
+
+    const cleanedSingle = prepareTextForStudioTts(slot.rawSourceText, stage4Lang);
     return {
       slotId: slot.slotId,
+      slotKind: slot.slotKind,
       moduleNumber: slot.moduleNumber,
       itemTitle: slot.itemTitle,
-      transcriptText: slot.rawText,
-      styleInstruction: renderedStyle.trim(),
+      transcriptText: cleanedSingle,
+      styleInstruction: renderedStyle,
     };
   });
 
@@ -8882,7 +9454,15 @@ export async function runStage4Flow(input: {
     `stage: 04_audio`,
     `model: ${resolvedModel}`,
     `outputFormat: audio`,
-    `voice: "${resolvedVoice}"`,
+    `voice: "${resolvedVoiceLabel}"`,
+    ...(isMultiSpeaker
+      ? [
+          `primarySpeaker: "${primarySpeaker}"`,
+          `primaryVoice: "${primaryVoice}"`,
+          `secondarySpeaker: "${secondarySpeaker}"`,
+          `secondaryVoice: "${secondaryVoice}"`,
+        ]
+      : []),
     ...(audioMimeType ? [`audioMimeType: "${audioMimeType}"`] : []),
     ...(sampleRate ? [`sampleRate: ${sampleRate}`] : []),
     `slotCount: ${slots.length}`,
@@ -8891,7 +9471,15 @@ export async function runStage4Flow(input: {
     '',
     ...slots.flatMap((s) => [
       `## Slot: \`${s.slotId}\` — ${s.itemTitle}`,
-      ...(s.styleInstruction ? ['', `**Speech Metadata Style:**`, '', `> ${s.styleInstruction.replace(/\r?\n/g, '\n> ')}`] : []),
+      ...(s.turns && s.turns.length > 0
+        ? [
+            '',
+            `**Speakers:** ${s.speakers?.map((sp) => `${sp.speaker} (\`${sp.voice}\`)`).join(', ') || resolvedVoiceLabel} (${s.turns.length} turn(s))`,
+          ]
+        : []),
+      ...(s.styleInstruction
+        ? ['', `**Speech Metadata Style:**`, '', `> ${s.styleInstruction.replace(/\r?\n/g, '\n> ')}`]
+        : []),
       '',
       `**Transcript (${s.transcriptText.length} chars):**`,
       '',
@@ -8904,7 +9492,7 @@ export async function runStage4Flow(input: {
   fs.writeFileSync(stage4InputPath, assembledDoc, 'utf-8');
 
   console.log(
-    `--- Executing Stage 4: Studio Narration for Run: ${resolvedRunId} [model: ${resolvedModel}, voice: ${resolvedVoice}, slots: ${slots.length}${input.dryRun ? ', DRY-RUN' : ''}] ---`
+    `--- Executing Stage 4: Studio Narration for Run: ${resolvedRunId} [model: ${resolvedModel}, voice: ${resolvedVoiceLabel}, slots: ${slots.length}${input.dryRun ? ', DRY-RUN' : ''}] ---`
   );
 
   if (input.dryRun) {
@@ -8915,7 +9503,8 @@ export async function runStage4Flow(input: {
         : { runId: resolvedRunId, createdAt: new Date().toISOString() };
       meta.stage4DryRun = {
         model: resolvedModel,
-        voice: resolvedVoice,
+        voice: resolvedVoiceLabel,
+        ...(isMultiSpeaker ? { voicesUsed: [primaryVoice, secondaryVoice] } : {}),
         ...(audioMimeType ? { audioMimeType } : {}),
         ...(sampleRate ? { sampleRate } : {}),
         slotCount: slots.length,
@@ -8925,37 +9514,70 @@ export async function runStage4Flow(input: {
     } catch {
       // Ignore metadata update errors
     }
-    const sampleBody = {
-      model: resolvedModel,
-      input: [
-        {
-          type: 'user_input',
-          content: [
-            {
-              type: 'text',
-              text: `[Slot 1/${slots.length} (${slots[0]?.slotId}): ${slots[0]?.transcriptText.length || 0} chars -> ${stage4InputPath}]`,
-              ...(slots[0]?.styleInstruction
-                ? {
-                    annotations: [
-                      { type: 'speech_metadata', style: slots[0].styleInstruction },
-                    ],
-                  }
-                : {}),
+    const firstSlot = slots[0];
+    const sampleBody =
+      firstSlot?.turns && firstSlot.speakers && firstSlot.speakers.length >= 2
+        ? {
+            model: resolvedModel,
+            input: [
+              {
+                type: 'user_input',
+                content: firstSlot.turns.map((t, tIdx) => ({
+                  type: 'text',
+                  text: `[Turn ${tIdx + 1}/${firstSlot.turns!.length} (${t.speaker}): ${t.text.length} chars -> ${stage4InputPath}]`,
+                  annotations: [
+                    {
+                      type: 'speech_metadata',
+                      speaker: t.speaker,
+                      ...(t.style ? { style: t.style } : {}),
+                    },
+                  ],
+                })),
+              },
+            ],
+            response_format: {
+              type: 'audio',
+              ...(audioMimeType ? { mime_type: audioMimeType } : {}),
+              ...(sampleRate ? { sample_rate: sampleRate } : {}),
             },
-          ],
-        },
-      ],
-      response_format: {
-        type: 'audio',
-        ...(audioMimeType ? { mime_type: audioMimeType } : {}),
-        ...(sampleRate ? { sample_rate: sampleRate } : {}),
-      },
-      generation_config: {
-        speech_config: [{ voice: resolvedVoice }],
-      },
-      store: false,
-    };
-    console.log(`[DRY-RUN] Stage: 04_audio (${slots.length} narration track(s))`);
+            generation_config: {
+              speech_config: {
+                speakers: firstSlot.speakers,
+              },
+            },
+            store: false,
+          }
+        : {
+            model: resolvedModel,
+            input: [
+              {
+                type: 'user_input',
+                content: [
+                  {
+                    type: 'text',
+                    text: `[Slot 1/${slots.length} (${firstSlot?.slotId}): ${firstSlot?.transcriptText.length || 0} chars -> ${stage4InputPath}]`,
+                    ...(firstSlot?.styleInstruction
+                      ? {
+                          annotations: [
+                            { type: 'speech_metadata', style: firstSlot.styleInstruction },
+                          ],
+                        }
+                      : {}),
+                  },
+                ],
+              },
+            ],
+            response_format: {
+              type: 'audio',
+              ...(audioMimeType ? { mime_type: audioMimeType } : {}),
+              ...(sampleRate ? { sample_rate: sampleRate } : {}),
+            },
+            generation_config: {
+              speech_config: [{ voice: primaryVoice }],
+            },
+            store: false,
+          };
+    console.log(`[DRY-RUN] Stage: 04_audio (${slots.length} narration track(s), voice: ${resolvedVoiceLabel})`);
     console.log(`[DRY-RUN] Assembled Stage 4 Transcripts written to: ${stage4InputPath}`);
     console.log(`[DRY-RUN] Would send ${slots.length}x POST ${INTERACTIONS_API_URL}`);
     console.log(`[DRY-RUN] Sample Body:\n${JSON.stringify(sampleBody, null, 2)}`);
@@ -8984,14 +9606,21 @@ export async function runStage4Flow(input: {
       const idx = nextIdx++;
       if (idx >= slots.length) break;
       const slot = slots[idx];
+      const slotVoices =
+        slot.speakers && slot.speakers.length > 0
+          ? slot.speakers.map((sp) => sp.voice)
+          : [primaryVoice];
+      const slotVoiceStr = slotVoices.join(' & ');
       console.log(
-        `[Stage 4 Audio ${idx + 1}/${slots.length}]: Synthesizing ${slot.slotId} ("${slot.itemTitle}", ${slot.transcriptText.length} chars, voice=${resolvedVoice})...`
+        `[Stage 4 Audio ${idx + 1}/${slots.length}]: Synthesizing ${slot.slotId} ("${slot.itemTitle}", ${slot.transcriptText.length} chars, voice=${slotVoiceStr})...`
       );
       const ttsRes = await generateFlashTtsAudioInteraction({
         transcriptText: slot.transcriptText,
         styleInstruction: slot.styleInstruction || undefined,
+        turns: slot.turns,
+        speakers: slot.speakers,
         model: resolvedModel,
-        voice: resolvedVoice,
+        voice: primaryVoice,
         audioMimeType,
         sampleRate,
       });
@@ -9010,8 +9639,9 @@ export async function runStage4Flow(input: {
       const fileName = `${slot.slotId}${ttsRes.ext}`;
       const outPath = path.join(stage4OutDir, fileName);
       fs.writeFileSync(outPath, ttsRes.audioBuffer);
+      const trackDur = ttsRes.durationSeconds ?? parseWavMetadata(ttsRes.audioBuffer).durationSeconds;
       console.log(
-        `[Stage 4 Audio ${idx + 1}/${slots.length}]: Saved ${fileName} (${ttsRes.mimeType}, ${(ttsRes.audioBuffer.length / 1024).toFixed(1)} KB, ${ttsRes.usage.totalTokens} tokens)`
+        `[Stage 4 Audio ${idx + 1}/${slots.length}]: Saved ${fileName} (${ttsRes.mimeType}, ${(ttsRes.audioBuffer.length / 1024).toFixed(1)} KB${trackDur > 0 ? `, ${trackDur.toFixed(1)}s` : ''}, ${ttsRes.usage.totalTokens} tokens)`
       );
 
       resultsByIdx[idx] = {
@@ -9019,7 +9649,10 @@ export async function runStage4Flow(input: {
           slotId: slot.slotId,
           moduleNumber: slot.moduleNumber,
           title: slot.itemTitle,
-          voice: resolvedVoice,
+          voice: slotVoiceStr,
+          voicesUsed: slotVoices,
+          ...(slot.turns ? { turnCount: slot.turns.length } : {}),
+          ...(trackDur > 0 ? { durationSeconds: trackDur } : {}),
           fileName,
           relativePath: `./stages/04_audio/output/${fileName}`,
           mimeType: ttsRes.mimeType,
@@ -9037,6 +9670,10 @@ export async function runStage4Flow(input: {
   );
 
   const items = resultsByIdx.map((r) => r.item);
+  const totalDurationSeconds = Number(
+    items.reduce((sum, it) => sum + (it.durationSeconds || 0), 0).toFixed(2)
+  );
+  const allVoicesUsed = isMultiSpeaker ? [primaryVoice, secondaryVoice] : [primaryVoice];
   const allThoughts = resultsByIdx.flatMap((r) => r.thoughts);
   const aggUsage: InteractionUsageTelemetry = resultsByIdx.reduce(
     (acc, r) => ({
@@ -9057,7 +9694,9 @@ export async function runStage4Flow(input: {
         stage: '04_audio',
         runId: resolvedRunId,
         model: resolvedModel,
-        voice: resolvedVoice,
+        voice: resolvedVoiceLabel,
+        voicesUsed: allVoicesUsed,
+        ...(totalDurationSeconds > 0 ? { totalDurationSeconds } : {}),
         ...(audioMimeType ? { audioMimeType } : {}),
         ...(sampleRate ? { sampleRate } : {}),
         generatedAt: new Date().toISOString(),
@@ -9073,9 +9712,12 @@ export async function runStage4Flow(input: {
     `# 04_audio — Studio Speech Synthesis Trace`,
     '',
     `- **Model:** \`${resolvedModel}\``,
-    `- **Voice:** \`${resolvedVoice}\``,
+    `- **Voice(s):** \`${resolvedVoiceLabel}\``,
     `- **Generated Tracks:** ${items.length} (${items.map((it) => `\`${it.fileName}\``).join(', ')})`,
-    `- **Duration:** ${(durationMs / 1000).toFixed(1)}s`,
+    ...(totalDurationSeconds > 0
+      ? [`- **Total Audio Duration:** ${totalDurationSeconds.toFixed(1)}s (${(totalDurationSeconds / 60).toFixed(1)} min)`]
+      : []),
+    `- **Wall-Clock Synthesis Time:** ${(durationMs / 1000).toFixed(1)}s`,
     `- **Input Tokens:** ${aggUsage.inputTokens}`,
     `- **Thinking Tokens:** ${aggUsage.thoughtsTokens}`,
     `- **Output Tokens:** ${aggUsage.outputTokens}`,
@@ -9096,8 +9738,10 @@ export async function runStage4Flow(input: {
       : { runId: resolvedRunId, createdAt: new Date().toISOString() };
     meta.stage4Telemetry = {
       model: resolvedModel,
-      voice: resolvedVoice,
+      voice: resolvedVoiceLabel,
+      voicesUsed: allVoicesUsed,
       trackCount: items.length,
+      ...(totalDurationSeconds > 0 ? { totalDurationSeconds } : {}),
       files: items.map((it) => it.fileName),
       inputTokens: aggUsage.inputTokens,
       thoughtsTokens: aggUsage.thoughtsTokens,
@@ -9111,7 +9755,7 @@ export async function runStage4Flow(input: {
   }
 
   console.log(
-    `[Stage 4 Telemetry]: tracks=${items.length}, voice=${resolvedVoice}, input=${aggUsage.inputTokens}, thoughts=${aggUsage.thoughtsTokens}, output=${aggUsage.outputTokens}, total=${aggUsage.totalTokens} tokens (${(durationMs / 1000).toFixed(1)}s)`
+    `[Stage 4 Telemetry]: tracks=${items.length}, voice=${resolvedVoiceLabel}${totalDurationSeconds > 0 ? `, audio=${totalDurationSeconds.toFixed(1)}s` : ''}, input=${aggUsage.inputTokens}, thoughts=${aggUsage.thoughtsTokens}, output=${aggUsage.outputTokens}, total=${aggUsage.totalTokens} tokens (${(durationMs / 1000).toFixed(1)}s)`
   );
 
   let a2uiHtmlPath: string | undefined;
@@ -9136,6 +9780,7 @@ export async function runStage4Flow(input: {
     runId: resolvedRunId,
     outputDir: stage4OutDir,
     slotCount: slots.length,
+    ...(totalDurationSeconds > 0 ? { totalDurationSeconds } : {}),
     manifestPath,
     ...(a2uiHtmlPath ? { a2uiHtmlPath } : {}),
     ...(artifactHtmlPath ? { artifactHtmlPath } : {}),
@@ -12543,7 +13188,7 @@ export const A2UI_ICM_CATALOG_SCHEMA = {
     SpeechPlayer: {
       description:
         'Synthesizes spoken narration via Web Speech API with automatic BCP-47 voice binding (nb-NO/no-NO/en-US) or plays an optional pre-rendered Stage 4 audio URL.',
-      properties: ['ttsText', 'description', 'audioUrl'],
+      properties: ['ttsText', 'description', 'audioUrl', 'voicesLabel'],
     },
     OkfMarkdown: {
       description:
@@ -13007,6 +13652,12 @@ export function extractChecklistGroupsFromMarkdown(rawMarkdown: string): A2uiChe
   return groups.filter((g) => g.items.length > 0);
 }
 
+export interface NormalizedA2uiDialogueTurn {
+  speaker?: string;
+  text: string;
+  style?: string;
+}
+
 export interface NormalizedA2uiModule {
   id: string;
   number: number;
@@ -13015,12 +13666,14 @@ export interface NormalizedA2uiModule {
   durationOrMeta: string;
   narration: string;
   spokenNarration?: string;
+  dialogueTurns?: NormalizedA2uiDialogueTurn[];
   actionItem: string;
   bullets: string[];
   visualPrompt?: string;
   imageUrl?: string;
   imageCaption?: string;
   audioUrl?: string;
+  audioVoices?: string;
 }
 
 export interface NormalizedA2uiQuizQuestion {
@@ -13108,6 +13761,7 @@ export function normalizeStage2ForA2ui(
   estimatedDuration: number | string;
   scriptBody: string;
   spokenScript: string;
+  overviewDialogueTurns?: NormalizedA2uiDialogueTurn[];
   overviewVisualPrompt?: string;
   highlights: string[];
   modules: NormalizedA2uiModule[];
@@ -13347,6 +14001,26 @@ export function normalizeStage2ForA2ui(
         rawMod.sceneFocus ||
         ''
     ).trim();
+    const rawModTurns = Array.isArray(rawMod.dialogueTurns)
+      ? rawMod.dialogueTurns
+      : Array.isArray(rawMod.speakerTurns)
+        ? rawMod.speakerTurns
+        : Array.isArray(rawMod.turns)
+          ? rawMod.turns
+          : [];
+    const modDialogueTurns: NormalizedA2uiDialogueTurn[] = rawModTurns
+      .map((t: any) =>
+        t && typeof t === 'object' && typeof t.text === 'string' && t.text.trim()
+          ? {
+              ...(typeof t.speaker === 'string' && t.speaker.trim()
+                ? { speaker: t.speaker.trim() }
+                : {}),
+              text: t.text.trim(),
+              ...(typeof t.style === 'string' && t.style.trim() ? { style: t.style.trim() } : {}),
+            }
+          : null
+      )
+      .filter((t: NormalizedA2uiDialogueTurn | null): t is NormalizedA2uiDialogueTurn => Boolean(t));
 
     modules.push({
       id: `mod_${idx + 1}`,
@@ -13356,6 +14030,7 @@ export function normalizeStage2ForA2ui(
       durationOrMeta,
       narration,
       spokenNarration,
+      ...(modDialogueTurns.length > 0 ? { dialogueTurns: modDialogueTurns } : {}),
       actionItem,
       bullets,
       ...(modVisualPrompt ? { visualPrompt: modVisualPrompt } : {}),
@@ -13640,6 +14315,26 @@ export function normalizeStage2ForA2ui(
       scriptDraft.imagePrompt ||
       ''
   ).trim();
+  const rawOverviewTurns = Array.isArray(scriptDraft.overviewDialogueTurns)
+    ? scriptDraft.overviewDialogueTurns
+    : Array.isArray(scriptDraft.dialogueTurns)
+      ? scriptDraft.dialogueTurns
+      : Array.isArray(scriptDraft.speakerTurns)
+        ? scriptDraft.speakerTurns
+        : [];
+  const overviewDialogueTurns: NormalizedA2uiDialogueTurn[] = rawOverviewTurns
+    .map((t: any) =>
+      t && typeof t === 'object' && typeof t.text === 'string' && t.text.trim()
+        ? {
+            ...(typeof t.speaker === 'string' && t.speaker.trim()
+              ? { speaker: t.speaker.trim() }
+              : {}),
+            text: t.text.trim(),
+            ...(typeof t.style === 'string' && t.style.trim() ? { style: t.style.trim() } : {}),
+          }
+        : null
+    )
+    .filter((t: NormalizedA2uiDialogueTurn | null): t is NormalizedA2uiDialogueTurn => Boolean(t));
 
   return {
     title,
@@ -13648,6 +14343,7 @@ export function normalizeStage2ForA2ui(
     estimatedDuration,
     scriptBody,
     spokenScript,
+    ...(overviewDialogueTurns.length > 0 ? { overviewDialogueTurns } : {}),
     ...(overviewVisualPrompt ? { overviewVisualPrompt } : {}),
     highlights,
     modules,
@@ -15112,8 +15808,14 @@ const A2UI_STUDIO_JS = `
         return (isNo ? "paragrafene " : "sections ") + a + (isNo ? " til " : " to ") + b;
       })
       .replace(/§§\\s*(\\d+)-(\\d+)\\b/g, function (full, a, b, offset, str) {
-        const rest = String(str).slice(offset + full.length);
-        if (/^\\s*(?:og|and|eller|or|,)\\s*\\d+-/i.test(rest) || Number(a) >= Number(b)) {
+        const fullStr = String(str);
+        const before = fullStr.slice(Math.max(0, Number(offset) - 28), Number(offset));
+        const rest = fullStr.slice(Number(offset) + full.length);
+        if (
+          /\\b(?:TEK\\s*\\d+|SAK\\s*\\d+|pbl\\.?|aml\\.?)\\s*$/i.test(before) ||
+          /^\\s*(?:og|and|eller|or|til|to|,)\\s*\\d+-/i.test(rest) ||
+          Number(a) >= Number(b)
+        ) {
           return (isNo ? "paragrafene " : "sections ") + a + "-" + b;
         }
         return (isNo ? "paragrafene " : "sections ") + a + (isNo ? " til " : " to ") + b;
@@ -16254,6 +16956,7 @@ const A2UI_STUDIO_JS = `
   var messages = payload.messages || [];
   var bundleGraph = payload.bundleGraph || { nodes: [], edges: [], bodies: {}, types: [], palette: {}, conceptMeta: {}, sourceNodeByFnId: {}, sourceNodeByAnyFnId: {} };
   var bundleRuns = Array.isArray(payload.bundleRuns) ? payload.bundleRuns : [];
+  var mediaUrisByRun = payload.mediaUrisByRun || {};
 
   // A2UI Client Surface State (Adjacency List + RFC 6901 JSON Pointer Data Model)
   const surfaces = {};
@@ -16266,6 +16969,35 @@ const A2UI_STUDIO_JS = `
       activeSurfaceId = surface.surfaceId;
     }
     return surface;
+  }
+
+  function resolveClientMediaUri(rawUrl, surface, overrideMediaMap) {
+    const trimmed = String(rawUrl || "").trim();
+    if (!trimmed || /^(?:https?:|data:)/i.test(trimmed)) return trimmed;
+    const liveMap =
+      overrideMediaMap ||
+      (typeof window !== "undefined" &&
+        window.A2UI_SURFACE_PAYLOAD &&
+        window.A2UI_SURFACE_PAYLOAD.mediaUrisByRun) ||
+      mediaUrisByRun;
+    const runId = String(
+      (surface &&
+        surface.dataModel &&
+        surface.dataModel.meta &&
+        surface.dataModel.meta.runId) ||
+        ""
+    ).trim();
+    if (runId && liveMap && liveMap[runId] && liveMap[runId][trimmed]) {
+      return liveMap[runId][trimmed];
+    }
+    if (liveMap && typeof liveMap === "object") {
+      const keys = Object.keys(liveMap);
+      for (let i = 0; i < keys.length; i++) {
+        const m = liveMap[keys[i]];
+        if (m && m[trimmed]) return m[trimmed];
+      }
+    }
+    return trimmed;
   }
 
   if (typeof window !== "undefined" && window.__ICM_TEST_HOOKS__) {
@@ -16301,6 +17033,7 @@ const A2UI_STUDIO_JS = `
     window.__ICM_TEST_HOOKS__.resolveDynamic = resolveDynamic;
     window.__ICM_TEST_HOOKS__.evaluateFunctionCall = evaluateFunctionCall;
     window.__ICM_TEST_HOOKS__.isAllowedMediaUrl = isAllowedMediaUrl;
+    window.__ICM_TEST_HOOKS__.resolveClientMediaUri = resolveClientMediaUri;
     window.__ICM_TEST_HOOKS__.processMessage = processMessage;
     window.__ICM_TEST_HOOKS__.surfaces = surfaces;
     return;
@@ -17825,17 +18558,28 @@ const A2UI_STUDIO_JS = `
         container.appendChild(voiceNote);
       }
 
-      if (rawUrl && isAllowedMediaUrl(rawUrl)) {
+      const resolvedAudioSrc = resolveClientMediaUri(rawUrl, surface);
+      const voicesLabel = String(
+        resolveDynamic(comp.voicesLabel, surface, scopeData, itemIndex) || ""
+      ).trim();
+
+      if (resolvedAudioSrc && isAllowedMediaUrl(resolvedAudioSrc)) {
         const audio = document.createElement("audio");
         audio.controls = true;
         audio.preload = "metadata";
-        audio.src = String(rawUrl);
+        audio.src = String(resolvedAudioSrc);
         audio.style.width = "100%";
         audio.style.maxWidth = "540px";
         audio.style.height = "40px";
         const studioBadge = document.createElement("span");
         studioBadge.className = "a2ui-badge neutral";
-        studioBadge.textContent = isNo ? "🎙️ Studio-lyd" : "🎙️ Studio Audio";
+        studioBadge.textContent = isNo
+          ? voicesLabel
+            ? "🎙️ Studio-lyd (" + voicesLabel + ")"
+            : "🎙️ Studio-lyd"
+          : voicesLabel
+            ? "🎙️ Studio Audio (" + voicesLabel + ")"
+            : "🎙️ Studio Audio";
         audio.addEventListener("play", () => {
           if (typeof window !== "undefined" && window.speechSynthesis) {
             window.speechSynthesis.cancel();
@@ -17877,14 +18621,15 @@ const A2UI_STUDIO_JS = `
 
     if (type === "Image") {
       const rawImgUrl = String(resolveDynamic(comp.url, surface, scopeData, itemIndex) || "");
-      if (!isAllowedMediaUrl(rawImgUrl)) {
+      const resolvedImgUrl = resolveClientMediaUri(rawImgUrl, surface);
+      if (!isAllowedMediaUrl(resolvedImgUrl)) {
         const emptyImg = document.createElement("span");
         emptyImg.style.display = "none";
         return emptyImg;
       }
       const altText = String(resolveDynamic(comp.description ?? comp.alt, surface, scopeData, itemIndex) || "");
       const img = document.createElement("img");
-      img.src = rawImgUrl;
+      img.src = resolvedImgUrl;
       img.alt = altText;
       img.loading = "lazy";
       if (comp.variant === "header") {
@@ -17928,12 +18673,14 @@ const A2UI_STUDIO_JS = `
       const video = document.createElement("video");
       video.controls = true;
       const rawVidUrl = String(resolveDynamic(comp.url, surface, scopeData, itemIndex) || "");
-      if (isAllowedMediaUrl(rawVidUrl)) {
-        video.src = rawVidUrl;
+      const resolvedVidUrl = resolveClientMediaUri(rawVidUrl, surface);
+      if (isAllowedMediaUrl(resolvedVidUrl)) {
+        video.src = resolvedVidUrl;
       }
       const rawPosterUrl = String(resolveDynamic(comp.posterUrl, surface, scopeData, itemIndex) || "");
-      if (rawPosterUrl && isAllowedMediaUrl(rawPosterUrl)) {
-        video.poster = rawPosterUrl;
+      const resolvedPosterUrl = resolveClientMediaUri(rawPosterUrl, surface);
+      if (resolvedPosterUrl && isAllowedMediaUrl(resolvedPosterUrl)) {
+        video.poster = resolvedPosterUrl;
       }
       video.style.maxWidth = "100%";
       video.style.borderRadius = "8px";
@@ -18220,7 +18967,8 @@ const A2UI_STUDIO_JS = `
       }
       card.appendChild(headRow);
 
-      if (mod.imageUrl && isAllowedMediaUrl(mod.imageUrl)) {
+      const modImgSrc = resolveClientMediaUri(mod.imageUrl, surface);
+      if (modImgSrc && isAllowedMediaUrl(modImgSrc)) {
         const fig = document.createElement("figure");
         fig.style.margin = "0";
         fig.style.borderRadius = "10px";
@@ -18228,7 +18976,7 @@ const A2UI_STUDIO_JS = `
         fig.style.border = "1px solid var(--border)";
         fig.style.background = "var(--bg)";
         const figImg = document.createElement("img");
-        figImg.src = String(mod.imageUrl);
+        figImg.src = String(modImgSrc);
         figImg.alt = String(mod.imageCaption || mod.title || "");
         figImg.loading = "lazy";
         figImg.style.width = "100%";
@@ -18269,6 +19017,7 @@ const A2UI_STUDIO_JS = `
           description: mod.title,
           ttsText: mod.spokenNarration || mod.narration,
           audioUrl: mod.audioUrl || "",
+          voicesLabel: mod.audioVoices || "",
         });
         card.appendChild(ttsPlayer);
       }
@@ -20186,14 +20935,22 @@ export function generateA2uiSurface(
     overviewImageUrl: string;
     overviewImageCaption: string;
     overviewAudioUrl: string;
+    overviewAudioVoices: string;
     inlineDataUriByRelUrl: Record<string, string>;
   } => {
     const inlineDataUriByRelUrl: Record<string, string> = {};
     let overviewImageUrl = '';
     let overviewImageCaption = norm.title || '';
     let overviewAudioUrl = '';
+    let overviewAudioVoices = '';
     if (!targetRunDir || !fs.existsSync(targetRunDir)) {
-      return { overviewImageUrl, overviewImageCaption, overviewAudioUrl, inlineDataUriByRelUrl };
+      return {
+        overviewImageUrl,
+        overviewImageCaption,
+        overviewAudioUrl,
+        overviewAudioVoices,
+        inlineDataUriByRelUrl,
+      };
     }
 
     const visualsOutDir = path.join(targetRunDir, 'stages', '03_visuals', 'output');
@@ -20284,22 +21041,34 @@ export function generateA2uiSurface(
     const audioOutDir = path.join(targetRunDir, 'stages', '04_audio', 'output');
     if (fs.existsSync(audioOutDir)) {
       let audioItems: Array<Record<string, any>> = [];
+      let manifestVoiceFallback = '';
       const aManifestPath = path.join(audioOutDir, 'audio_manifest.json');
       if (fs.existsSync(aManifestPath)) {
         try {
           const parsed = JSON.parse(fs.readFileSync(aManifestPath, 'utf-8'));
           if (Array.isArray(parsed?.items)) audioItems = parsed.items;
+          if (Array.isArray(parsed?.voicesUsed) && parsed.voicesUsed.length > 0) {
+            manifestVoiceFallback = parsed.voicesUsed.join(' & ');
+          } else if (typeof parsed?.voice === 'string' && parsed.voice.trim()) {
+            manifestVoiceFallback = parsed.voice.trim();
+          }
         } catch {
           audioItems = [];
         }
       }
-      const audExts = ['.wav', '.mp3', '.ogg', '.m4a', '.webm'];
+      const audExts = ['.wav', '.mp3', '.ogg', '.m4a', '.webm', '.pcm'];
       let totalInlinedAudioBytes = 0;
       const resolveAudioSlot = (
         candidateBases: string[],
         slotMatchFn: (it: Record<string, any>) => boolean
-      ): string => {
+      ): { relUrl: string; voicesLabel: string } | null => {
         const mItem = audioItems.find(slotMatchFn);
+        const slotVoicesLabel =
+          Array.isArray(mItem?.voicesUsed) && mItem.voicesUsed.length > 0
+            ? mItem.voicesUsed.join(' & ')
+            : typeof mItem?.voice === 'string' && mItem.voice.trim()
+              ? mItem.voice.trim()
+              : manifestVoiceFallback;
         const candidateFiles: string[] = [];
         if (mItem && typeof mItem.fileName === 'string' && mItem.fileName.trim()) {
           candidateFiles.push(path.basename(mItem.fileName.trim()));
@@ -20315,11 +21084,7 @@ export function generateA2uiSurface(
             const relUrl = `./stages/04_audio/output/${fName}`;
             try {
               let buf: Buffer = fs.readFileSync(full);
-              if (
-                buf.length > 0 &&
-                buf.length <= 8 * 1024 * 1024 &&
-                totalInlinedAudioBytes + buf.length <= 32 * 1024 * 1024
-              ) {
+              if (buf.length > 0 && buf.length <= 96 * 1024 * 1024) {
                 let det = detectMediaMimeAndExtension(buf, undefined, 'audio');
                 if (
                   buf.length >= 4 &&
@@ -20329,22 +21094,34 @@ export function generateA2uiSurface(
                   buf = wrapPcm16InWavHeader(buf, 24000);
                   det = { mimeType: 'audio/wav', ext: '.wav' };
                 }
-                inlineDataUriByRelUrl[relUrl] = `data:${det.mimeType};base64,${buf.toString('base64')}`;
-                totalInlinedAudioBytes += buf.length;
+                if (det.mimeType === 'audio/wav') {
+                  buf = resampleWav16BitMono(buf, 12000);
+                }
+                if (
+                  buf.length <= 48 * 1024 * 1024 &&
+                  totalInlinedAudioBytes + buf.length <= 160 * 1024 * 1024
+                ) {
+                  inlineDataUriByRelUrl[relUrl] = `data:${det.mimeType};base64,${buf.toString('base64')}`;
+                  totalInlinedAudioBytes += buf.length;
+                }
               }
             } catch {
               // Keep relative URL fallback
             }
-            return relUrl;
+            return { relUrl, voicesLabel: slotVoicesLabel };
           }
         }
-        return '';
+        return null;
       };
 
-      overviewAudioUrl = resolveAudioSlot(
+      const ovAud = resolveAudioSlot(
         ['overview', 'hero'],
         (it) => it?.slotId === 'overview' || Number(it?.moduleNumber) === 0
       );
+      if (ovAud) {
+        overviewAudioUrl = ovAud.relUrl;
+        overviewAudioVoices = ovAud.voicesLabel;
+      }
 
       norm.modules.forEach((mod, idx) => {
         const slotNum = idx + 1;
@@ -20359,44 +21136,27 @@ export function generateA2uiSurface(
             `module_${modNum}`,
           ])
         );
-        const audRel = resolveAudioSlot(
+        const modAud = resolveAudioSlot(
           bases,
           (it) =>
             it?.slotId === `module_${padSlot}` ||
             it?.slotId === `module_${slotNum}` ||
             Number(it?.moduleNumber) === modNum
         );
-        if (audRel) {
-          mod.audioUrl = audRel;
+        if (modAud) {
+          mod.audioUrl = modAud.relUrl;
+          if (modAud.voicesLabel) mod.audioVoices = modAud.voicesLabel;
         }
       });
     }
 
-    return { overviewImageUrl, overviewImageCaption, overviewAudioUrl, inlineDataUriByRelUrl };
-  };
-
-  const applyInlineMediaToDataModel = (
-    dm: Record<string, any>,
-    uriMap?: Record<string, string>
-  ): Record<string, any> => {
-    if (!dm || !uriMap || Object.keys(uriMap).length === 0 || !dm.stage2) {
-      return dm;
-    }
-    const cloned = JSON.parse(JSON.stringify(dm));
-    if (cloned.stage2.overviewImageUrl && uriMap[cloned.stage2.overviewImageUrl]) {
-      cloned.stage2.overviewImageUrl = uriMap[cloned.stage2.overviewImageUrl];
-    }
-    if (cloned.stage2.overviewAudioUrl && uriMap[cloned.stage2.overviewAudioUrl]) {
-      cloned.stage2.overviewAudioUrl = uriMap[cloned.stage2.overviewAudioUrl];
-    }
-    if (Array.isArray(cloned.stage2.modules)) {
-      cloned.stage2.modules = cloned.stage2.modules.map((m: Record<string, any>) => ({
-        ...m,
-        ...(m.imageUrl && uriMap[m.imageUrl] ? { imageUrl: uriMap[m.imageUrl] } : {}),
-        ...(m.audioUrl && uriMap[m.audioUrl] ? { audioUrl: uriMap[m.audioUrl] } : {}),
-      }));
-    }
-    return cloned;
+    return {
+      overviewImageUrl,
+      overviewImageCaption,
+      overviewAudioUrl,
+      overviewAudioVoices,
+      inlineDataUriByRelUrl,
+    };
   };
 
   const stage2Norm = normalizeStage2ForA2ui(rawStage2, fallbackTitle);
@@ -20613,6 +21373,7 @@ export function generateA2uiSurface(
         overviewImageUrl: rMedia.overviewImageUrl,
         overviewImageCaption: rMedia.overviewImageCaption,
         overviewAudioUrl: rMedia.overviewAudioUrl,
+        overviewAudioVoices: rMedia.overviewAudioVoices,
         scriptBody: rOverviewBody,
         spokenScript:
           rStage2Norm.spokenScript ||
@@ -21293,6 +22054,7 @@ export function generateA2uiSurface(
       description: { '@path': '/meta/title' },
       ttsText: { '@path': '/stage2/spokenScript' },
       audioUrl: { '@path': '/stage2/overviewAudioUrl' },
+      voicesLabel: { '@path': '/stage2/overviewAudioVoices' },
     },
     {
       id: 'overview_narration_body',
@@ -21646,6 +22408,7 @@ export function generateA2uiSurface(
       overviewImageUrl: activeMedia.overviewImageUrl,
       overviewImageCaption: activeMedia.overviewImageCaption,
       overviewAudioUrl: activeMedia.overviewAudioUrl,
+      overviewAudioVoices: activeMedia.overviewAudioVoices,
       scriptBody: activeOverviewBody,
       spokenScript:
         stage2Norm.spokenScript ||
@@ -21746,29 +22509,20 @@ export function generateA2uiSurface(
     fs.writeFileSync(path.join(baseOutDir, 'a2ui_surface.jsonl'), serializedSurfaceJsonl, 'utf-8');
   }
 
-  const htmlDataModel = applyInlineMediaToDataModel(dataModel, activeMedia.inlineDataUriByRelUrl);
-  const htmlMessages: A2uiEnvelopeMessage[] = messages.map((m) =>
-    'updateDataModel' in m && m.updateDataModel
-      ? {
-          ...m,
-          updateDataModel: {
-            ...m.updateDataModel,
-            value: htmlDataModel,
-          },
-        }
-      : m
-  );
-  const htmlBundleRuns: A2uiBundleRunEntry[] = bundleRuns.map((br) => ({
-    ...br,
-    dataModel: applyInlineMediaToDataModel(br.dataModel, runMediaUriMaps.get(br.runId)),
-  }));
+  const mediaUrisByRun: Record<string, Record<string, string>> = {};
+  for (const [rKey, uriMap] of runMediaUriMaps.entries()) {
+    if (uriMap && Object.keys(uriMap).length > 0) {
+      mediaUrisByRun[rKey] = uriMap;
+    }
+  }
 
   const clientPayload = {
     surfaceId,
     catalogId: A2UI_BASIC_CATALOG_ID,
     domainCatalogId: A2UI_ICM_CATALOG_ID,
-    messages: htmlMessages,
-    bundleRuns: htmlBundleRuns,
+    messages,
+    bundleRuns,
+    mediaUrisByRun,
     bundleGraph: {
       nodes: graphNodes,
       edges: graphEdges,
@@ -21910,10 +22664,6 @@ ${A2UI_STUDIO_JS}
         }
         return comp;
       });
-      const siblingHtmlDataModel = applyInlineMediaToDataModel(
-        br.dataModel,
-        runMediaUriMaps.get(br.runId)
-      );
       const siblingMessages: A2uiEnvelopeMessage[] = [
         {
           version: A2UI_PROTOCOL_VERSION,
@@ -21935,7 +22685,7 @@ ${A2UI_STUDIO_JS}
           updateDataModel: {
             surfaceId: siblingSurfaceId,
             path: '/',
-            value: siblingHtmlDataModel,
+            value: br.dataModel,
           },
         },
       ];
@@ -21944,7 +22694,8 @@ ${A2UI_STUDIO_JS}
         catalogId: A2UI_BASIC_CATALOG_ID,
         domainCatalogId: A2UI_ICM_CATALOG_ID,
         messages: siblingMessages,
-        bundleRuns: htmlBundleRuns,
+        bundleRuns,
+        mediaUrisByRun,
         bundleGraph: clientPayload.bundleGraph,
       };
       const siblingHtml = renderA2uiHtmlDocument(
@@ -25911,14 +26662,152 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         'runStage3Flow and runStage4Flow dry-runs assemble overview + module_XX visual and Markdown-stripped TTS prompts at zero token cost'
       );
 
+      // Verify RIFF sub-chunk WAV parser (`parseWavMetadata`) & 5-tap FIR downsampler (`resampleWav16BitMono`)
+      const pcm24k2Sec = Buffer.alloc(96000);
+      for (let sIdx = 0; sIdx < 48000; sIdx++) {
+        pcm24k2Sec.writeInt16LE(Math.round(8000 * Math.sin((2 * Math.PI * 440 * sIdx) / 24000)), sIdx * 2);
+      }
+      const base24kWav = wrapPcm16InWavHeader(pcm24k2Sec, 24000, 1);
+      const listChunkPayload = Buffer.from('INFOISFT\x0c\x00\x00\x00GeminiTTS\x00\x00\x00', 'binary');
+      const listChunkHeader = Buffer.alloc(8);
+      listChunkHeader.write('LIST', 0, 'ascii');
+      listChunkHeader.writeUInt32LE(listChunkPayload.length, 4);
+      const wavWithListChunk = Buffer.concat([
+        base24kWav.subarray(0, 36),
+        listChunkHeader,
+        listChunkPayload,
+        base24kWav.subarray(36),
+      ]);
+      wavWithListChunk.writeUInt32LE(wavWithListChunk.length - 8, 4);
+      const parsedListWav = parseWavMetadata(wavWithListChunk);
+      const downsampled12kWav = resampleWav16BitMono(wavWithListChunk, 12000);
+      const parsed12kWav = parseWavMetadata(downsampled12kWav);
+      assert(
+        parsedListWav.isWav === true &&
+          parsedListWav.sampleRate === 24000 &&
+          parsedListWav.channels === 1 &&
+          parsedListWav.bitsPerSample === 16 &&
+          parsedListWav.dataBytes === 96000 &&
+          parsedListWav.durationSeconds === 2 &&
+          parsed12kWav.isWav === true &&
+          parsed12kWav.sampleRate === 12000 &&
+          parsed12kWav.channels === 1 &&
+          parsed12kWav.dataBytes === 48000 &&
+          parsed12kWav.durationSeconds === 2 &&
+          downsampled12kWav.length === 48044,
+        'parseWavMetadata skips auxiliary RIFF chunks (LIST/INFO) and resampleWav16BitMono 5-tap FIR downsamples 24 kHz -> 12 kHz mono at 50% PCM byte size'
+      );
+
+      // Verify domain-neutral bilingual (`no` & `en`) prosody normalization (`prepareTextForStudioTts`)
+      const ttsNormNo = prepareTextForStudioTts(
+        '**Ansvarsdeling:** I TEK17 §§ 11-12 og 11-13 samt forskriften (FOR-2015-12-17-1710) §§ 4–10 kreves ≤ 30 m avstand, ≥ 85 dB(A) og maks 15 % avvik kl. 08:00 f.eks. ved øvelse.',
+        'no'
+      );
+      const ttsNormEn = prepareTextForStudioTts(
+        '**Thermal Margin:** Under §§ 4-8, maintain ≥ 25 m clearance, ≤ 5 % drift, e.g. at 70 dB.',
+        'en'
+      );
+      assert(
+        ttsNormNo.startsWith('Ansvarsdeling. I TEK17 paragrafene 11-12 og 11-13') &&
+          ttsNormNo.includes('paragrafene 4 til 10') &&
+          !ttsNormNo.includes('FOR-2015-12-17-1710') &&
+          ttsNormNo.includes('inntil 30 meter') &&
+          ttsNormNo.includes('minst 85 desibel') &&
+          ttsNormNo.includes('15 prosent') &&
+          ttsNormNo.includes('klokken 08:00') &&
+          ttsNormNo.includes('for eksempel') &&
+          ttsNormEn.startsWith('Thermal Margin. Under sections 4 to 8') &&
+          ttsNormEn.includes('at least 25 meters') &&
+          ttsNormEn.includes('at most 5 percent') &&
+          ttsNormEn.includes('for example,') &&
+          ttsNormEn.includes('70 decibels'),
+        'prepareTextForStudioTts expands statutory section ranges, bold lead-ins, inequalities, abbreviations, and physical units without corrupting chapter-hyphenated IDs'
+      );
+
+      // Verify multi-speaker Stage 4 contract (`primaryVoice` + `secondaryVoice`) & dialogue segmentation dry-run
+      fs.writeFileSync(
+        path.join(tmpMmPrompts, '04_audio_dialogue.md'),
+        [
+          '---',
+          'primarySpeaker: "Lead"',
+          'primaryVoice: "Sulafat"',
+          'secondarySpeaker: "Specialist"',
+          'secondaryVoice: "Kore"',
+          'audioMimeType: "audio/wav"',
+          'sampleRate: 24000',
+          'output:',
+          '  format: audio',
+          '---',
+          'Deliver "{{slotTitle}}" with calm studio clarity.',
+        ].join('\n'),
+        'utf-8'
+      );
+      const multiVoiceContract = loadStagePromptContract('04_audio_dialogue', tmpMmPrompts);
+      const s4MultiDry = await runStage4Flow({
+        workspaceRoot: tmpMmWs,
+        promptDir: tmpMmPrompts,
+        promptName: '04_audio_dialogue',
+        dryRun: true,
+      });
+      const s4MultiAssembled = fs.readFileSync(
+        path.join(mmRunDir, 'stages', '04_audio', 'input', 'prompt_assembled.md'),
+        'utf-8'
+      );
+      assert(
+        multiVoiceContract.primaryVoice === 'Sulafat' &&
+          multiVoiceContract.secondaryVoice === 'Kore' &&
+          multiVoiceContract.voice === 'Sulafat' &&
+          s4MultiDry.dryRun === true &&
+          s4MultiDry.slotCount === 2 &&
+          s4MultiAssembled.includes('primaryVoice: "Sulafat"') &&
+          s4MultiAssembled.includes('secondaryVoice: "Kore"') &&
+          s4MultiAssembled.includes('[Lead (Sulafat)]:') &&
+          s4MultiAssembled.includes('[Specialist (Kore)]:') &&
+          s4MultiAssembled.includes('Validate synthetic inertia step response prior to commissioning.'),
+        'loadStagePromptContract and runStage4Flow support zero-patch multi-speaker dialogue segmentation and actionItem wrap-up turns'
+      );
+
       const s3OutDir = path.join(mmRunDir, 'stages', '03_visuals', 'output');
       const s4OutDir = path.join(mmRunDir, 'stages', '04_audio', 'output');
       fs.mkdirSync(s3OutDir, { recursive: true });
       fs.mkdirSync(s4OutDir, { recursive: true });
-      fs.writeFileSync(path.join(s3OutDir, 'overview.jpg'), jpegMagic);
-      fs.writeFileSync(path.join(s3OutDir, 'module_01.jpg'), jpegMagic);
-      fs.writeFileSync(path.join(s4OutDir, 'overview.wav'), wrappedWav);
-      fs.writeFileSync(path.join(s4OutDir, 'module_01.wav'), wrappedWav);
+      const uniqueOvJpg = Buffer.concat([jpegMagic, Buffer.from('OV_HERO_UNIQUE_BYTES')]);
+      const uniqueModJpg = Buffer.concat([jpegMagic, Buffer.from('MOD_01_UNIQUE_BYTES')]);
+      // Write a > 8 MB (8.6 MB) 24 kHz mono WAV for module_01 to verify large-track FIR downsampling & inlining
+      const large9MbWav = wrapPcm16InWavHeader(Buffer.alloc(9_000_000), 24000, 1);
+      fs.writeFileSync(path.join(s3OutDir, 'overview.jpg'), uniqueOvJpg);
+      fs.writeFileSync(path.join(s3OutDir, 'module_01.jpg'), uniqueModJpg);
+      fs.writeFileSync(path.join(s4OutDir, 'overview.wav'), base24kWav);
+      fs.writeFileSync(path.join(s4OutDir, 'module_01.wav'), large9MbWav);
+      fs.writeFileSync(
+        path.join(s4OutDir, 'audio_manifest.json'),
+        JSON.stringify(
+          {
+            stage: '04_audio',
+            runId: mmRunId,
+            model: GEMINI_FLASH_TTS_MODEL,
+            voice: 'Sulafat & Kore',
+            voicesUsed: ['Sulafat', 'Kore'],
+            items: [
+              {
+                slotId: 'overview',
+                moduleNumber: 0,
+                fileName: 'overview.wav',
+                voicesUsed: ['Sulafat', 'Kore'],
+              },
+              {
+                slotId: 'module_01',
+                moduleNumber: 1,
+                fileName: 'module_01.wav',
+                voicesUsed: ['Sulafat', 'Kore'],
+              },
+            ],
+          },
+          null,
+          2
+        ),
+        'utf-8'
+      );
 
       fs.writeFileSync(
         path.join(mmRunDir, 'meta.json'),
@@ -25942,6 +26831,19 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       const mmValidation = validateA2uiSurfaceMessages(mmA2ui.messages);
       const mmSurfaceJsonRaw = fs.readFileSync(mmA2ui.surfaceJsonPath, 'utf-8');
       const mmHtmlRaw = fs.readFileSync(mmA2ui.htmlOutputPath, 'utf-8');
+      const mmPayloadMatch = mmHtmlRaw.match(/<script>\s*window\.A2UI_SURFACE_PAYLOAD\s*=\s*([\s\S]*?);\s*<\/script>/);
+      const mmParsedPayload = mmPayloadMatch ? JSON.parse(mmPayloadMatch[1]) : null;
+      const ovImgExpectedUri = `data:image/jpeg;base64,${uniqueOvJpg.toString('base64')}`;
+      const ovImgOccurrences = mmHtmlRaw.split(ovImgExpectedUri).length - 1;
+      const resolvedClientModAudio = s1Hooks.resolveClientMediaUri(
+        './stages/04_audio/output/module_01.wav',
+        { dataModel: { meta: { runId: mmRunId } } },
+        mmParsedPayload?.mediaUrisByRun
+      );
+      const inlinedModWavMeta =
+        typeof resolvedClientModAudio === 'string' && resolvedClientModAudio.startsWith('data:audio/wav;base64,')
+          ? parseWavMetadata(Buffer.from(resolvedClientModAudio.slice('data:audio/wav;base64,'.length), 'base64'))
+          : null;
       const mmStatus = getIcmPipelineStatus({ workspaceRoot: tmpMmWs, runId: mmRunId });
       const mmStatusFormatted = formatIcmPipelineStatus(mmStatus);
 
@@ -25954,11 +26856,17 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
           !mmSurfaceJsonRaw.includes('data:image/jpeg;base64,') &&
           !mmSurfaceJsonRaw.includes('data:audio/wav;base64,') &&
           mmHtmlRaw.includes('overview_hero_image') &&
-          mmHtmlRaw.includes('data:image/jpeg;base64,') &&
-          mmHtmlRaw.includes('data:audio/wav;base64,') &&
+          ovImgOccurrences === 1 &&
+          mmParsedPayload?.messages?.[2]?.updateDataModel?.value?.stage2?.overviewAudioUrl ===
+            './stages/04_audio/output/overview.wav' &&
+          mmParsedPayload?.messages?.[2]?.updateDataModel?.value?.stage2?.overviewAudioVoices ===
+            'Sulafat & Kore' &&
+          typeof resolvedClientModAudio === 'string' &&
+          resolvedClientModAudio.startsWith('data:audio/wav;base64,') &&
+          inlinedModWavMeta?.sampleRate === 12000 &&
           mmStatus.runs[0]?.totalTokens === 4500 &&
           mmStatusFormatted.includes('Downstream: 3,000'),
-        'generateA2uiSurface validates cleanly, keeps relative media paths in a2ui_surface.json, inlines base64 data URIs in a2ui.html, and getIcmPipelineStatus aggregates Stage 3/4 telemetry'
+        'generateA2uiSurface deduplicates base64 media into mediaUrisByRun (1x instead of 2x), downsamples & inlines >8 MB 24 kHz WAV tracks, keeps surface.dataModel lightweight, and binds voicesLabel'
       );
     } finally {
       fs.rmSync(tmpMultimodalRoot, { recursive: true, force: true });
@@ -26223,6 +27131,9 @@ if (
             outputDir: stage4Result.outputDir,
             manifestPath: stage4Result.manifestPath,
             trackCount: stage4Result.items.length,
+            ...(stage4Result.totalDurationSeconds !== undefined
+              ? { totalDurationSeconds: stage4Result.totalDurationSeconds }
+              : {}),
             totalTokens: stage4Result.usage.totalTokens,
             a2uiHtmlPath: stage4Result.a2uiHtmlPath,
             artifactHtmlPath: stage4Result.artifactHtmlPath,

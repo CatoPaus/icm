@@ -117,7 +117,7 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
 ## Phase 4: Adding Downstream Text or Multimodal Stages (`03_visuals`, `04_audio`, `03_...`)
 
 - **Built-In Zero-Patch Multimodal Stages (`prompts/03_visuals.md` & `prompts/04_audio.md`):**
-  - `runStage3Flow` (`npm run cli:stage3`), `runStage4Flow` (`npm run cli:stage4`), binary magic-byte MIME/extension detection (`detectMediaMimeAndExtension()` so JPEG/PNG/WebP/WAV/MP3 outputs always receive honest file extensions), `getIcmPipelineStatus()` downstream token aggregation, and automatic A2UI media hydration (`overview_hero_image` + `ModuleCarousel` `16:9` figures + `SpeechPlayer` studio `<audio>` controls, keeping compact relative `./stages/...` URLs in `a2ui_surface.json` while inlining portable `data:` URIs in `a2ui.html` and `a2ui_studio.html`) are **already pre-wired in [`src/index.ts`](../../src/index.ts)**! You do **not** need to read or patch `src/index.ts` to add Stage 3 illustrations or Stage 4 studio voiceover:
+  - `runStage3Flow` (`npm run cli:stage3`), `runStage4Flow` (`npm run cli:stage4` — both single-speaker and multi-speaker dialogue), binary magic-byte MIME/extension detection (`detectMediaMimeAndExtension()`), bilingual (`en`/`no`) prosody normalization (`prepareTextForStudioTts()`), `getIcmPipelineStatus()` downstream token aggregation, and automatic A2UI media hydration (`overview_hero_image` + `ModuleCarousel` `16:9` figures + `SpeechPlayer` studio `<audio>` controls, keeping compact relative `./stages/...` URLs in `a2ui_surface.json` and `surface.dataModel` while deduplicating portable `data:` URIs in `window.A2UI_SURFACE_PAYLOAD.mediaUrisByRun` with `24 kHz -> 12 kHz` FIR WAV downsampling for multi-module HTML portability while keeping lossless `24 kHz` `.wav` files untouched on disk) are **already pre-wired in [`src/index.ts`](../../src/index.ts)**! You do **not** need to read or patch `src/index.ts` to add Stage 3 illustrations or Stage 4 studio voiceover:
   1. **Stage 3 Visual Illustrations (`prompts/03_visuals.md` -> `gemini-nano-banana-2.1`):**
      - Create `prompts/03_visuals.md` with `output.format: image`, `aspectRatio: "16:9"` (or `"4:3"` / `"1:1"`), and `imageSize: "1K"` (or `"2K"`). Available Handlebars variables per slot (`overview` + `module_01..module_NN`): `{{slotId}}`, `{{slotKind}}`, `{{moduleNumber}}`, `{{slotTitle}}`, `{{courseTitle}}`, `{{subtitle}}`, `{{targetAudience}}`, `{{visualPrompt}}`, `{{narration}}`, `{{slideCues}}`, `{{actionItem}}`, `{{globalIdentity}}`, `{{workspaceContext}}`:
        ```yaml
@@ -139,12 +139,19 @@ Only start Phase 3 after Stage 1's `research_summary.md` artifact is verified on
        npm run cli:stage3 -- --artifact-dir "<appDataDir>\brain\<conversation-id>" <runId>
        ```
      - Refresh `a2ui_studio.html` in the HTML Auxiliary Pane via a 1-byte `write_file(Append: true, Content: "\n", ArtifactMetadata: ...)` call and output clickable links to `a2ui_studio.html`, `a2ui.html`, and `stages/03_visuals/output/visuals_manifest.json` before asking the next question.
-  2. **Stage 4 Studio Voiceover (`prompts/04_audio.md` -> `gemini-3.8-flash-tts`):**
-     - Create `prompts/04_audio.md` with `output.format: audio`, `voice: "Kore"` (or `"Puck"`, `"Charon"`, `"Aoede"`, `"Fenrir"`), `audioMimeType: "audio/wav"`, and `sampleRate: 24000`. `runStage4Flow` automatically extracts each slot's Markdown-stripped narration (`spokenScript` / `scriptBody` + `spokenNarration` / `narration`) as the spoken `content[0].text` and passes the rendered `04_audio.md` body as `speech_metadata.style` (`{{slotId}}`, `{{slotKind}}`, `{{moduleNumber}}`, `{{slotTitle}}`, `{{courseTitle}}`, `{{targetAudience}}`, `{{voiceGuide}}`, `{{globalIdentity}}`):
+  2. **Stage 4 Studio Voiceover (`prompts/04_audio.md` -> `gemini-3.8-flash-tts`, Single-Speaker or Multi-Speaker Dialogue):**
+     - Create `prompts/04_audio.md` with `output.format: audio`, `audioMimeType: "audio/wav"`, and `sampleRate: 24000`, choosing either **single-speaker** (`voice: "Kore"` / `"Sulafat"` / `"Puck"` / `"Charon"` / `"Aoede"` / `"Fenrir"`) or **multi-speaker dialogue** (`primarySpeaker`, `primaryVoice`, `primaryStyle`, `secondarySpeaker`, `secondaryVoice`, `secondaryStyle`). `runStage4Flow` automatically normalizes spoken prosody (`prepareTextForStudioTts`), segments explicit `dialogueTurns[]`, `Speaker: ...` prefixes, or alternating paragraphs in multi-speaker mode, records `durationSeconds` & `voicesUsed` in `audio_manifest.json` (bound to `SpeechPlayer.voicesLabel`), and passes the rendered `04_audio.md` body as `speech_metadata.style` (`{{slotId}}`, `{{slotKind}}`, `{{moduleNumber}}`, `{{slotTitle}}`, `{{courseTitle}}`, `{{targetAudience}}`, `{{voiceGuide}}`, `{{globalIdentity}}`):
        ```yaml
        ---
        model: gemini-3.8-flash-tts
        voice: "Kore"
+       # Optional multi-speaker dialogue mode (omit `voice` or pair with primary/secondary keys):
+       # primarySpeaker: "Lead"
+       # primaryVoice: "Sulafat"
+       # primaryStyle: "Warm, steady instructor tone"
+       # secondarySpeaker: "Specialist"
+       # secondaryVoice: "Kore"
+       # secondaryStyle: "Crisp, practical field specialist tone"
        audioMimeType: "audio/wav"
        sampleRate: 24000
        output:

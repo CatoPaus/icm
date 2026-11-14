@@ -49,6 +49,10 @@
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
           "description": "Optional http:, https:, data:, or relative URL for pre-rendered Stage 4 audio."
         },
+        "voicesLabel": {
+          "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
+          "description": "Optional label identifying the synthesized studio voice(s) (e.g. 'Kore' or 'Sulafat & Kore')."
+        },
         "weight": {
           "$ref": "#/$defs/Weight"
         }
