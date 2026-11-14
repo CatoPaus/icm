@@ -7184,6 +7184,10 @@ export function verifyOkfConcept(
   replacedMap: Record<string, string>;
   addedSources: OKFSource[];
   orphanClaimLines: string[];
+  vizOutputPath?: string;
+  a2uiOutputPath?: string;
+  artifactHtmlPath?: string;
+  artifactVizPath?: string;
 } {
   const workspacePath = path.resolve(options?.workspaceRoot || './workspace');
   const actor = normalizeVerifierActor(options?.by);
@@ -7319,6 +7323,10 @@ export function verifyOkfConcept(
   const trustTier = getOkfTrustTier(doc.frontmatter);
   const stale = isOkfStale(doc.frontmatter);
   let bundleConceptId: string | undefined;
+  let vizOutputPath: string | undefined;
+  let a2uiOutputPath: string | undefined;
+  let artifactHtmlPath: string | undefined;
+  let artifactVizPath: string | undefined;
 
   if (detectedRunId) {
     const synced = syncRunToBundle(workspacePath, detectedRunId, {
@@ -7374,11 +7382,17 @@ export function verifyOkfConcept(
     }
 
     try {
-      const bundleDir = path.join(workspacePath, 'bundle');
-      if (fs.existsSync(bundleDir)) {
-        generateBundleVisualization(bundleDir);
+      const a2uiRes = generateA2uiSurface(detectedRunId, { workspaceRoot: workspacePath });
+      a2uiOutputPath = a2uiRes.htmlOutputPath;
+      vizOutputPath = a2uiRes.bundleVizPath;
+      artifactHtmlPath = a2uiRes.artifactHtmlPath;
+      artifactVizPath = a2uiRes.artifactVizPath;
+      if (!vizOutputPath) {
+        const bundleDir = path.join(workspacePath, 'bundle');
+        if (fs.existsSync(bundleDir)) {
+          vizOutputPath = generateBundleVisualization(bundleDir).outputPath;
+        }
       }
-      generateA2uiSurface(detectedRunId, { workspaceRoot: workspacePath });
     } catch {
       // Ignore visualization/A2UI refresh errors during verification
     }
@@ -7399,7 +7413,7 @@ export function verifyOkfConcept(
         `verified by ${actor}, trust_tier: ${trustTier}`
       );
       try {
-        generateBundleVisualization(bundleRoot);
+        vizOutputPath = generateBundleVisualization(bundleRoot).outputPath;
       } catch {
         // Ignore visualization errors
       }
@@ -7430,6 +7444,10 @@ export function verifyOkfConcept(
     replacedMap,
     addedSources,
     orphanClaimLines,
+    ...(vizOutputPath ? { vizOutputPath } : {}),
+    ...(a2uiOutputPath ? { a2uiOutputPath } : {}),
+    ...(artifactHtmlPath ? { artifactHtmlPath } : {}),
+    ...(artifactVizPath ? { artifactVizPath } : {}),
   };
 }
 
@@ -10803,7 +10821,7 @@ export function getIcmPipelineStatus(options?: {
             type: String(fm.type || 'Concept'),
             status: String(fm.status || 'draft'),
             trustTier: getOkfTrustTier(fm),
-            verifiedBy: verifiedList[0]?.by,
+            verifiedBy: verifiedList[verifiedList.length - 1]?.by,
             isStale: isOkfStale(fm),
             sourcesCount: Array.isArray(fm.sources) ? fm.sources.length : 0,
           });
@@ -10883,7 +10901,7 @@ export function getIcmPipelineStatus(options?: {
           okfStatus = String(fm.status || 'draft');
           trustTier = getOkfTrustTier(fm);
           const verifiedEvents = normalizeVerified(fm);
-          verifiedBy = verifiedEvents[0]?.by;
+          verifiedBy = verifiedEvents[verifiedEvents.length - 1]?.by;
           staleFlag = isOkfStale(fm);
           const sources = Array.isArray(fm.sources) ? fm.sources : [];
           sourcesCount = sources.length;
@@ -23695,10 +23713,47 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       `specification/UPSTREAM_LOCK.json pins all three open pillars (ICM, OKF v0.2, A2UI v1.0) with 40-char commit SHAs`
     );
 
+    const tmpVerifyArtifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'icm-verify-artifacts-'));
+    const prevAgyArtifactDir = process.env.AGY_ARTIFACT_DIR;
+    let firstSignOff: ReturnType<typeof verifyOkfConcept>;
+    let secondSignOff: ReturnType<typeof verifyOkfConcept>;
+    try {
+      process.env.AGY_ARTIFACT_DIR = tmpVerifyArtifactDir;
+      firstSignOff = verifyOkfConcept(s2RunId, {
+        workspaceRoot: tmpStage1ReviewDir,
+        by: 'human:qa-lead',
+      });
+      secondSignOff = verifyOkfConcept(s2RunId, {
+        workspaceRoot: tmpStage1ReviewDir,
+        by: 'human:final-approver',
+      });
+      assert(
+        Boolean(secondSignOff.a2uiOutputPath) &&
+          Boolean(secondSignOff.vizOutputPath) &&
+          Boolean(secondSignOff.artifactHtmlPath) &&
+          fs.existsSync(secondSignOff.artifactHtmlPath!) &&
+          Boolean(secondSignOff.artifactVizPath) &&
+          fs.existsSync(secondSignOff.artifactVizPath!) &&
+          firstSignOff.verified.length === 1 &&
+          secondSignOff.verified.length === 2,
+        `verifyOkfConcept surfaces a2uiOutputPath, vizOutputPath, artifactHtmlPath, and artifactVizPath in a single call`
+      );
+    } finally {
+      if (prevAgyArtifactDir === undefined) {
+        delete process.env.AGY_ARTIFACT_DIR;
+      } else {
+        process.env.AGY_ARTIFACT_DIR = prevAgyArtifactDir;
+      }
+      fs.rmSync(tmpVerifyArtifactDir, { recursive: true, force: true });
+    }
+
     const populatedStatus = getIcmPipelineStatus({ workspaceRoot: tmpStage1ReviewDir });
     const populatedFormatted = formatIcmPipelineStatus(populatedStatus);
     const s1StatusEntry = populatedStatus.runs.find((r) => r.runId === s1UnverifiedRunId);
     const s2StatusEntry = populatedStatus.runs.find((r) => r.runId === s2RunId);
+    const s2BundleEntry = populatedStatus.bundle.concepts.find((c) =>
+      c.relativePath.includes('brannvern-modul-2')
+    );
 
     const tmpEmptyWs = fs.mkdtempSync(path.join(os.tmpdir(), 'icm-empty-status-'));
     let emptyStatusFormatted = '';
@@ -23723,10 +23778,13 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         s2StatusEntry?.stage1State === 'COMPLETE' &&
         s2StatusEntry?.stage2State === 'COMPLETE' &&
         s2StatusEntry?.a2uiState === 'READY' &&
+        s2StatusEntry?.verifiedBy === 'human:final-approver' &&
+        s2BundleEntry?.verifiedBy === 'human:final-approver' &&
+        populatedFormatted.includes('trust=human-reviewed (human:final-approver)') &&
         populatedFormatted.includes('[01_research: COMPLETE] ---> [OKF Gate: VERIFIED] ---> [02_script: PENDING] ---> [A2UI v1.0: INTERMISSION]') &&
         emptyStatusRunCount === 0 &&
         emptyStatusFormatted.includes('[01_research: PENDING] ---> [OKF Gate: PENDING] ---> [02_script: PENDING] ---> [A2UI v1.0: PENDING]'),
-      `getIcmPipelineStatus and formatIcmPipelineStatus accurately report OKF bundle state, Stage-1 Intermission runs, full Stage-2+A2UI runs, and empty workspaces`
+      `getIcmPipelineStatus and formatIcmPipelineStatus report the latest verifier sign-off, OKF bundle state, Stage-1 Intermission runs, full Stage-2+A2UI runs, and empty workspaces`
     );
 
     const tmpRefWs = fs.mkdtempSync(path.join(os.tmpdir(), 'icm-bundle-refs-'));
@@ -24152,13 +24210,19 @@ if (
         replaceSourceMap: normalizedReplaceSourceMap,
         addSources: addSourcesResolved,
       });
-      if (hasViz) {
+      if (hasViz && !verifyResult.vizOutputPath) {
         const vizResult = generateBundleVisualization('./workspace/bundle');
         console.log('OKF Bundle Visualization Generated:', vizResult);
       }
-      if (hasA2ui) {
-        const a2uiResult = generateA2uiSurface({ workspaceRoot: './workspace', runId: target });
+      if (hasA2ui && !verifyResult.a2uiOutputPath) {
+        const a2uiResult = generateA2uiSurface({
+          workspaceRoot: './workspace',
+          runId: target,
+          openBrowser: hasOpen,
+        });
         console.log('A2UI v1.0 Surface Generated:', a2uiResult.htmlOutputPath);
+      } else if (hasOpen && verifyResult.a2uiOutputPath) {
+        openFileInSystemBrowser(verifyResult.a2uiOutputPath);
       }
       console.log('OKF Verification Complete:', verifyResult);
       return;
