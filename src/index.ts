@@ -3362,7 +3362,9 @@ export function inspectSourceDomainProvenance(source: {
     ? rawTitle.slice(0, rawTitle.length - viaAnnotMatch[0].length).trim()
     : rawTitle;
 
-  const sepMatch = titleWithoutVia.match(/\s+(?:([|])|[–—]|-\s)\s*([^–—|]{2,60})\s*$/);
+  const sepMatch = titleWithoutVia.match(
+    /\s+(?:([|])|[–—]|-\s)\s*([^\s–—|](?:(?!\s+-\s)[^–—|]){1,59})\s*$/
+  );
   if (!sepMatch) {
     return { hostname, isDirectFileAsset, domainMismatch: false };
   }
@@ -3641,7 +3643,7 @@ export function inspectSourceDomainProvenance(source: {
   // Hardened Publisher-First title layout (`"<True Host Publisher> – <Article Title>"`)
   if (!matchesHost && !viaAnnotMatch && !idEncodesPub && !hasParenAcronym) {
     const rawPrefix = titleWithoutVia.slice(0, sepMatch.index ?? 0).trim();
-    if (rawPrefix && !/\s+(?:[|–—]|-\s)\s+/.test(rawPrefix)) {
+    if (rawPrefix && !/\s+(?:[|–—]\s*|-\s+)/.test(rawPrefix)) {
       const leadOrg = rawPrefix.split(/\s*[/:\u2215]\s*/)[0].trim();
       const leadWords = leadOrg.split(/\s+/).filter(Boolean);
       const leadNorm = normAscii(leadOrg);
@@ -14056,7 +14058,7 @@ const A2UI_STUDIO_JS = `
     const titleWithoutVia = viaAnnotMatch
       ? rawTitle.slice(0, rawTitle.length - viaAnnotMatch[0].length).trim()
       : rawTitle;
-    const sepMatch = titleWithoutVia.match(/\\s+(?:([|])|[–—]|-\\s)\\s*([^–—|]{2,60})\\s*$/);
+    const sepMatch = titleWithoutVia.match(/\\s+(?:([|])|[–—]|-\\s)\\s*([^\\s–—|](?:(?!\\s+-\\s)[^–—|]){1,59})\\s*$/);
     if (!sepMatch) {
       return { hostname: hostname, isDirectFileAsset: isDirectFileAsset, claimedPublisher: "", domainMismatch: false };
     }
@@ -14281,7 +14283,7 @@ const A2UI_STUDIO_JS = `
     });
     if (!matchesHost && !viaAnnotMatch && !idEncodesPub && !hasParenAcronym) {
       const rawPrefix = titleWithoutVia.slice(0, sepMatch.index || 0).trim();
-      if (rawPrefix && !/\\s+(?:[|–—]|-\\s)\\s+/.test(rawPrefix)) {
+      if (rawPrefix && !/\\s+(?:[|–—]\\s*|-\\s+)/.test(rawPrefix)) {
         const leadOrg = rawPrefix.split(/\\s*[/:\u2215]\\s*/)[0].trim();
         const leadWords = leadOrg.split(/\\s+/).filter(Boolean);
         const leadNorm = normClientAscii(leadOrg);
@@ -23190,6 +23192,31 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
       title: 'Spaceflight Act – Federal Aviation Administration',
       url: 'https://www.spaceflight.com/uploads/commercial-spaceflight-act.pdf',
     });
+    const provMultiSepEnDashHyphen = inspectSourceDomainProvenance({
+      id: 'starship-catch-analysis',
+      title: 'Starship Flight 5 – Booster Catch Telemetry - SpaceX',
+      resource: 'https://www.aerospaceblog.org/posts/starship-flight-5/',
+    });
+    const provMultiSepDoubleHyphen = inspectSourceDomainProvenance({
+      id: 'aktuelt-brannvern',
+      title: 'Brannvern i barnehagen - dette bør ansatte vite - Norsk brannvernforening',
+      resource: 'https://www.abcbrannvern.no/aktuelt-brannvern-i-barnehagen/',
+    });
+    const provMultiSepHyphenatedOrgTrueHost = inspectSourceDomainProvenance({
+      id: 'rolls-royce-ultrafan',
+      title: 'UltraFan Engine Architecture | Testbed 80 - Rolls-Royce',
+      resource: 'https://www.rolls-royce.com/innovation/ultrafan.aspx',
+    });
+    const clientProvMultiSepEnDashHyphen = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'starship-catch-analysis',
+      title: 'Starship Flight 5 – Booster Catch Telemetry - SpaceX',
+      url: 'https://www.aerospaceblog.org/posts/starship-flight-5/',
+    });
+    const clientProvMultiSepDoubleHyphen = s1Hooks.inspectClientSourceDomainProvenance({
+      id: 'aktuelt-brannvern',
+      title: 'Brannvern i barnehagen – dette bør ansatte vite - Norsk brannvernforening',
+      url: 'https://www.abcbrannvern.no/aktuelt-brannvern-i-barnehagen/',
+    });
     assert(
       provMirrorPdf.domainMismatch === true &&
         provMirrorPdf.hostname === 'dyrebo.barnehage.no' &&
@@ -23222,6 +23249,12 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         provAdvPrepositionMirror.claimedPublisher === 'U.S. Department of Education' &&
         provAdvStatuteActMirror.domainMismatch === true &&
         provAdvStatuteActMirror.claimedPublisher === 'Federal Aviation Administration' &&
+        provMultiSepEnDashHyphen.domainMismatch === true &&
+        provMultiSepEnDashHyphen.claimedPublisher === 'SpaceX' &&
+        provMultiSepDoubleHyphen.domainMismatch === true &&
+        provMultiSepDoubleHyphen.claimedPublisher === 'Norsk brannvernforening' &&
+        provMultiSepHyphenatedOrgTrueHost.domainMismatch === false &&
+        provMultiSepHyphenatedOrgTrueHost.claimedPublisher === 'Rolls-Royce' &&
         clientProvMirror.domainMismatch === true &&
         clientProvMirror.claimedPublisher === 'Lovdata' &&
         clientProvUdir.domainMismatch === false &&
@@ -23233,8 +23266,12 @@ export async function runIcmSelfTests(): Promise<{ passed: number }> {
         clientProvAdvRootMirrorSinglePub.domainMismatch === true &&
         clientProvAdvRootMirrorSinglePub.claimedPublisher === 'Lovdata' &&
         clientProvAdvStatuteActMirror.domainMismatch === true &&
-        clientProvAdvStatuteActMirror.claimedPublisher === 'Federal Aviation Administration',
-      `inspectSourceDomainProvenance and inspectClientSourceDomainProvenance flag third-party mirrors masquerading as authorities while allowing true domains, acronyms, compound abbreviations, syllabic initialisms, Publisher-First titles, and umbrella portals`
+        clientProvAdvStatuteActMirror.claimedPublisher === 'Federal Aviation Administration' &&
+        clientProvMultiSepEnDashHyphen.domainMismatch === true &&
+        clientProvMultiSepEnDashHyphen.claimedPublisher === 'SpaceX' &&
+        clientProvMultiSepDoubleHyphen.domainMismatch === true &&
+        clientProvMultiSepDoubleHyphen.claimedPublisher === 'Norsk brannvernforening',
+      `inspectSourceDomainProvenance and inspectClientSourceDomainProvenance flag third-party mirrors masquerading as authorities while allowing true domains, acronyms, compound abbreviations, syllabic initialisms, Publisher-First titles, multi-separator titles, and umbrella portals`
     );
 
     // Verify `cleanGroundingLinks()` annotates `(via <hostname>)` on masquerading mirror titles
